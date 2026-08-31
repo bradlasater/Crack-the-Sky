@@ -4,39 +4,77 @@
 # does NOT expand variables in values. Before installing, replace the literal
 # path /home/brad-lasater with your actual home directory, e.g.:
 #     sed -i "s|/home/brad-lasater|$HOME|g" deploy/crontab
-# (the username in the example path is a placeholder for the headless box user).
+# (the username in the example path is a placeholder for the headless box user.)
+#
+# Priority order, because it explains the cadences below:
+#   option_snapshots is the ONLY dataset here that cannot be backfilled. IV,
+#   greeks, open interest and the underlying price exist solely at the moment
+#   they are swept. Trades and bars can be re-pulled from S3 flat files years
+#   later, so they run at whatever cadence is left over.
 #
 # Logs append to /data/massive/logs/cron.log (DATA_ROOT/logs). Structured
 # per-run JSONL logs live under /data/massive/logs/<job>/dt=<date>/.
 #
-# flatfile_pull / reconcile default --date to the previous trading day, so the
-# Tue-Sat 11:05 / 11:30 runs always target yesterday's session.
+# flatfile_pull / reconcile / coverage_audit default --date to the previous
+# trading day, so the Tue-Sat runs always target yesterday's session.
 #
 # underlying_bars runs T-1 only: same-day SPY minute aggs are not entitled on
 # the Options Developer tier (403), so the 08:05 Tue-Sat run pulls yesterday.
-#
-# CAVEAT: after the first live snapshot_sweep of I:SPX, verify SPXW tickers
-# appear; SPXW contract coverage flows through contracts_sync +
-# eod_dayaggs_rest regardless.
 TZ=America/New_York
 MAILTO=""
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+REPO=/home/brad-lasater/data_ingest_infra
+DATA_ROOT=/data/massive
+PY=/home/brad-lasater/data_ingest_infra/venv/bin/python
+LOG=/data/massive/logs/cron.log
 
 # m h dom mon dow  command
-00 08 * * 1-5    cd /home/brad-lasater/data_ingest_infra && flock -n /tmp/massive-contracts_sync.lock /home/brad-lasater/data_ingest_infra/venv/bin/python -m ingest.jobs.contracts_sync >> /data/massive/logs/cron.log 2>&1
-30 16 * * 1-5    cd /home/brad-lasater/data_ingest_infra && flock -n /tmp/massive-contracts_sync.lock /home/brad-lasater/data_ingest_infra/venv/bin/python -m ingest.jobs.contracts_sync >> /data/massive/logs/cron.log 2>&1
-00 08 * * 1-5    cd /home/brad-lasater/data_ingest_infra && flock -n /tmp/massive-dividends_sync.lock /home/brad-lasater/data_ingest_infra/venv/bin/python -m ingest.jobs.dividends_sync >> /data/massive/logs/cron.log 2>&1
-25 09 * * 1-5    cd /home/brad-lasater/data_ingest_infra && flock -n /tmp/massive-ws_minute_bars.lock /home/brad-lasater/data_ingest_infra/venv/bin/python -m ingest.jobs.ws_minute_bars >> /data/massive/logs/cron.log 2>&1
-30-55/5 9 * * 1-5    cd /home/brad-lasater/data_ingest_infra && flock -n /tmp/massive-snapshot_sweep.lock /home/brad-lasater/data_ingest_infra/venv/bin/python -m ingest.jobs.snapshot_sweep >> /data/massive/logs/cron.log 2>&1
-*/5 10-15 * * 1-5    cd /home/brad-lasater/data_ingest_infra && flock -n /tmp/massive-snapshot_sweep.lock /home/brad-lasater/data_ingest_infra/venv/bin/python -m ingest.jobs.snapshot_sweep >> /data/massive/logs/cron.log 2>&1
-0-30/5 16 * * 1-5    cd /home/brad-lasater/data_ingest_infra && flock -n /tmp/massive-snapshot_sweep.lock /home/brad-lasater/data_ingest_infra/venv/bin/python -m ingest.jobs.snapshot_sweep >> /data/massive/logs/cron.log 2>&1
-05 08 * * 2-6    cd /home/brad-lasater/data_ingest_infra && flock -n /tmp/massive-underlying_bars.lock /home/brad-lasater/data_ingest_infra/venv/bin/python -m ingest.jobs.underlying_bars --prev-trading-day >> /data/massive/logs/cron.log 2>&1
-32-58/2 9 * * 1-5    cd /home/brad-lasater/data_ingest_infra && flock -n /tmp/massive-trades_watchlist.lock /home/brad-lasater/data_ingest_infra/venv/bin/python -m ingest.jobs.trades_watchlist >> /data/massive/logs/cron.log 2>&1
-*/2 10-15 * * 1-5    cd /home/brad-lasater/data_ingest_infra && flock -n /tmp/massive-trades_watchlist.lock /home/brad-lasater/data_ingest_infra/venv/bin/python -m ingest.jobs.trades_watchlist >> /data/massive/logs/cron.log 2>&1
-0-30/2 16 * * 1-5    cd /home/brad-lasater/data_ingest_infra && flock -n /tmp/massive-trades_watchlist.lock /home/brad-lasater/data_ingest_infra/venv/bin/python -m ingest.jobs.trades_watchlist >> /data/massive/logs/cron.log 2>&1
-35 16 * * 1-5    cd /home/brad-lasater/data_ingest_infra && flock -n /tmp/massive-snapshot_sweep.lock /home/brad-lasater/data_ingest_infra/venv/bin/python -m ingest.jobs.snapshot_sweep --eod >> /data/massive/logs/cron.log 2>&1
-45 16 * * 1-5    cd /home/brad-lasater/data_ingest_infra && flock -n /tmp/massive-eod_dayaggs_rest.lock /home/brad-lasater/data_ingest_infra/venv/bin/python -m ingest.jobs.eod_dayaggs_rest >> /data/massive/logs/cron.log 2>&1
-05 11 * * 2-6    cd /home/brad-lasater/data_ingest_infra && flock -n /tmp/massive-flatfile_pull.lock /home/brad-lasater/data_ingest_infra/venv/bin/python -m ingest.jobs.flatfile_pull >> /data/massive/logs/cron.log 2>&1
-30 11 * * 2-6    cd /home/brad-lasater/data_ingest_infra && flock -n /tmp/massive-reconcile.lock /home/brad-lasater/data_ingest_infra/venv/bin/python -m ingest.jobs.reconcile >> /data/massive/logs/cron.log 2>&1
-00 07 * * 0    cd /home/brad-lasater/data_ingest_infra && flock -n /tmp/massive-holidays_sync.lock /home/brad-lasater/data_ingest_infra/venv/bin/python -m ingest.jobs.holidays_sync >> /data/massive/logs/cron.log 2>&1
-00 09 * * 6    cd /home/brad-lasater/data_ingest_infra && flock -n /tmp/massive-contracts_sync.lock /home/brad-lasater/data_ingest_infra/venv/bin/python -m ingest.jobs.contracts_sync --expired >> /data/massive/logs/cron.log 2>&1
+
+# --- reference data -------------------------------------------------------
+00 08 * * 1-5    cd $REPO && flock -n /tmp/massive-contracts_sync.lock $PY -m ingest.jobs.contracts_sync >> $LOG 2>&1
+30 16 * * 1-5    cd $REPO && flock -n /tmp/massive-contracts_sync.lock $PY -m ingest.jobs.contracts_sync >> $LOG 2>&1
+00 08 * * 1-5    cd $REPO && flock -n /tmp/massive-dividends_sync.lock $PY -m ingest.jobs.dividends_sync >> $LOG 2>&1
+00 09 * * 6      cd $REPO && flock -n /tmp/massive-contracts_sync.lock $PY -m ingest.jobs.contracts_sync --expired >> $LOG 2>&1
+00 07 * * 0      cd $REPO && flock -n /tmp/massive-holidays_sync.lock $PY -m ingest.jobs.holidays_sync >> $LOG 2>&1
+
+# --- snapshots: 1/minute through the session (the irreplaceable dataset) ---
+# A sweep of both chains takes ~13s wall (SPY and I:SPX run concurrently), so
+# a 60s slot is comfortable; flock -n drops any run that would overlap.
+# 09:05 pre-open captures the prior session's settled open interest.
+05 09 * * 1-5    cd $REPO && flock -n /tmp/massive-snapshot_sweep.lock $PY -m ingest.jobs.snapshot_sweep >> $LOG 2>&1
+30-59 9 * * 1-5  cd $REPO && flock -n /tmp/massive-snapshot_sweep.lock $PY -m ingest.jobs.snapshot_sweep >> $LOG 2>&1
+* 10-15 * * 1-5  cd $REPO && flock -n /tmp/massive-snapshot_sweep.lock $PY -m ingest.jobs.snapshot_sweep >> $LOG 2>&1
+0-30 16 * * 1-5  cd $REPO && flock -n /tmp/massive-snapshot_sweep.lock $PY -m ingest.jobs.snapshot_sweep >> $LOG 2>&1
+35 16 * * 1-5    cd $REPO && flock -n /tmp/massive-snapshot_sweep.lock $PY -m ingest.jobs.snapshot_sweep --eod >> $LOG 2>&1
+
+# --- websocket minute bars (same-day tape) --------------------------------
+25 09 * * 1-5    cd $REPO && flock -n /tmp/massive-ws_minute_bars.lock $PY -m ingest.jobs.ws_minute_bars >> $LOG 2>&1
+
+# --- same-day trades: every 5 min ------------------------------------------
+# ~8,000 tickers once SPX is correctly banded; polled through a thread pool
+# (TRADES_CONCURRENCY, default 8) bounded by the shared token bucket. Cold
+# start is the slow run; later runs only fetch past each ticker's cursor.
+30-55/5 9 * * 1-5  cd $REPO && flock -n /tmp/massive-trades_watchlist.lock $PY -m ingest.jobs.trades_watchlist >> $LOG 2>&1
+*/5 10-15 * * 1-5  cd $REPO && flock -n /tmp/massive-trades_watchlist.lock $PY -m ingest.jobs.trades_watchlist >> $LOG 2>&1
+0-30/5 16 * * 1-5  cd $REPO && flock -n /tmp/massive-trades_watchlist.lock $PY -m ingest.jobs.trades_watchlist >> $LOG 2>&1
+
+# --- underlying ------------------------------------------------------------
+05 08 * * 2-6    cd $REPO && flock -n /tmp/massive-underlying_bars.lock $PY -m ingest.jobs.underlying_bars --prev-trading-day >> $LOG 2>&1
+10 08 * * 2-6    cd $REPO && flock -n /tmp/massive-grouped_daily.lock $PY -m ingest.jobs.grouped_daily >> $LOG 2>&1
+
+# --- T+1 flat files: the authoritative record ------------------------------
+05 11 * * 2-6    cd $REPO && flock -n /tmp/massive-flatfile_pull.lock $PY -m ingest.jobs.flatfile_pull >> $LOG 2>&1
+30 11 * * 2-6    cd $REPO && flock -n /tmp/massive-reconcile.lock $PY -m ingest.jobs.reconcile >> $LOG 2>&1
+
+# --- did we actually capture everything? -----------------------------------
+# Runs after flatfile_pull (11:05) and reconcile (11:30) have settled T-1.
+# Exits non-zero on any gap, which pings Healthchecks /fail.
+30 12 * * 2-6    cd $REPO && flock -n /tmp/massive-coverage_audit.lock $PY -m ingest.jobs.coverage_audit >> $LOG 2>&1
+
+# --- retention: prune raw payloads reconstructible from flat files ---------
+15 03 1 * *      cd $REPO && flock -n /tmp/massive-prune.lock bash scripts/prune_raw.sh --apply >> $LOG 2>&1
+
+# NOTE: eod_dayaggs_rest is deliberately NOT scheduled. It made 42,162
+# sequential REST calls (36 min) to produce ~16,700 rows that day_aggs_v1
+# delivers in one 4 MB file the next morning. Kept as a manual tool:
+#   venv/bin/python -m ingest.jobs.eod_dayaggs_rest --date YYYY-MM-DD --watchlist

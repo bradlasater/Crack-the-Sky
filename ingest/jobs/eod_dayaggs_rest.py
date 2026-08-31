@@ -23,7 +23,7 @@ from ingest.common.logging_utils import JsonlLogger
 from ingest.jobs import (
     DAY_MS,
     compute_watchlist,
-    latest_clean_records,
+    latest_contracts,
     run_date_from_args,
     strip_flag,
 )
@@ -73,7 +73,7 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger, watchlist: bool):
     if watchlist:
         contracts = compute_watchlist(settings, run_date, logger=logger)
     else:
-        contracts = latest_clean_records(settings, "contracts", run_date)
+        contracts = latest_contracts(settings, run_date)
         if not contracts:
             raise RuntimeError(
                 "no clean 'contracts' partition found at or before "

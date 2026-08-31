@@ -19,7 +19,6 @@ yesterday); pass ``--date`` explicitly to reconcile an older day.
 from __future__ import annotations
 
 import gzip
-import json
 import shutil
 import sys
 from datetime import date
@@ -30,9 +29,9 @@ from ingest.common import landing, market_gate
 from ingest.common.cli import run_job
 from ingest.common.config import Settings
 from ingest.common.logging_utils import JsonlLogger
+from ingest.jobs.flatfile_pull import previous_trading_day
 from ingest.jobs.ws_minute_bars import DATASET as WS_RAW_DATASET
 from ingest.jobs.ws_minute_bars import parse_events
-from ingest.jobs.flatfile_pull import previous_trading_day
 
 JOB = "reconcile"
 CLEAN_DATASET = "option_minute_bars"

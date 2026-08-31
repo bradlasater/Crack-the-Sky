@@ -62,7 +62,7 @@ class Settings:
             object.__setattr__(self, "log_root", Path(self.data_root) / "logs")
 
     @classmethod
-    def load(cls, env_path: str | os.PathLike[str] | None = None) -> "Settings":
+    def load(cls, env_path: str | os.PathLike[str] | None = None) -> Settings:
         """Build Settings from .env then environment overrides.
 
         Args:
@@ -90,6 +90,18 @@ class Settings:
 
         data_root = Path(get("DATA_ROOT", DEFAULT_DATA_ROOT) or DEFAULT_DATA_ROOT)
         log_root_raw = get("LOG_ROOT")
+        tz_name = get("TZ_NAME", DEFAULT_TZ) or DEFAULT_TZ
+        log_root = Path(log_root_raw) if log_root_raw else data_root / "logs"
+
+        # Several helpers (landing._data_root, logging_utils._default_log_root,
+        # market_gate) resolve these from os.environ so their signatures work
+        # bare. Values that came from the .env file are not in the process
+        # environment yet, so export them here -- otherwise a non-default
+        # DATA_ROOT in .env silently splits raw/clean data from the logs.
+        os.environ.setdefault("DATA_ROOT", str(data_root))
+        os.environ.setdefault("LOG_ROOT", str(log_root))
+        os.environ.setdefault("TZ_NAME", tz_name)
+
         return cls(
             massive_api_key=api_key,
             massive_api_base=get("MASSIVE_API_BASE", DEFAULT_API_BASE) or DEFAULT_API_BASE,
@@ -98,8 +110,8 @@ class Settings:
             massive_s3_endpoint=get("MASSIVE_S3_ENDPOINT", DEFAULT_S3_ENDPOINT) or DEFAULT_S3_ENDPOINT,
             massive_s3_bucket=get("MASSIVE_S3_BUCKET", DEFAULT_S3_BUCKET) or DEFAULT_S3_BUCKET,
             data_root=data_root,
-            log_root=Path(log_root_raw) if log_root_raw else data_root / "logs",
-            tz_name=get("TZ_NAME", DEFAULT_TZ) or DEFAULT_TZ,
+            log_root=log_root,
+            tz_name=tz_name,
             healthchecks_ping_url=get("HEALTHCHECKS_PING_URL") or None,
             ws_delayed_url=get("WS_DELAYED_URL", DEFAULT_WS_DELAYED_URL) or DEFAULT_WS_DELAYED_URL,
         )

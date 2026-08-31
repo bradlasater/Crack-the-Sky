@@ -6,7 +6,9 @@ HEADs ``us_options_opra/{ds}/{YYYY}/{MM}/{YYYY-MM-DD}.csv.gz`` on bucket
 the file is not yet published (404) and it is before 12:00 ET, the job sleeps
 300s and retries. The object is downloaded to
 ``raw/flatfiles/{ds}/dt={date}/``, gzip-validated, then stream-filtered to
-tickers starting ``O:SPY``/``O:SPX`` (SPXW included by prefix) and written as
+tickers whose OPRA *root* is SPY, SPX or SPXW (a plain prefix match also
+swept in unrelated underlyings -- SPXL/SPXS/SPYG and friends are leveraged
+ETFs, not SPY or SPX) and written as
 clean parquet (``option_trades`` / ``option_minute_bars`` / ``option_day_bars``
 with ``src='flatfile'``). A manifest entry is appended to
 ``_meta/flatfile_manifest.json``.
@@ -26,7 +28,8 @@ import hashlib
 import json
 import sys
 import time
-from datetime import date, datetime, time as dtime
+from datetime import date
+from datetime import time as dtime
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +41,7 @@ from ingest.common import landing, market_gate
 from ingest.common.cli import run_job
 from ingest.common.config import Settings
 from ingest.common.logging_utils import JsonlLogger
+from ingest.jobs import OPTION_ROOTS, keep_ticker  # noqa: F401  (shared root filter)
 
 JOB = "flatfile_pull"
 DATASETS = ("trades_v1", "minute_aggs_v1", "day_aggs_v1")
@@ -46,7 +50,7 @@ CLEAN_DATASET = {
     "minute_aggs_v1": "option_minute_bars",
     "day_aggs_v1": "option_day_bars",
 }
-TICKER_PREFIXES = ("O:SPY", "O:SPX")  # prefix match covers O:SPXW too
+
 RETRY_SLEEP_S = 300
 RETRY_UNTIL_ET = dtime(12, 0)  # T-1 file is normally published ~11:00 ET
 CHUNK = 1024 * 1024
@@ -103,11 +107,39 @@ def _is_auth_error(exc: ClientError) -> bool:
     return code in _AUTH_ERROR_CODES or status == 403
 
 
-def _head_with_retry(s3: Any, bucket: str, key: str, logger: JsonlLogger) -> bool:
-    """HEAD the object, retrying 404s every 300s until 12:00 ET.
+def _credentials_work(s3: Any, bucket: str) -> bool:
+    """True when the current credentials can still talk to the bucket.
 
-    Returns True when the object exists, False when the retry window closed.
-    Auth errors exit 3.
+    A 403 on ``head_object`` is ambiguous: bad credentials, a dataset above
+    the plan tier (``quotes_v1``), or a date outside the entitled history
+    window -- the vendor returns 403 rather than 404 for 2013 dates even
+    though ``trades_v1`` listings start at 2014. Treating all three as "your
+    keys are broken" made a backfill exit 3 on its first too-old date. A
+    successful list proves the keys are fine and the 403 was about the object.
+    """
+    try:
+        s3.list_objects_v2(Bucket=bucket, MaxKeys=1)
+        return True
+    except Exception:  # noqa: BLE001 - any failure here means assume auth broke
+        return False
+
+
+def _head_with_retry(
+    s3: Any,
+    bucket: str,
+    key: str,
+    logger: JsonlLogger,
+    wait_for_publish: bool = True,
+) -> bool:
+    """HEAD the object; returns True when it exists. Auth errors exit 3.
+
+    When ``wait_for_publish`` (the T-1 cron case) a 404 is retried every 300s
+    until 12:00 ET, because the vendor publishes yesterday's file around
+    11:00. For any older date that retry is wrong: a 404 there means the file
+    genuinely does not exist, and sleeping burns the whole window three times
+    over per missing date, which is what made backfilling unusable. Callers
+    pass ``wait_for_publish=False`` for historical dates so a 404 is an
+    immediate, logged miss.
     """
     while True:
         try:
@@ -115,10 +147,18 @@ def _head_with_retry(s3: Any, bucket: str, key: str, logger: JsonlLogger) -> boo
             return True
         except ClientError as exc:
             if _is_auth_error(exc):
-                _creds_fail(f"{exc.response.get('Error', {}).get('Code')}: {exc}")
+                if not _credentials_work(s3, bucket):
+                    _creds_fail(f"{exc.response.get('Error', {}).get('Code')}: {exc}")
+                # Keys are fine: this object is out of entitlement (dataset
+                # above the tier, or a date before the history window).
+                logger.log("flatfile_not_entitled", key=key)
+                return False
             code = str(exc.response.get("Error", {}).get("Code", ""))
             if code not in ("404", "NoSuchKey", "NotFound"):
                 raise
+            if not wait_for_publish:
+                logger.log("flatfile_absent", key=key)
+                return False
             now = market_gate.now_et()
             if now.time() >= RETRY_UNTIL_ET:
                 logger.log("flatfile_not_ready_giving_up", key=key, now=now.isoformat())
@@ -214,7 +254,7 @@ def _filter_file(
     """Stream-filter a csv.gz to SPY/SPX records; returns (records, rows_in, rows_kept).
 
     ``rows_in`` counts every data row read; ``rows_kept`` counts rows matching
-    the ticker prefixes (``--limit`` only caps how many records are *returned*).
+    the ticker roots (``--limit`` only caps how many records are *returned*).
     """
     records: list[dict[str, Any]] = []
     rows_in = 0
@@ -224,7 +264,7 @@ def _filter_file(
         for row in reader:
             rows_in += 1
             ticker = row.get("ticker") or ""
-            if ticker.startswith(TICKER_PREFIXES):
+            if keep_ticker(ticker):
                 rows_kept += 1
                 if limit is None or rows_kept <= limit:
                     records.append(map_row(dataset, row))
@@ -252,7 +292,10 @@ def _pull_dataset(s3: Any, settings: Settings, dataset: str, d: date,
     bucket = settings.massive_s3_bucket
     key = s3_key(dataset, d)
     logger.log("flatfile_head", dataset=dataset, key=key)
-    if not _head_with_retry(s3, bucket, key, logger):
+    # Only wait for publication when this is the file the vendor is about to
+    # publish (yesterday's). Older dates resolve a 404 immediately.
+    wait_for_publish = d >= previous_trading_day(market_gate.today_et())
+    if not _head_with_retry(s3, bucket, key, logger, wait_for_publish):
         return None
 
     dest = (Path(settings.data_root) / "raw" / "flatfiles" / dataset

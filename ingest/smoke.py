@@ -9,8 +9,8 @@ are a known deploy-time state.
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from datetime import timedelta
-from typing import Any, Callable
 
 from ingest import schemas
 from ingest.common import market_gate

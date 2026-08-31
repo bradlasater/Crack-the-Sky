@@ -330,7 +330,7 @@
     <dt>Universe</dt>
     <dd>SPY and SPX option chains. SPXW weeklies list under <code>underlying_ticker=SPX</code> (querying SPXW returns 0 rows).</dd>
     <dt>Entitlements</dt>
-    <dd>Quotes 403. Snapshot greeks/IV empty. SPX index level not entitled. Same-day SPY equity minute aggs 403 — use T-1 plus snapshot <code>underlying_price</code>.</dd>
+    <dd>Quotes 403 (REST <em>and</em> the <code>quotes_v1</code> flat file). Snapshot greeks/IV are <strong>populated</strong> — 12,725 of 13,514 SPY rows carried non-null <code>implied_volatility</code> on 2026-08-31; nulls are unpriceable contracts, not a tier limit. SPX index level not entitled anywhere, so it is recovered from put-call parity on the chain (<code>clean/forwards</code>). Same-day SPY equity minute aggs 403 — use T-1 plus snapshot <code>underlying_price</code>. Verify with <code>python -m ingest.entitlements</code>.</dd>
     <dt>WS subscriptions</dt>
     <dd>Explicit <code>AM.O:&lt;ticker&gt;</code> in ≤3,000-ticker batches. One delayed-options connection (plan slot).</dd>
     <dt>Timestamps</dt>
@@ -420,7 +420,7 @@
         <td class="job">snapshot_sweep<br><span class="tag rest">rest</span></td>
         <td class="when">every 5 min, 09:30–16:30</td>
         <td>Mon–Fri</td>
-        <td>Full-chain snapshots for SPY and I:SPX. Clean <code>option_snapshots</code> (greeks/IV empty on this tier). Intraday SPY price lives here.</td>
+        <td>Full-chain snapshots for SPY and I:SPX, swept <strong>every minute</strong> — the only dataset here that cannot be backfilled. Clean <code>option_snapshots</code> carries IV, greeks and open interest; also emits <code>clean/forwards</code> (per-expiry put-call-parity forward). Intraday SPY price lives here.</td>
       </tr>
       <tr>
         <td class="job">trades_watchlist<br><span class="tag rest">rest</span></td>

@@ -45,7 +45,8 @@ import random
 import sys
 import threading
 import time
-from datetime import date, datetime, time as dtime, timedelta
+from datetime import date, datetime, timedelta
+from datetime import time as dtime
 from pathlib import Path
 from typing import Any
 
@@ -55,7 +56,7 @@ from ingest.common import market_gate
 from ingest.common.cli import build_parser
 from ingest.common.config import Settings
 from ingest.common.logging_utils import JsonlLogger, get_run_logger
-from ingest.jobs import latest_clean_records, latest_spy_price, parse_underlyings
+from ingest.jobs import latest_contracts, latest_spy_price, parse_underlyings
 
 JOB = "ws_minute_bars"
 DATASET = "option_minute_bars_ws"
@@ -92,7 +93,7 @@ def contract_universe(
     clean partition exists at or before ``run_date`` — without the reference
     universe we cannot build explicit subscriptions.
     """
-    contracts = latest_clean_records(settings, "contracts", run_date)
+    contracts = latest_contracts(settings, run_date)
     if not contracts:
         raise RuntimeError(
             "no clean 'contracts' partition found at or before "
@@ -252,7 +253,8 @@ class HourlyJsonlWriter(threading.Thread):
     def _open(self, hour: int) -> None:
         ts_ms = int(time.time() * 1000)
         self._path = self._out_dir() / f"{JOB}-{ts_ms}.jsonl"
-        self._fh = open(self._path, "a", encoding="utf-8")
+        # Held open across the capture hour; closed (and gzipped) by _close().
+        self._fh = open(self._path, "a", encoding="utf-8")  # noqa: SIM115
         self._hour = hour
         self.logger.log("ws_writer_open", path=str(self._path))
 
@@ -373,7 +375,7 @@ async def _read_loop(
             raw = await asyncio.wait_for(
                 ws.recv(), timeout=min(HEARTBEAT_TIMEOUT_S, remaining + 1)
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             if market_gate.now_et() >= deadline:
                 return  # quiet feed at window close, not a heartbeat loss
             if stats["acked"]:
@@ -429,7 +431,7 @@ async def _capture(
                 await _read_loop(ws, writer, logger, deadline, stats)
         except _FatalAuth:
             raise
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.log("ws_heartbeat_timeout", timeout_s=HEARTBEAT_TIMEOUT_S)
         except asyncio.CancelledError:
             raise

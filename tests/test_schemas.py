@@ -25,12 +25,14 @@ DATASETS = [
     "option_day_bars",
     "option_trades",
     "underlying_minute_bars",
+    "underlying_day_bars",
+    "forwards",
     "dividends",
     "splits",
 ]
 
 
-def check_records(dataset: str, records: list[dict[str, Any]]) -> "pa.Table":
+def check_records(dataset: str, records: list[dict[str, Any]]) -> pa.Table:
     """Assert records cover every schema field and build a typed table."""
     schema = schemas.SCHEMAS[dataset]
     names = {f.name for f in schema}

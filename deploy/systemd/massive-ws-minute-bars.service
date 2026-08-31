@@ -16,11 +16,13 @@ Type=simple
 EnvironmentFile=-%h/data_ingest_infra/.env
 WorkingDirectory=%h/data_ingest_infra
 ExecStart=%h/data_ingest_infra/venv/bin/python -m ingest.jobs.ws_minute_bars
-Restart=always
+# Restart on crashes, but NOT on the clean exit the job makes outside the
+# 09:25-16:35 ET capture window. With a bare Restart=always this unit spun a
+# no-op process every 10s all night; on-failure plus the exit-0 exemption
+# keeps the supervisor honest while still recovering from a real fault.
+Restart=on-failure
+RestartPreventExitStatus=0
 RestartSec=10
-# Note: the job exits 0 outside the 09:25-16:35 ET capture window, so with
-# Restart=always it no-op restarts every 10s overnight (cheap). The 09:25
-# cron entry is the primary scheduler; this unit is for always-on hosts.
 StartLimitIntervalSec=0
 
 [Install]

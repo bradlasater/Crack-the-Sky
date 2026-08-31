@@ -1,0 +1,27 @@
+# Systemd user service for the WS minute-bar capture (alternative to the
+# 09:25 cron line). Install per-user:
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/systemd/massive-ws-minute-bars.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now massive-ws-minute-bars
+#   loginctl enable-linger $USER    # keep it running after logout
+# The unit assumes the repo lives at ~/data_ingest_infra (%h = home dir).
+[Unit]
+Description=Massive delayed options websocket minute-bar capture
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-%h/data_ingest_infra/.env
+WorkingDirectory=%h/data_ingest_infra
+ExecStart=%h/data_ingest_infra/venv/bin/python -m ingest.jobs.ws_minute_bars
+Restart=always
+RestartSec=10
+# Note: the job exits 0 outside the 09:25-16:35 ET capture window, so with
+# Restart=always it no-op restarts every 10s overnight (cheap). The 09:25
+# cron entry is the primary scheduler; this unit is for always-on hosts.
+StartLimitIntervalSec=0
+
+[Install]
+WantedBy=default.target

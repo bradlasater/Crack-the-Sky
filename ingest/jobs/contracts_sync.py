@@ -1,7 +1,9 @@
 """contracts_sync: sync the option-contract reference universe per underlying.
 
 Paginates ``/v3/reference/options/contracts`` for each underlying (default
-SPY,SPX,SPXW), lands raw JSONL plus a clean ``contracts`` parquet partition,
+SPY,SPX — the SPXW endpoint returns 0 rows because SPXW weeklies are listed
+under SPX; SPXW stays accepted when passed explicitly), lands raw JSONL plus
+a clean ``contracts`` parquet partition,
 and diffs the new contract set against the previous clean partition for the
 same underlying, logging ``{event: "contracts_diff", new: n, gone: n}``.
 
@@ -29,7 +31,9 @@ from ingest.jobs import (
 )
 
 JOB = "contracts_sync"
-DEFAULT_UNDERLYINGS = ["SPY", "SPX", "SPXW"]
+# SPXW is deliberately NOT in the default: its endpoint returns 0 rows
+# (verified live) because SPXW weeklies are listed under the SPX underlying.
+DEFAULT_UNDERLYINGS = ["SPY", "SPX"]
 CONTRACTS_PATH = "/v3/reference/options/contracts"
 
 

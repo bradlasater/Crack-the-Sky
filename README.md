@@ -48,6 +48,14 @@ as delivered (ns/ms epoch ints, UTC) — never converted.
   prevents doubles). Systemd alternative: `deploy/systemd/massive-ws-minute-bars.service`
   (user unit; enable lingering). Reconnects/gaps are logged as `ws_gap`
   events in the run log; hourly JSONL is gzipped on rotation.
+- **Underlying bars (T-1 only):** `underlying_bars` runs once each morning
+  (`05 08 * * 2-6 --prev-trading-day`). Intraday SPY price comes from
+  `snapshot_sweep`'s `underlying_price` field; same-day SPY minute aggs are
+  not entitled on the Options Developer tier (403 "plan doesn't include this
+  data timeframe").
+- **SPXW caveat:** after the first live `snapshot_sweep` of I:SPX, verify
+  SPXW tickers appear; SPXW contract coverage flows through `contracts_sync`
+  + `eod_dayaggs_rest` regardless (SPXW weeklies are listed under SPX).
 - **Flat files / backfill:** `bash scripts/backfill.sh 2026-08-01 2026-08-31`
   loops `flatfile_pull` over the range and skips dates already in
   `_meta/flatfile_manifest.json` (resume-safe). Single day:

@@ -114,6 +114,16 @@ def require_trading_day(
         sys.exit(0)
 
 
+def previous_trading_day(
+    ref: date, data_root: str | os.PathLike[str] | None = None
+) -> date:
+    """Most recent trading day strictly before ``ref`` (weekends/holidays skipped)."""
+    d = ref - timedelta(days=1)
+    while not is_trading_day(d, data_root):
+        d -= timedelta(days=1)
+    return d
+
+
 def market_close_et(d: date, data_root: str | os.PathLike[str] | None = None) -> datetime:
     """Market close instant (ET) for ``d``: 13:00 on early closes, else 16:00."""
     close_t = EARLY_CLOSE if d in load_early_closes(data_root) else REGULAR_CLOSE

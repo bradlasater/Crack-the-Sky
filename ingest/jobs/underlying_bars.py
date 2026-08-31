@@ -4,18 +4,26 @@ Fetches ``/v2/aggs/ticker/SPY/range/1/minute/{date}/{date}`` (adjusted,
 sorted, limit 50000) and lands raw JSONL plus a clean
 ``underlying_minute_bars`` parquet partition. Bar timestamps are stored
 exactly as delivered (``t`` = ms epoch -> ``start_ms``).
+
+NOTE (tier entitlement): same-day SPY minute aggs are 403 on the Options
+Developer plan ("plan doesn't include this data timeframe"); T-1 works. The
+cron schedule therefore runs this job once each morning with
+``--prev-trading-day`` (T-1 session) instead of intraday; the intraday SPY
+price comes from ``snapshot_sweep``'s ``underlying_price`` field.
 """
 
 from __future__ import annotations
 
+import sys
+
 from typing import Any
 
-from ingest.common import landing
+from ingest.common import landing, market_gate
 from ingest.common.cli import run_job
 from ingest.common.config import Settings
 from ingest.common.http_client import MassiveClient
 from ingest.common.logging_utils import JsonlLogger
-from ingest.jobs import run_date_from_args
+from ingest.jobs import run_date_from_args, strip_flag
 
 JOB = "underlying_bars"
 DEFAULT_TICKERS = ["SPY"]
@@ -68,7 +76,17 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger):
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Entry point: ``python -m ingest.jobs.underlying_bars [--date D]``."""
+    """Entry point: ``python -m ingest.jobs.underlying_bars [--date D | --prev-trading-day]``.
+
+    ``--prev-trading-day`` resolves ``--date`` to the previous trading day
+    (via :func:`market_gate.previous_trading_day`) unless ``--date`` was
+    given explicitly — same default pattern ``flatfile_pull`` uses, so the
+    08:05 Tue–Sat cron run always targets yesterday's session.
+    """
+    argv, prev = strip_flag(list(sys.argv[1:] if argv is None else argv),
+                            "--prev-trading-day")
+    if prev and "--date" not in argv:
+        argv += ["--date", market_gate.previous_trading_day(market_gate.today_et()).isoformat()]
     run_job(JOB, _main_fn, argv)
 
 

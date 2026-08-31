@@ -11,6 +11,13 @@
 #
 # flatfile_pull / reconcile default --date to the previous trading day, so the
 # Tue-Sat 11:05 / 11:30 runs always target yesterday's session.
+#
+# underlying_bars runs T-1 only: same-day SPY minute aggs are not entitled on
+# the Options Developer tier (403), so the 08:05 Tue-Sat run pulls yesterday.
+#
+# CAVEAT: after the first live snapshot_sweep of I:SPX, verify SPXW tickers
+# appear; SPXW contract coverage flows through contracts_sync +
+# eod_dayaggs_rest regardless.
 TZ=America/New_York
 MAILTO=""
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -23,9 +30,7 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 30-55/5 9 * * 1-5    cd /home/brad/data_ingest_infra && flock -n /tmp/massive-snapshot_sweep.lock /home/brad/data_ingest_infra/venv/bin/python -m ingest.jobs.snapshot_sweep >> /data/massive/logs/cron.log 2>&1
 */5 10-15 * * 1-5    cd /home/brad/data_ingest_infra && flock -n /tmp/massive-snapshot_sweep.lock /home/brad/data_ingest_infra/venv/bin/python -m ingest.jobs.snapshot_sweep >> /data/massive/logs/cron.log 2>&1
 0-30/5 16 * * 1-5    cd /home/brad/data_ingest_infra && flock -n /tmp/massive-snapshot_sweep.lock /home/brad/data_ingest_infra/venv/bin/python -m ingest.jobs.snapshot_sweep >> /data/massive/logs/cron.log 2>&1
-31-59 9 * * 1-5    cd /home/brad/data_ingest_infra && flock -n /tmp/massive-underlying_bars.lock /home/brad/data_ingest_infra/venv/bin/python -m ingest.jobs.underlying_bars >> /data/massive/logs/cron.log 2>&1
-* 10-15 * * 1-5    cd /home/brad/data_ingest_infra && flock -n /tmp/massive-underlying_bars.lock /home/brad/data_ingest_infra/venv/bin/python -m ingest.jobs.underlying_bars >> /data/massive/logs/cron.log 2>&1
-0-30 16 * * 1-5    cd /home/brad/data_ingest_infra && flock -n /tmp/massive-underlying_bars.lock /home/brad/data_ingest_infra/venv/bin/python -m ingest.jobs.underlying_bars >> /data/massive/logs/cron.log 2>&1
+05 08 * * 2-6    cd /home/brad/data_ingest_infra && flock -n /tmp/massive-underlying_bars.lock /home/brad/data_ingest_infra/venv/bin/python -m ingest.jobs.underlying_bars --prev-trading-day >> /data/massive/logs/cron.log 2>&1
 32-58/2 9 * * 1-5    cd /home/brad/data_ingest_infra && flock -n /tmp/massive-trades_watchlist.lock /home/brad/data_ingest_infra/venv/bin/python -m ingest.jobs.trades_watchlist >> /data/massive/logs/cron.log 2>&1
 */2 10-15 * * 1-5    cd /home/brad/data_ingest_infra && flock -n /tmp/massive-trades_watchlist.lock /home/brad/data_ingest_infra/venv/bin/python -m ingest.jobs.trades_watchlist >> /data/massive/logs/cron.log 2>&1
 0-30/2 16 * * 1-5    cd /home/brad/data_ingest_infra && flock -n /tmp/massive-trades_watchlist.lock /home/brad/data_ingest_infra/venv/bin/python -m ingest.jobs.trades_watchlist >> /data/massive/logs/cron.log 2>&1

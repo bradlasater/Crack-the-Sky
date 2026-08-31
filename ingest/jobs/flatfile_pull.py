@@ -26,7 +26,7 @@ import hashlib
 import json
 import sys
 import time
-from datetime import date, datetime, time as dtime, timedelta
+from datetime import date, datetime, time as dtime
 from pathlib import Path
 from typing import Any
 
@@ -61,12 +61,9 @@ _AUTH_ERROR_CODES = {
 }
 
 
-def previous_trading_day(ref: date, data_root: Any = None) -> date:
-    """Most recent trading day strictly before ``ref`` (weekends/holidays skipped)."""
-    d = ref - timedelta(days=1)
-    while not market_gate.is_trading_day(d, data_root):
-        d -= timedelta(days=1)
-    return d
+# Re-exported so existing imports (and tests) keep working; the single source
+# of truth now lives in market_gate.
+previous_trading_day = market_gate.previous_trading_day
 
 
 def s3_key(dataset: str, d: date) -> str:

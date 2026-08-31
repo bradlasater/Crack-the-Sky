@@ -2,8 +2,17 @@
 
 Connects to ``wss://delayed.massive.com/options`` (one connection only — the
 plan allows a single slot per asset class), authenticates, subscribes to
-``AM.O:SPY*,AM.O:SPX*`` and lands every message as JSONL under
-``raw/option_minute_bars_ws/dt=YYYY-MM-DD/`` (rotated + gzipped hourly).
+**explicit** AM channels for every active SPY/SPX option contract and lands
+every message as JSONL under ``raw/option_minute_bars_ws/dt=YYYY-MM-DD/``
+(rotated + gzipped hourly).
+
+Why explicit subscriptions: live probes proved the wildcard
+``AM.O:SPY*,AM.O:SPX*`` subscribes successfully but delivers ZERO events on
+this tier, while an explicit ``AM.O:<TICKER>`` subscription delivers bars.
+The contract universe therefore comes from the latest ``clean/contracts``
+partition (run ``contracts_sync`` first); tickers are subscribed in chunks of
+``SUBSCRIBE_CHUNK_SIZE`` per ``subscribe`` message (well under the 1MB frame
+limit) over the single connection, and fully re-subscribed on reconnect.
 
 Design notes (per SPEC verified facts):
   * Messages arrive as JSON *arrays* of events keyed by ``ev``; AM events
@@ -12,12 +21,18 @@ Design notes (per SPEC verified facts):
     raw payloads go onto a ``queue.Queue`` drained by a writer thread.
   * Reconnects use exponential backoff (1s -> 60s) with jitter, then
     re-authenticate and re-subscribe; each outage is logged as ``ws_gap``.
-  * Heartbeat: if no message arrives for 90s the connection is recycled.
+  * Heartbeat: if no message arrives for 90s *before the subscription is
+    ACKed* the connection is recycled. Once the subscription is ACKed, a
+    quiet feed is NOT an error — silence is surfaced via the periodic
+    ``ws_stats`` log event (events / distinct_symbols / queue_depth every
+    5 minutes) instead of a reconnect loop.
   * Capture window: 09:25 ET -> ``market_gate.option_capture_end_et``
     (~16:35 ET). Outside the window the job exits 0 unless ``--force``.
-  * ``--duration-minutes N`` overrides the window end (testing).
+  * ``--duration-minutes N`` overrides the window end (testing);
+    ``--contracts-limit N`` caps the universe for tests (hot contracts
+    first when a SPY reference price is available).
 
-Run: ``python -m ingest.jobs.ws_minute_bars [--force] [--duration-minutes N]``
+Run: ``python -m ingest.jobs.ws_minute_bars [--underlying SPY] [--force]``
 """
 
 from __future__ import annotations
@@ -40,18 +55,120 @@ from ingest.common import market_gate
 from ingest.common.cli import build_parser
 from ingest.common.config import Settings
 from ingest.common.logging_utils import JsonlLogger, get_run_logger
+from ingest.jobs import latest_clean_records, latest_spy_price, parse_underlyings
 
 JOB = "ws_minute_bars"
 DATASET = "option_minute_bars_ws"
-SUBSCRIBE_PARAMS = "AM.O:SPY*,AM.O:SPX*"
+DEFAULT_UNDERLYINGS = ["SPY", "SPX"]  # SPXW contracts share the O:SPX prefix
+SUBSCRIBE_CHUNK_SIZE = 3000  # tickers per subscribe message (<< 1MB limit)
 WINDOW_START = dtime(9, 25)  # ET
 HEARTBEAT_TIMEOUT_S = 90
+STATS_INTERVAL_S = 300  # periodic ws_stats log cadence
 BACKOFF_MIN_S = 1.0
 BACKOFF_MAX_S = 60.0
 
 # Fields delivered on AM aggregate events (verified against the live feed).
 AM_FIELDS = ("sym", "v", "av", "op", "vw", "o", "c", "h", "l", "a", "z", "s", "e")
 
+
+# ---------------------------------------------------------------------------
+# Contract universe / subscription batching
+# ---------------------------------------------------------------------------
+
+def _ticker_prefix(underlying: str) -> str:
+    """OPRA ticker prefix for an underlying (``I:SPX``/``SPX`` -> ``O:SPX``)."""
+    u = underlying.strip().upper()
+    if u.startswith("I:"):
+        u = u[2:]
+    return f"O:{u}"
+
+
+def contract_universe(
+    settings: Settings, run_date: date, underlyings: list[str]
+) -> list[dict[str, Any]]:
+    """Active contracts for the underlyings from the latest clean partition.
+
+    Raises RuntimeError ("run contracts_sync first") when no ``contracts``
+    clean partition exists at or before ``run_date`` — without the reference
+    universe we cannot build explicit subscriptions.
+    """
+    contracts = latest_clean_records(settings, "contracts", run_date)
+    if not contracts:
+        raise RuntimeError(
+            "no clean 'contracts' partition found at or before "
+            f"{run_date}; run contracts_sync first"
+        )
+    prefixes = tuple(_ticker_prefix(u) for u in underlyings)
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for rec in contracts:
+        ticker = rec.get("ticker")
+        if not ticker or not str(ticker).startswith(prefixes) or ticker in seen:
+            continue
+        seen.add(ticker)
+        out.append(rec)
+    return out
+
+
+def select_tickers(
+    settings: Settings,
+    run_date: date,
+    underlyings: list[str],
+    limit: int | None,
+    logger: JsonlLogger | None = None,
+) -> list[str]:
+    """Subscription tickers for the universe, optionally capped by ``limit``.
+
+    With a limit, "hot" contracts are preferred: nearest expiration first,
+    then strike closest to the latest SPY reference price (from
+    ``underlying_minute_bars`` or ``option_snapshots``), so short test runs
+    actually see AM traffic. Without a reference price the first ``limit``
+    tickers in ticker order are used.
+    """
+    universe = contract_universe(settings, run_date, underlyings)
+    mode = "full"
+    if limit is not None and len(universe) > limit:
+        ref = latest_spy_price(settings, run_date)
+        if ref is not None:
+            def hot_key(rec: dict[str, Any]) -> tuple[str, float, str]:
+                strike = rec.get("strike_price")
+                dist = abs(float(strike) - ref) if strike is not None else float("inf")
+                return (str(rec.get("expiration_date") or "9999"), dist, str(rec["ticker"]))
+
+            universe = sorted(universe, key=hot_key)[:limit]
+            mode = f"hot(ref={ref})"
+        else:
+            universe = sorted(universe, key=lambda r: str(r["ticker"]))[:limit]
+            mode = "first-n"
+    tickers = sorted(str(r["ticker"]) for r in universe)
+    if logger is not None:
+        logger.log(
+            "ws_universe",
+            underlyings=underlyings,
+            contracts=len(tickers),
+            limit=limit,
+            selection=mode,
+        )
+    if not tickers:
+        raise RuntimeError(
+            f"contract universe for {underlyings} is empty; run contracts_sync first"
+        )
+    return tickers
+
+
+def subscribe_chunks(
+    tickers: list[str], chunk_size: int = SUBSCRIBE_CHUNK_SIZE
+) -> list[str]:
+    """``params`` strings for explicit AM subscriptions, chunked per message."""
+    return [
+        ",".join(f"AM.{t}" for t in tickers[i:i + chunk_size])
+        for i in range(0, len(tickers), chunk_size)
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Frame parsing / logging helpers
+# ---------------------------------------------------------------------------
 
 def parse_events(payload: str | bytes) -> list[dict[str, Any]]:
     """Parse one WS frame (a JSON array of events) into event dicts.
@@ -88,6 +205,25 @@ def describe_events(payload: str | bytes) -> list[str]:
     if isinstance(data, dict):
         data = [data]
     return [str(e.get("ev") or e.get("status") or "?") for e in data if isinstance(e, dict)]
+
+
+def is_subscribe_ack(payload: str | bytes) -> bool:
+    """True when the frame carries a successful subscription status event."""
+    try:
+        data = json.loads(payload)
+    except (ValueError, TypeError):
+        return False
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list):
+        return False
+    for ev in data:
+        if not isinstance(ev, dict) or ev.get("ev") != "status":
+            continue
+        text = f"{ev.get('status', '')} {ev.get('message', '')}".lower()
+        if "subscribed" in text:
+            return True
+    return False
 
 
 class HourlyJsonlWriter(threading.Thread):
@@ -158,11 +294,14 @@ class HourlyJsonlWriter(threading.Thread):
         self._close()
 
 
-async def _auth_and_subscribe(ws: Any, settings: Settings, logger: JsonlLogger) -> bool:
-    """Authenticate then subscribe; returns True on success.
+async def _auth_and_subscribe(
+    ws: Any, settings: Settings, logger: JsonlLogger, chunks: list[str]
+) -> bool:
+    """Authenticate then send every chunked subscribe message; True on success.
 
     Expects an ``auth_success`` status event; ``auth_failed`` is fatal
-    (returns False so the job exits instead of hammering the API).
+    (returns False so the job exits instead of hammering the API). Each
+    subscribe message stays well under the 1MB server frame limit.
     """
     await ws.send(json.dumps({"action": "auth", "params": settings.massive_api_key}))
     deadline = time.monotonic() + 30
@@ -181,8 +320,13 @@ async def _auth_and_subscribe(ws: Any, settings: Settings, logger: JsonlLogger) 
                 continue
             status = ev.get("status")
             if status == "auth_success":
-                await ws.send(json.dumps({"action": "subscribe", "params": SUBSCRIBE_PARAMS}))
-                logger.log("ws_subscribed", params=SUBSCRIBE_PARAMS)
+                for i, params in enumerate(chunks, start=1):
+                    await ws.send(json.dumps({"action": "subscribe", "params": params}))
+                    logger.log(
+                        "ws_subscribed",
+                        message=f"{i}/{len(chunks)}",
+                        tickers=params.count("AM."),
+                    )
                 return True
             if status == "auth_failed":
                 logger.log("ws_auth_failed", message=ev.get("message"))
@@ -191,18 +335,39 @@ async def _auth_and_subscribe(ws: Any, settings: Settings, logger: JsonlLogger) 
     return False
 
 
-async def _read_loop(ws: Any, writer: HourlyJsonlWriter, logger: JsonlLogger,
-                     deadline: datetime, stats: dict[str, int]) -> None:
-    """Read frames until the deadline, a close, or a heartbeat timeout.
+async def _read_loop(
+    ws: Any,
+    writer: HourlyJsonlWriter,
+    logger: JsonlLogger,
+    deadline: datetime,
+    stats: dict[str, Any],
+) -> None:
+    """Read frames until the deadline, a close, or a pre-ACK heartbeat timeout.
 
     The recv timeout is capped at the time remaining until ``deadline`` so
     the job ends promptly at the window close even when the feed is quiet.
-    ``stats["frames"]`` is incremented per received frame (exceptions
-    propagate to the reconnect supervisor without losing the count).
+
+    Zero-data handling: once the subscription is ACKed (or any traffic has
+    flowed), a 90s silence is NOT a failure — it is logged (``ws_silence``)
+    and reading continues; only a silent *unacknowledged* subscription is
+    recycled. A ``ws_stats`` snapshot (events, distinct_symbols, queue_depth)
+    is logged every ``STATS_INTERVAL_S`` regardless, so a dead-quiet feed is
+    always visible in the run log.
     """
+    last_stats_log = time.monotonic()
+
+    def log_stats(event: str = "ws_stats") -> None:
+        logger.log(
+            event,
+            events=stats["events"],
+            distinct_symbols=len(stats["symbols"]),
+            queue_depth=writer.queue.qsize(),
+        )
+
     while True:
         remaining = (deadline - market_gate.now_et()).total_seconds()
         if remaining <= 0:
+            log_stats()
             return
         try:
             raw = await asyncio.wait_for(
@@ -211,16 +376,40 @@ async def _read_loop(ws: Any, writer: HourlyJsonlWriter, logger: JsonlLogger,
         except asyncio.TimeoutError:
             if market_gate.now_et() >= deadline:
                 return  # quiet feed at window close, not a heartbeat loss
-            raise
+            if stats["acked"]:
+                # Zero data with an active subscription: log, keep waiting.
+                logger.log("ws_silence", timeout_s=HEARTBEAT_TIMEOUT_S)
+                log_stats()
+                last_stats_log = time.monotonic()
+                continue
+            raise  # subscription never ACKed: recycle the connection
         stats["frames"] += 1
+        if is_subscribe_ack(raw):
+            stats["acked"] = True
         for rec in parse_events(raw):
+            stats["events"] += 1
+            if rec.get("sym"):
+                stats["acked"] = True  # traffic implies a live subscription
+                stats["symbols"].add(rec["sym"])
             writer.queue.put(rec)
+        if time.monotonic() - last_stats_log >= STATS_INTERVAL_S:
+            log_stats()
+            last_stats_log = time.monotonic()
 
 
-async def _capture(settings: Settings, logger: JsonlLogger, run_date: date,
-                   deadline: datetime, writer: HourlyJsonlWriter) -> dict[str, int]:
-    """Connection supervisor: connect, auth, read, reconnect with backoff."""
-    stats = {"connects": 0, "reconnects": 0, "frames": 0}
+async def _capture(
+    settings: Settings,
+    logger: JsonlLogger,
+    run_date: date,
+    deadline: datetime,
+    writer: HourlyJsonlWriter,
+    chunks: list[str],
+) -> dict[str, Any]:
+    """Connection supervisor: connect, auth, subscribe, read, reconnect."""
+    stats: dict[str, Any] = {
+        "connects": 0, "reconnects": 0, "frames": 0, "events": 0,
+        "acked": False, "symbols": set(),
+    }
     backoff = BACKOFF_MIN_S
     url = settings.ws_delayed_url
 
@@ -231,8 +420,9 @@ async def _capture(settings: Settings, logger: JsonlLogger, run_date: date,
                 url, ping_interval=20, ping_timeout=30, max_queue=10000
             ) as ws:
                 stats["connects"] += 1
+                stats["acked"] = False
                 logger.log("ws_connected", url=url)
-                if not await _auth_and_subscribe(ws, settings, logger):
+                if not await _auth_and_subscribe(ws, settings, logger, chunks):
                     # auth_failed: wrong key — retrying will never help
                     raise _FatalAuth("websocket auth_failed; check MASSIVE_API_KEY")
                 backoff = BACKOFF_MIN_S  # healthy connection resets backoff
@@ -254,7 +444,13 @@ async def _capture(settings: Settings, logger: JsonlLogger, run_date: date,
         logger.log("ws_reconnect_wait", sleep_s=round(sleep_s, 2))
         await asyncio.sleep(sleep_s)
         backoff = min(backoff * 2, BACKOFF_MAX_S)
-    return stats
+    return {
+        "connects": stats["connects"],
+        "reconnects": stats["reconnects"],
+        "frames": stats["frames"],
+        "events": stats["events"],
+        "distinct_symbols": len(stats["symbols"]),
+    }
 
 
 class _FatalAuth(Exception):
@@ -291,6 +487,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser(JOB)
     parser.add_argument("--duration-minutes", type=int, default=None,
                         help="override capture length in minutes (testing)")
+    parser.add_argument("--contracts-limit", type=int, default=None,
+                        help="cap the contract universe (testing; hot contracts "
+                             "preferred when a SPY reference price is available)")
     args = parser.parse_args(argv)
     run_date = date.fromisoformat(args.date) if args.date else market_gate.today_et()
 
@@ -299,21 +498,34 @@ def main(argv: list[str] | None = None) -> int:
     started = time.monotonic()
     try:
         logger.log("job_start", job=JOB, date=run_date.isoformat(), force=args.force,
-                   duration_minutes=args.duration_minutes)
+                   duration_minutes=args.duration_minutes,
+                   contracts_limit=args.contracts_limit, underlying=args.underlying)
         market_gate.require_trading_day(run_date, force=args.force,
                                         data_root=settings.data_root)
         deadline = _window(run_date, settings, args.force, args.duration_minutes, logger)
         if deadline is None:
             return 0
+        underlyings = parse_underlyings(args.underlying, DEFAULT_UNDERLYINGS)
+        try:
+            tickers = select_tickers(
+                settings, run_date, underlyings, args.contracts_limit, logger
+            )
+        except RuntimeError as exc:
+            logger.log("job_error", job=JOB, error=str(exc))
+            return 1
+        chunks = subscribe_chunks(tickers)
         writer = HourlyJsonlWriter(settings.data_root, run_date, logger)
         writer.start()
         try:
-            stats = asyncio.run(_capture(settings, logger, run_date, deadline, writer))
+            stats = asyncio.run(
+                _capture(settings, logger, run_date, deadline, writer, chunks)
+            )
         finally:
             writer.stop()
             writer.join(timeout=30)
         duration_s = round(time.monotonic() - started, 3)
-        logger.log("job_end", job=JOB, rows=writer.rows_written, duration_s=duration_s, **stats)
+        logger.log("job_end", job=JOB, rows=writer.rows_written, duration_s=duration_s,
+                   **stats)
         return 0
     except _FatalAuth as exc:
         logger.log("job_error", job=JOB, error=str(exc))

@@ -7,6 +7,22 @@ gate, timing, job_end summary logging, healthcheck pings and exit codes.
 ``main_fn`` is called as ``main_fn(args, settings, logger)`` and should
 return an optional dict of summary fields (e.g. ``{"rows": n, "bytes": b}``)
 which are merged into the ``job_end`` event.
+
+Healthchecks
+------------
+Monitoring is **per job**. With ``HEALTHCHECKS_PING_KEY`` set, each job pings
+``{base}/{key}/massive-{job}`` -- a distinct check per job, auto-created on
+first ping via ``?create=1``. That is the point: a single shared check goes
+green as soon as *any* job succeeds, so nine dead jobs hide behind one healthy
+one, and "this job stopped running" -- the failure mode that actually happens
+here -- cannot be detected at all.
+
+Each run sends ``/start`` first, so Healthchecks measures duration and can
+alert on a run that hangs rather than only one that crashes. Exceptions send
+``/fail`` with the error text as the body.
+
+``HEALTHCHECKS_PING_URL`` (a single check for everything) still works and takes
+lower precedence; it is kept only for back-compatibility.
 """
 
 from __future__ import annotations
@@ -46,12 +62,48 @@ def build_parser(job_name: str) -> argparse.ArgumentParser:
     return parser
 
 
-def _ping(url: str | None, suffix: str = "") -> None:
-    """Ping the healthchecks URL (best effort; never raises)."""
+HEALTHCHECK_SLUG_PREFIX = "massive-"
+PING_TIMEOUT_S = 5  # snapshot_sweep has a 60s budget; never block on monitoring
+
+
+def healthcheck_slug(job_name: str) -> str:
+    """Healthchecks slug for a job (``contracts_sync`` -> ``massive-contracts-sync``).
+
+    Slugs are lowercase and hyphen-separated; job names use underscores.
+    """
+    return HEALTHCHECK_SLUG_PREFIX + job_name.strip().lower().replace("_", "-")
+
+
+def healthcheck_url(settings: Settings, job_name: str) -> tuple[str | None, bool]:
+    """Return ``(base_url, autocreate)`` for this job's check.
+
+    Prefers the per-job ping-key form; falls back to the single shared URL.
+    """
+    if settings.healthchecks_ping_key:
+        base = f"{settings.healthchecks_base}/{settings.healthchecks_ping_key}"
+        return f"{base}/{healthcheck_slug(job_name)}", True
+    return settings.healthchecks_ping_url, False
+
+
+def ping(
+    url: str | None,
+    suffix: str = "",
+    autocreate: bool = False,
+    body: str | None = None,
+) -> None:
+    """Ping a healthchecks endpoint (best effort; never raises).
+
+    Monitoring must never be able to fail the job it is monitoring, so every
+    error here is swallowed to stderr.
+    """
     if not url:
         return
+    target = url + suffix
+    if autocreate:
+        target += "?create=1"
     try:
-        requests.get(url + suffix, timeout=10)
+        requests.post(target, data=(body or "")[:10000].encode("utf-8"),
+                      timeout=PING_TIMEOUT_S)
     except Exception as exc:  # noqa: BLE001 - healthchecks must not fail jobs
         print(f"warning: healthcheck ping failed: {exc}", file=sys.stderr)
 
@@ -69,7 +121,8 @@ def run_job(job_name: str, main_fn: MainFn, argv: list[str] | None = None) -> No
     settings = Settings.load()
     logger = get_run_logger(job_name, run_date, log_root=settings.log_root)
     start = time.monotonic()
-    ping_url = settings.healthchecks_ping_url
+    ping_url, autocreate = healthcheck_url(settings, job_name)
+    ping(ping_url, "/start", autocreate)
     try:
         logger.log(
             "job_start",
@@ -86,14 +139,16 @@ def run_job(job_name: str, main_fn: MainFn, argv: list[str] | None = None) -> No
         logger.log("job_end", job=job_name, rows=summary.get("rows", 0),
                    bytes=summary.get("bytes", 0), duration_s=duration_s,
                    **{k: v for k, v in summary.items() if k not in ("rows", "bytes")})
-        _ping(ping_url)
+        ping(ping_url, "", autocreate,
+             body=f"{job_name} ok: rows={summary.get('rows', 0)} in {duration_s}s")
     except SystemExit:
         raise
     except Exception as exc:  # noqa: BLE001 - top-level job guard
         duration_s = round(time.monotonic() - start, 3)
         logger.log("job_error", job=job_name, error=f"{type(exc).__name__}: {exc}",
                    duration_s=duration_s)
-        _ping(ping_url, "/fail")
+        ping(ping_url, "/fail", autocreate,
+             body=f"{job_name} failed after {duration_s}s: {type(exc).__name__}: {exc}")
         logger.close()
         sys.exit(1)
     logger.close()

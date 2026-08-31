@@ -1,0 +1,4 @@
+requests==2.34.2
+websockets==17.1
+boto3==1.43.83
+pyarrow==25.0.1

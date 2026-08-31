@@ -1,0 +1,31 @@
+{
+  "results": [
+    {
+      "cash_amount": 1.903516,
+      "currency": "USD",
+      "declaration_date": "2026-01-02",
+      "dividend_type": "CD",
+      "ex_dividend_date": "2026-06-18",
+      "frequency": 4,
+      "id": "E5f8cb568f1ff3bfec9921c115d5ff8bc4c86def1dbc616a3c7e18e45e4ed7f06",
+      "pay_date": "2026-07-31",
+      "record_date": "2026-06-18",
+      "ticker": "SPY"
+    },
+    {
+      "cash_amount": 1.796999,
+      "currency": "USD",
+      "declaration_date": "2026-01-02",
+      "dividend_type": "CD",
+      "ex_dividend_date": "2026-03-20",
+      "frequency": 4,
+      "id": "Ef4a655cfccd5c5c0513bd4a38e2ee99439bd8abd24168dfa2df7f5e4c69948d9",
+      "pay_date": "2026-04-30",
+      "record_date": "2026-03-20",
+      "ticker": "SPY"
+    }
+  ],
+  "status": "OK",
+  "request_id": "794eca33f8dca6c4e63b52ff89ec4a32",
+  "next_url": "https://api.polygon.io/v3/reference/dividends?cursor=YXA9MiZhcz0mbGltaXQ9MiZvcmRlcj1kZXNjJnNvcnQ9ZXhfZGl2aWRlbmRfZGF0ZSZ0aWNrZXI9U1BZ"
+}

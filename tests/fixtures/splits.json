@@ -1,0 +1,21 @@
+{
+  "results": [
+    {
+      "execution_date": "2020-08-31",
+      "id": "E36416cce743c3964c5da63e1ef1626c0aece30fb47302eea5a49c0055c04e8d0",
+      "split_from": 1,
+      "split_to": 4,
+      "ticker": "AAPL"
+    },
+    {
+      "execution_date": "2014-06-09",
+      "id": "E91a6b74ca1a9dcbce26a1f34e24ae26ba2c6359822ccf901ecd827f419137654",
+      "split_from": 1,
+      "split_to": 7,
+      "ticker": "AAPL"
+    }
+  ],
+  "status": "OK",
+  "request_id": "05fca85e931e9bb0cc64465fb32a12ad",
+  "next_url": "https://api.polygon.io/v3/reference/splits?cursor=YXA9MiZhcz0mbGltaXQ9MiZvcmRlcj1kZXNjJnNvcnQ9ZXhlY3V0aW9uX2RhdGUmdGlja2VyPUFBUEw"
+}

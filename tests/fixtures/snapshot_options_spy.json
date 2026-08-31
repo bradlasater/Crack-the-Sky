@@ -1,0 +1,130 @@
+{
+  "results": [
+    {
+      "break_even_price": 765.62,
+      "day": {
+        "change": 0,
+        "change_percent": 0,
+        "close": 345.24,
+        "high": 345.25,
+        "last_updated": 1787320442939000000,
+        "low": 345.24,
+        "open": 345.25,
+        "previous_close": 345.24,
+        "volume": 2,
+        "vwap": 345.245
+      },
+      "details": {
+        "contract_type": "call",
+        "exercise_style": "american",
+        "expiration_date": "2026-08-31",
+        "shares_per_contract": 100,
+        "strike_price": 420,
+        "ticker": "O:SPY260831C00420000"
+      },
+      "greeks": {},
+      "last_trade": {
+        "sip_timestamp": 1787319513276922706,
+        "conditions": [
+          232
+        ],
+        "price": 345.24,
+        "size": 1,
+        "exchange": 323,
+        "timeframe": "DELAYED"
+      },
+      "open_interest": 4,
+      "underlying_asset": {
+        "change_to_break_even": -0.119,
+        "last_updated": 1788202720998890768,
+        "price": 765.739,
+        "ticker": "SPY",
+        "timeframe": "DELAYED"
+      }
+    },
+    {
+      "break_even_price": 765.095,
+      "day": {
+        "change": -0.96,
+        "change_percent": -0.281,
+        "close": 340.53,
+        "high": 340.53,
+        "last_updated": 1788190742822000000,
+        "low": 339.8,
+        "open": 339.8,
+        "previous_close": 341.49,
+        "volume": 2,
+        "vwap": 340.165
+      },
+      "details": {
+        "contract_type": "call",
+        "exercise_style": "american",
+        "expiration_date": "2026-08-31",
+        "shares_per_contract": 100,
+        "strike_price": 425,
+        "ticker": "O:SPY260831C00425000"
+      },
+      "greeks": {},
+      "last_trade": {
+        "sip_timestamp": 1788189808787092843,
+        "conditions": [
+          233
+        ],
+        "price": 340.53,
+        "size": 1,
+        "exchange": 312,
+        "timeframe": "DELAYED"
+      },
+      "open_interest": 7,
+      "underlying_asset": {
+        "change_to_break_even": -0.644,
+        "last_updated": 1788202720998890768,
+        "price": 765.739,
+        "ticker": "SPY",
+        "timeframe": "DELAYED"
+      }
+    },
+    {
+      "break_even_price": 765.62,
+      "day": {
+        "close": 335.53,
+        "high": 335.53,
+        "last_updated": 1788190742397000000,
+        "low": 334.84,
+        "open": 334.84,
+        "volume": 2,
+        "vwap": 335.185
+      },
+      "details": {
+        "contract_type": "call",
+        "exercise_style": "american",
+        "expiration_date": "2026-08-31",
+        "shares_per_contract": 100,
+        "strike_price": 430,
+        "ticker": "O:SPY260831C00430000"
+      },
+      "greeks": {},
+      "last_trade": {
+        "sip_timestamp": 1788189808787092843,
+        "conditions": [
+          233
+        ],
+        "price": 335.53,
+        "size": 1,
+        "exchange": 312,
+        "timeframe": "DELAYED"
+      },
+      "open_interest": 0,
+      "underlying_asset": {
+        "change_to_break_even": -0.119,
+        "last_updated": 1788202720998890768,
+        "price": 765.739,
+        "ticker": "SPY",
+        "timeframe": "DELAYED"
+      }
+    }
+  ],
+  "status": "OK",
+  "request_id": "bef21de88fbbef1371ca5c6985223a40",
+  "next_url": "https://api.polygon.io/v3/snapshot/options/SPY?cursor=YXA9TyUzQVNQWTI2MDgzMUMwMDQzMDAwMCUzQTQzMC4wMCZhcz0mZXhwaXJhdGlvbl9kYXRlLmd0ZT0yMDI2LTA4LTMxJmxpbWl0PTMmc29ydD10aWNrZXI"
+}

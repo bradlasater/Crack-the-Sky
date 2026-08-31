@@ -1,0 +1,23 @@
+[
+  {
+    "date": "2026-09-07",
+    "exchange": "NYSE",
+    "name": "Labor Day",
+    "status": "closed"
+  },
+  {
+    "date": "2026-11-26",
+    "exchange": "NYSE",
+    "name": "Thanksgiving",
+    "status": "closed"
+  },
+  {
+    "date": "2026-11-27",
+    "exchange": "NYSE",
+    "name": "Thanksgiving",
+    "status": "early-close",
+    "early_close": true,
+    "open": "2026-11-27T14:30:00.000Z",
+    "close": "2026-11-27T18:00:00.000Z"
+  }
+]

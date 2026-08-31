@@ -1,0 +1,40 @@
+{
+  "results": [
+    {
+      "cfi": "OCASPS",
+      "contract_type": "call",
+      "exercise_style": "american",
+      "expiration_date": "2026-08-31",
+      "primary_exchange": "BATO",
+      "shares_per_contract": 100,
+      "strike_price": 420,
+      "ticker": "O:SPY260831C00420000",
+      "underlying_ticker": "SPY"
+    },
+    {
+      "cfi": "OCASPS",
+      "contract_type": "call",
+      "exercise_style": "american",
+      "expiration_date": "2026-08-31",
+      "primary_exchange": "BATO",
+      "shares_per_contract": 100,
+      "strike_price": 425,
+      "ticker": "O:SPY260831C00425000",
+      "underlying_ticker": "SPY"
+    },
+    {
+      "cfi": "OCASPS",
+      "contract_type": "call",
+      "exercise_style": "american",
+      "expiration_date": "2026-08-31",
+      "primary_exchange": "BATO",
+      "shares_per_contract": 100,
+      "strike_price": 430,
+      "ticker": "O:SPY260831C00430000",
+      "underlying_ticker": "SPY"
+    }
+  ],
+  "status": "OK",
+  "request_id": "f1c3187af16f496aa0e9315881764efc",
+  "next_url": "https://api.polygon.io/v3/reference/options/contracts?cursor=YXA9JTdCJTIySUQlMjIlM0ElMjIzNjU3NzI3NjcxNTMwMTczMTI1JTIyJTJDJTIyU3RhcnREYXRlVXRjJTIyJTNBJTdCJTIyVGltZSUyMiUzQSUyMjIwMjYtMDMtMjNUMDAlM0EwMCUzQTAwWiUyMiUyQyUyMlZhbGlkJTIyJTNBdHJ1ZSU3RCUyQyUyMkVuZERhdGVVdGMlMjIlM0ElN0IlMjJUaW1lJTIyJTNBJTIyMDAwMS0wMS0wMVQwMCUzQTAwJTNBMDBaJTIyJTJDJTIyVmFsaWQlMjIlM0FmYWxzZSU3RCUyQyUyMnVuZGVybHlpbmdfdGlja2VyJTIyJTNBJTIyU1BZJTIyJTJDJTIydGlja2VyJTIyJTNBJTIyTyUzQVNQWTI2MDgzMUMwMDQzMDAwMCUyMiUyQyUyMmV4cGlyYXRpb25fZGF0ZSUyMiUzQSUyMjIwMjYtMDgtMzFUMDAlM0EwMCUzQTAwWiUyMiUyQyUyMnN0cmlrZV9wcmljZSUyMiUzQTQzMCUyQyUyMmNmaSUyMiUzQSUyMk9DQVNQUyUyMiUyQyUyMmNvbnRyYWN0X3R5cGUlMjIlM0ElMjJjYWxsJTIyJTJDJTIyZXhlcmNpc2Vfc3R5bGUlMjIlM0ElMjJhbWVyaWNhbiUyMiUyQyUyMnByaW1hcnlfZXhjaGFuZ2UlMjIlM0ElN0IlMjJTdHJpbmclMjIlM0ElMjJCQVRPJTIyJTJDJTIyVmFsaWQlMjIlM0F0cnVlJTdEJTJDJTIyc2hhcmVzX3Blcl9jb250cmFjdCUyMiUzQTEwMCUyQyUyMmFkZGl0aW9uYWxfdW5kZXJseWluZ3MlMjIlM0ElMjIlNUIlNUQlMjIlN0QmYXM9JmxpbWl0PTMmb3JkZXI9YXNjJnNvcnQ9dGlja2VyJnVuZGVybHlpbmdfdGlja2VyPVNQWQ"
+}

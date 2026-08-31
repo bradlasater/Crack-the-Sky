@@ -1,0 +1,43 @@
+{
+  "results": [
+    {
+      "conditions": [
+        209
+      ],
+      "exchange": 307,
+      "id": "",
+      "price": 8.9,
+      "sequence_number": 1868429311,
+      "sip_timestamp": 1788202655938744983,
+      "size": 3,
+      "decimal_size": "3.0"
+    },
+    {
+      "conditions": [
+        227
+      ],
+      "exchange": 300,
+      "id": "",
+      "price": 8.95,
+      "sequence_number": 1867945509,
+      "sip_timestamp": 1788202646859166028,
+      "size": 1,
+      "decimal_size": "1.0"
+    },
+    {
+      "conditions": [
+        227
+      ],
+      "exchange": 300,
+      "id": "",
+      "price": 8.95,
+      "sequence_number": 1867945508,
+      "sip_timestamp": 1788202646859166028,
+      "size": 1,
+      "decimal_size": "1.0"
+    }
+  ],
+  "status": "DELAYED",
+  "request_id": "fc1f3519a12f02443dd442887b2e41a1",
+  "next_url": "https://api.polygon.io/v3/trades/O:SPY260918C00765000?cursor=YXA9MTg2Nzk0NTUwOCZhcz0mbGltaXQ9MyZvcmRlcj1kZXNjJnNvcnQ9dGltZXN0YW1wJnRpbWVzdGFtcC5sdGU9MjAyNi0wOC0zMVQxOCUzQTU3JTNBMjYuODU5MTY2MDI4Wg"
+}

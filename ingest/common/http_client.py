@@ -5,8 +5,13 @@ Behaviour verified against the live API (see SPEC.md):
     it, so pagination must re-append the key.
   * 403 responses carry ``{"status": "NOT_AUTHORIZED", ...}`` and mean the
     current plan tier is not entitled to the endpoint -> PermissionError.
-  * No ``X-RateLimit-*`` headers exist; we stay polite with plain sequential
-    requests and only retry 429/5xx/network errors with exponential backoff.
+  * No ``X-RateLimit-*`` headers exist. Requests pass through a shared
+    :class:`~ingest.common.ratelimit.TokenBucket` (so concurrent jobs bound
+    their *total* outbound rate) and 429/5xx/network errors are retried with
+    exponential backoff.
+
+The client is safe to share across threads: ``requests.Session`` handles
+concurrent GETs, and the bucket serialises admission.
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import requests
 
 from ingest.common.config import Settings
+from ingest.common.ratelimit import TokenBucket, default_bucket
 
 MAX_TRIES = 6
 BACKOFF_BASE_S = 1.0
@@ -32,10 +38,12 @@ log = logging.getLogger(__name__)
 class MassiveClient:
     """Thin wrapper around ``requests.Session`` with auth, retries, pagination."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, bucket: TokenBucket | None = None) -> None:
         self.settings = settings
         self.base = settings.massive_api_base.rstrip("/")
         self.session = requests.Session()
+        # Shared by default so every job in the process draws on one budget.
+        self.bucket = bucket if bucket is not None else default_bucket()
 
     # ------------------------------------------------------------------ utils
     def _url(self, path: str) -> str:
@@ -61,8 +69,9 @@ class MassiveClient:
     def get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         """Perform a single GET and return the decoded JSON body.
 
-        Retries 429/5xx/network errors with exponential backoff
-        (1s base, x2, up to ``MAX_TRIES`` attempts, 30s timeout).
+        Admission is gated by the shared token bucket, then 429/5xx/network
+        errors are retried with exponential backoff (1s base, x2, up to
+        ``MAX_TRIES`` attempts, 30s timeout).
 
         Raises:
             PermissionError: on HTTP 403 (tier not entitled to this endpoint).
@@ -72,6 +81,7 @@ class MassiveClient:
         url = self._with_api_key(self._url(path), params)
         last_exc: Exception | None = None
         for attempt in range(1, MAX_TRIES + 1):
+            self.bucket.acquire()
             try:
                 resp = self.session.get(url, timeout=TIMEOUT_S)
             except requests.RequestException as exc:  # network-level failure
@@ -130,8 +140,7 @@ class MassiveClient:
         while True:
             page += 1
             body = self.get(url, merged)
-            for item in body.get("results") or []:
-                yield item
+            yield from body.get("results") or []
             next_url = body.get("next_url")
             if not next_url or (max_pages is not None and page >= max_pages):
                 return

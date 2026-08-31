@@ -1,0 +1,24 @@
+# Tooling config only -- this repo is run as `python -m ingest.jobs.<name>`
+# from a venv, not installed as a package.
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+exclude = ["venv", ".venv", "**/__pycache__"]
+
+[tool.ruff.lint]
+# Matches the style already in the source (typed, __future__ annotations,
+# explicit `# noqa: BLE001` on the deliberate top-level exception guards).
+select = ["E", "F", "W", "I", "UP", "B", "BLE", "C4", "SIM"]
+ignore = [
+    "E501",    # line length is enforced by the formatter, not the linter
+    "SIM105",  # contextlib.suppress is not clearer in these try/except blocks
+    "B008",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

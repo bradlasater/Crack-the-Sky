@@ -10,7 +10,7 @@ import json
 import os
 import sys
 import time
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -28,12 +28,14 @@ class JsonlLogger:
         self._fh = None
         if path is not None:
             path.parent.mkdir(parents=True, exist_ok=True)
-            self._fh = open(path, "a", encoding="utf-8")
+            # Long-lived append handle: the logger outlives any single
+            # write and is closed by JsonlLogger.close().
+            self._fh = open(path, "a", encoding="utf-8")  # noqa: SIM115
 
     def log(self, event: str, **fields: Any) -> dict[str, Any]:
         """Emit one event line: ``{"ts": ..., "event": ..., **fields}``."""
         record = {
-            "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            "ts": datetime.now(UTC).isoformat(timespec="milliseconds"),
             "event": event,
             **fields,
         }
@@ -51,7 +53,7 @@ class JsonlLogger:
             self._fh.close()
             self._fh = None
 
-    def __enter__(self) -> "JsonlLogger":
+    def __enter__(self) -> JsonlLogger:
         return self
 
     def __exit__(self, *exc: object) -> None:

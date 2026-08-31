@@ -15,7 +15,6 @@ price comes from ``snapshot_sweep``'s ``underlying_price`` field.
 from __future__ import annotations
 
 import sys
-
 from typing import Any
 
 from ingest.common import landing, market_gate

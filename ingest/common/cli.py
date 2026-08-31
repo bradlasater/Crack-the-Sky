@@ -14,8 +14,9 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from collections.abc import Callable, Mapping
 from datetime import date
-from typing import Any, Callable, Mapping
+from typing import Any
 
 import requests
 

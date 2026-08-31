@@ -12,8 +12,13 @@ Conventions (per SPEC):
 ``option_snapshots`` flattens the nested snapshot payload with
 ``details_`` / ``day_`` / ``last_trade_`` / ``underlying_`` prefixes; use
 :func:`flatten_snapshot` to convert a raw API result into a schema record.
-Greeks columns are kept nullable: the current tier delivers ``greeks`` as an
-empty object and omits ``implied_volatility``, but we capture them when present.
+Greeks columns are kept nullable, but they ARE populated on this tier for
+any contract the vendor can price: measured 2026-08-31, 12,725 of 13,514 SPY
+snapshot rows carried non-null ``implied_volatility`` and ``greeks_delta``,
+and ``open_interest`` was non-null on all 13,514. Nulls appear on contracts
+with no usable market (deep ITM, expiring), not as a tier limitation.
+``option_snapshots`` is the only dataset here that cannot be backfilled from
+flat files -- it is gone if it is not captured live.
 
 PyArrow is import-guarded: this module imports cleanly without pyarrow so
 raw-only paths keep working; only :func:`ingest.common.landing.write_clean`
@@ -31,7 +36,7 @@ except ImportError:  # pragma: no cover - exercised only on pyarrow-less hosts
     pa = None  # type: ignore[assignment]
 
 
-def _build_schemas() -> "dict[str, Any]":
+def _build_schemas() -> dict[str, Any]:
     """Construct the SCHEMAS dict; requires pyarrow."""
     if pa is None:  # pragma: no cover
         raise ImportError(
@@ -138,6 +143,21 @@ def _build_schemas() -> "dict[str, Any]":
         pa.field("transactions", pa.int64()),
     ]
 
+    # Daily OHLCV for equity/ETF underlyings, from the grouped-daily endpoint.
+    # One REST call returns the whole US equity market for a date, so this is
+    # the cheapest independent cross-check we have on SPY.
+    underlying_day_bar_fields = [
+        pa.field("ticker", pa.string()),
+        pa.field("start_ms", pa.int64()),   # aggs 't' = ms epoch, as delivered
+        pa.field("open", pa.float64()),
+        pa.field("high", pa.float64()),
+        pa.field("low", pa.float64()),
+        pa.field("close", pa.float64()),
+        pa.field("volume", pa.float64()),
+        pa.field("vwap", pa.float64()),
+        pa.field("transactions", pa.int64()),
+    ]
+
     dividend_fields = [
         pa.field("ticker", pa.string()),
         pa.field("dividend_id", pa.string()),
@@ -159,8 +179,25 @@ def _build_schemas() -> "dict[str, Any]":
         pa.field("split_to", pa.float64()),
     ]
 
+    # Per-expiry forward recovered from put-call parity on the option chain.
+    # The index level (I:SPX) is NOT entitled on this tier at any endpoint, so
+    # parity on the chain we already sweep is the only way to obtain an SPX
+    # reference price. F = K + C - P at the strike minimising |C - P|.
+    forward_fields = [
+        pa.field("underlying_ticker", pa.string()),
+        pa.field("expiration_date", pa.string()),
+        pa.field("atm_strike", pa.float64()),
+        pa.field("forward", pa.float64()),
+        pa.field("call_price", pa.float64()),
+        pa.field("put_price", pa.float64()),
+        pa.field("pairs", pa.int64()),        # call/put pairs available
+        pa.field("asof_ns", pa.int64()),
+        pa.field("method", pa.string()),      # 'parity' | 'spot' | 'proxy'
+    ]
+
     contracts_schema = pa.schema(contract_fields)
     return {
+        "forwards": pa.schema(forward_fields),
         "contracts": contracts_schema,
         "contracts_expired": contracts_schema,  # same schema as contracts
         "option_snapshots": pa.schema(snapshot_fields),
@@ -168,13 +205,14 @@ def _build_schemas() -> "dict[str, Any]":
         "option_day_bars": pa.schema(option_bar_fields),
         "option_trades": pa.schema(trade_fields),
         "underlying_minute_bars": pa.schema(underlying_bar_fields),
+        "underlying_day_bars": pa.schema(underlying_day_bar_fields),
         "dividends": pa.schema(dividend_fields),
         "splits": pa.schema(split_fields),
     }
 
 
 # Empty when pyarrow is unavailable; landing.write_clean fails loudly instead.
-SCHEMAS: "dict[str, Any]" = _build_schemas() if pa is not None else {}
+SCHEMAS: dict[str, Any] = _build_schemas() if pa is not None else {}
 
 
 # ---------------------------------------------------------------------------
@@ -302,7 +340,22 @@ def _build_ddl() -> dict[str, str]:
         ("split_to", "Float64"),
     ]
 
+    forward_cols = [
+        ("underlying_ticker", "LowCardinality(String)"),
+        ("expiration_date", "Date"),
+        ("atm_strike", "Float64"),
+        ("forward", "Float64"),
+        ("call_price", "Float64"),
+        ("put_price", "Float64"),
+        ("pairs", "Int64"),
+        ("asof_ns", "DateTime64(9, 'UTC')"),
+        ("method", "LowCardinality(String)"),
+    ]
+
     return {
+        "forwards": _ddl(
+            "forwards", forward_cols, "underlying_ticker, expiration_date, asof_ns"
+        ),
         "contracts": contracts_ddl,
         "contracts_expired": _ddl(
             "contracts_expired", contracts_cols, "underlying_ticker, ticker"
@@ -319,6 +372,9 @@ def _build_ddl() -> dict[str, str]:
         ),
         "underlying_minute_bars": _ddl(
             "underlying_minute_bars", underlying_bar_cols, "ticker, start_ms"
+        ),
+        "underlying_day_bars": _ddl(
+            "underlying_day_bars", underlying_bar_cols, "ticker, start_ms"
         ),
         "dividends": _ddl("dividends", dividend_cols, "ticker, ex_dividend_date"),
         "splits": _ddl("splits", split_cols, "ticker, execution_date"),

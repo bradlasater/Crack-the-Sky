@@ -1,14 +1,31 @@
 """snapshot_sweep: full-chain option snapshots per underlying.
 
 Paginates ``/v3/snapshot/options/{underlying}`` (limit=250) for SPY and
-I:SPX, lands raw JSONL plus clean ``option_snapshots`` parquet (nested
-payload flattened via ``schemas.flatten_snapshot``; greeks columns stay
-nullable). ``--eod`` tags the run in the logs and output filenames.
+I:SPX, landing clean ``option_snapshots`` parquet (nested payload flattened
+via ``schemas.flatten_snapshot``) plus a ``forwards`` record set derived from
+put-call parity on the chain.
+
+**This is the only dataset here that cannot be backfilled.** Trades and bars
+can be re-pulled from S3 flat files years later; implied volatility, greeks,
+open interest and the underlying price exist only at the moment they are
+swept. That is why this job runs at the highest cadence and why the other
+REST jobs yield API budget to it.
+
+Chains are swept concurrently: SPY (~55 pages, ~7s) and I:SPX (~115 pages,
+~13s) are independent, so wall time is the slower chain rather than the sum,
+which is what makes a 1-minute schedule fit. Pagination *within* a chain
+stays sequential because ``next_url`` is a chain.
+
+Raw JSONL is off by default (``--raw`` re-enables it): at a 1-minute cadence
+it is ~6 GB/day of payload whose every schema-projected field is already in
+the parquet.
 """
 
 from __future__ import annotations
 
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from itertools import islice
 
 from ingest import schemas
@@ -17,7 +34,7 @@ from ingest.common.cli import run_job
 from ingest.common.config import Settings
 from ingest.common.http_client import MassiveClient
 from ingest.common.logging_utils import JsonlLogger
-from ingest.jobs import parse_underlyings, run_date_from_args, strip_flag
+from ingest.jobs import forward_from_parity, parse_underlyings, run_date_from_args, strip_flag
 
 JOB = "snapshot_sweep"
 DEFAULT_UNDERLYINGS = ["SPY", "I:SPX"]
@@ -25,15 +42,22 @@ SNAPSHOT_PATH = "/v3/snapshot/options"
 
 
 def _sweep_underlying(
-    client: MassiveClient,
     settings: Settings,
     logger: JsonlLogger,
     args,
     underlying: str,
     eod: bool,
+    write_raw: bool,
+    log_lock: threading.Lock,
 ) -> dict[str, int]:
-    """Snapshot the full chain of one underlying; returns pages/rows."""
+    """Snapshot the full chain of one underlying; returns pages/rows.
+
+    Gets its own ``MassiveClient`` (the shared token bucket still bounds the
+    process-wide request rate) so page counting stays per-chain when chains
+    run concurrently.
+    """
     run_date = run_date_from_args(args)
+    client = MassiveClient(settings)
     pages = 0
     orig_get = client.get
 
@@ -52,50 +76,79 @@ def _sweep_underlying(
         raw_results = list(stream)
     finally:
         client.get = orig_get  # type: ignore[method-assign]
-    records = [schemas.flatten_snapshot(r) for r in raw_results]
 
+    records = [schemas.flatten_snapshot(r) for r in raw_results]
+    forwards = forward_from_parity(records)
     label = f"{JOB}-eod" if eod else JOB
-    if not args.dry_run:
+
+    if args.dry_run:
+        with log_lock:
+            logger.log(
+                "snapshot_swept", underlying=underlying, eod=eod, pages=pages,
+                rows=len(records), forwards=len(forwards), dry_run=True,
+            )
+        return {"rows": len(records), "pages": pages, "forwards": len(forwards)}
+
+    raw_path = None
+    if write_raw:
         raw_path = landing.write_raw(
-            "option_snapshots", run_date, raw_results, job=f"{label}-{underlying}"
+            "option_snapshots", run_date, raw_results,
+            job=f"{label}-{underlying}", data_root=settings.data_root,
         )
-        clean_path = landing.write_clean(
-            "option_snapshots", run_date, records, job=f"{label}-{underlying}"
+    clean_path = landing.write_clean(
+        "option_snapshots", run_date, records,
+        job=f"{label}-{underlying}", data_root=settings.data_root,
+    )
+    forwards_path = None
+    if forwards:
+        forwards_path = landing.write_clean(
+            "forwards", run_date, forwards,
+            job=f"{label}-{underlying}", data_root=settings.data_root,
         )
+
+    with log_lock:
         logger.log(
             "snapshot_swept",
             underlying=underlying,
             eod=eod,
             pages=pages,
             rows=len(records),
-            raw_path=str(raw_path),
+            forwards=len(forwards),
+            atm_forward=round(forwards[0]["forward"], 4) if forwards else None,
+            raw_path=str(raw_path) if raw_path else None,
             clean_path=str(clean_path),
+            forwards_path=str(forwards_path) if forwards_path else None,
         )
-    else:
-        logger.log(
-            "snapshot_swept", underlying=underlying, eod=eod,
-            pages=pages, rows=len(records), dry_run=True,
-        )
-    return {"rows": len(records), "pages": pages}
+    return {"rows": len(records), "pages": pages, "forwards": len(forwards)}
 
 
-def _main_fn(args, settings: Settings, logger: JsonlLogger, eod: bool):
-    client = MassiveClient(settings)
+def _main_fn(args, settings: Settings, logger: JsonlLogger, eod: bool, write_raw: bool):
     underlyings = parse_underlyings(args.underlying, DEFAULT_UNDERLYINGS)
-    totals = {"rows": 0, "pages": 0, "eod": eod}
-    for underlying in underlyings:
-        counters = _sweep_underlying(client, settings, logger, args, underlying, eod)
-        totals["rows"] += counters["rows"]
-        totals["pages"] += counters["pages"]
+    log_lock = threading.Lock()
+    totals = {"rows": 0, "pages": 0, "forwards": 0, "eod": eod}
+
+    def sweep(underlying: str) -> dict[str, int]:
+        return _sweep_underlying(
+            settings, logger, args, underlying, eod, write_raw, log_lock
+        )
+
+    with ThreadPoolExecutor(
+        max_workers=max(1, len(underlyings)), thread_name_prefix=JOB
+    ) as pool:
+        for counters in pool.map(sweep, underlyings):
+            totals["rows"] += counters["rows"]
+            totals["pages"] += counters["pages"]
+            totals["forwards"] += counters["forwards"]
     return totals
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Entry point: ``python -m ingest.jobs.snapshot_sweep [--eod]``."""
+    """Entry point: ``python -m ingest.jobs.snapshot_sweep [--eod] [--raw]``."""
     argv, eod = strip_flag(list(sys.argv[1:] if argv is None else argv), "--eod")
+    argv, write_raw = strip_flag(argv, "--raw")
 
     def main_fn(a, s, log):
-        return _main_fn(a, s, log, eod)
+        return _main_fn(a, s, log, eod, write_raw)
 
     run_job(JOB, main_fn, argv)
 

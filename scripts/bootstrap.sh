@@ -63,7 +63,7 @@ Bootstrap complete. Next steps:
   1. Edit .env: real MASSIVE_API_KEY and the S3 keys from the Massive dashboard.
   2. Smoke-test live connectivity:   $REPO/venv/bin/python -m ingest.smoke
   3. Install the schedule:
-       sed -i "s|/home/brad|\$HOME|g" deploy/crontab
+       sed -i "s|/home/brad-lasater|\$HOME|g" deploy/crontab
        crontab deploy/crontab
   4. (Optional) backfill history:    bash scripts/backfill.sh 2026-08-01 2026-08-31
 EOF

@@ -4,7 +4,7 @@
 # does NOT expand variables in values. Before installing, replace the literal
 # path /home/brad-lasater with your actual home directory, e.g.:
 #     sed -i "s|/home/brad-lasater|$HOME|g" deploy/crontab
-# (user 'brad' is the placeholder for the headless box user).
+# (the username in the example path is a placeholder for the headless box user).
 #
 # Logs append to /data/massive/logs/cron.log (DATA_ROOT/logs). Structured
 # per-run JSONL logs live under /data/massive/logs/<job>/dt=<date>/.

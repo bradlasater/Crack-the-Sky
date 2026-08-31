@@ -1,0 +1,37 @@
+# massive data_ingest_infra crontab — install with:  crontab deploy/crontab
+#
+# IMPORTANT: cron does NOT expand '~' or '$HOME' inside command strings, and
+# does NOT expand variables in values. Before installing, replace the literal
+# path /home/brad with your actual home directory, e.g.:
+#     sed -i "s|/home/brad|$HOME|g" deploy/crontab
+# (user 'brad' is the placeholder for the headless box user).
+#
+# Logs append to /data/massive/logs/cron.log (DATA_ROOT/logs). Structured
+# per-run JSONL logs live under /data/massive/logs/<job>/dt=<date>/.
+#
+# flatfile_pull / reconcile default --date to the previous trading day, so the
+# Tue-Sat 11:05 / 11:30 runs always target yesterday's session.
+TZ=America/New_York
+MAILTO=""
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# m h dom mon dow  command
+00 08 * * 1-5    cd /home/brad/data_ingest_infra && flock -n /tmp/massive-contracts_sync.lock /home/brad/data_ingest_infra/venv/bin/python -m ingest.jobs.contracts_sync >> /data/massive/logs/cron.log 2>&1
+30 16 * * 1-5    cd /home/brad/data_ingest_infra && flock -n /tmp/massive-contracts_sync.lock /home/brad/data_ingest_infra/venv/bin/python -m ingest.jobs.contracts_sync >> /data/massive/logs/cron.log 2>&1
+00 08 * * 1-5    cd /home/brad/data_ingest_infra && flock -n /tmp/massive-dividends_sync.lock /home/brad/data_ingest_infra/venv/bin/python -m ingest.jobs.dividends_sync >> /data/massive/logs/cron.log 2>&1
+25 09 * * 1-5    cd /home/brad/data_ingest_infra && flock -n /tmp/massive-ws_minute_bars.lock /home/brad/data_ingest_infra/venv/bin/python -m ingest.jobs.ws_minute_bars >> /data/massive/logs/cron.log 2>&1
+30-55/5 9 * * 1-5    cd /home/brad/data_ingest_infra && flock -n /tmp/massive-snapshot_sweep.lock /home/brad/data_ingest_infra/venv/bin/python -m ingest.jobs.snapshot_sweep >> /data/massive/logs/cron.log 2>&1
+*/5 10-15 * * 1-5    cd /home/brad/data_ingest_infra && flock -n /tmp/massive-snapshot_sweep.lock /home/brad/data_ingest_infra/venv/bin/python -m ingest.jobs.snapshot_sweep >> /data/massive/logs/cron.log 2>&1
+0-30/5 16 * * 1-5    cd /home/brad/data_ingest_infra && flock -n /tmp/massive-snapshot_sweep.lock /home/brad/data_ingest_infra/venv/bin/python -m ingest.jobs.snapshot_sweep >> /data/massive/logs/cron.log 2>&1
+31-59 9 * * 1-5    cd /home/brad/data_ingest_infra && flock -n /tmp/massive-underlying_bars.lock /home/brad/data_ingest_infra/venv/bin/python -m ingest.jobs.underlying_bars >> /data/massive/logs/cron.log 2>&1
+* 10-15 * * 1-5    cd /home/brad/data_ingest_infra && flock -n /tmp/massive-underlying_bars.lock /home/brad/data_ingest_infra/venv/bin/python -m ingest.jobs.underlying_bars >> /data/massive/logs/cron.log 2>&1
+0-30 16 * * 1-5    cd /home/brad/data_ingest_infra && flock -n /tmp/massive-underlying_bars.lock /home/brad/data_ingest_infra/venv/bin/python -m ingest.jobs.underlying_bars >> /data/massive/logs/cron.log 2>&1
+32-58/2 9 * * 1-5    cd /home/brad/data_ingest_infra && flock -n /tmp/massive-trades_watchlist.lock /home/brad/data_ingest_infra/venv/bin/python -m ingest.jobs.trades_watchlist >> /data/massive/logs/cron.log 2>&1
+*/2 10-15 * * 1-5    cd /home/brad/data_ingest_infra && flock -n /tmp/massive-trades_watchlist.lock /home/brad/data_ingest_infra/venv/bin/python -m ingest.jobs.trades_watchlist >> /data/massive/logs/cron.log 2>&1
+0-30/2 16 * * 1-5    cd /home/brad/data_ingest_infra && flock -n /tmp/massive-trades_watchlist.lock /home/brad/data_ingest_infra/venv/bin/python -m ingest.jobs.trades_watchlist >> /data/massive/logs/cron.log 2>&1
+35 16 * * 1-5    cd /home/brad/data_ingest_infra && flock -n /tmp/massive-snapshot_sweep.lock /home/brad/data_ingest_infra/venv/bin/python -m ingest.jobs.snapshot_sweep --eod >> /data/massive/logs/cron.log 2>&1
+45 16 * * 1-5    cd /home/brad/data_ingest_infra && flock -n /tmp/massive-eod_dayaggs_rest.lock /home/brad/data_ingest_infra/venv/bin/python -m ingest.jobs.eod_dayaggs_rest >> /data/massive/logs/cron.log 2>&1
+05 11 * * 2-6    cd /home/brad/data_ingest_infra && flock -n /tmp/massive-flatfile_pull.lock /home/brad/data_ingest_infra/venv/bin/python -m ingest.jobs.flatfile_pull >> /data/massive/logs/cron.log 2>&1
+30 11 * * 2-6    cd /home/brad/data_ingest_infra && flock -n /tmp/massive-reconcile.lock /home/brad/data_ingest_infra/venv/bin/python -m ingest.jobs.reconcile >> /data/massive/logs/cron.log 2>&1
+00 07 * * 0    cd /home/brad/data_ingest_infra && flock -n /tmp/massive-holidays_sync.lock /home/brad/data_ingest_infra/venv/bin/python -m ingest.jobs.holidays_sync >> /data/massive/logs/cron.log 2>&1
+00 09 * * 6    cd /home/brad/data_ingest_infra && flock -n /tmp/massive-contracts_sync.lock /home/brad/data_ingest_infra/venv/bin/python -m ingest.jobs.contracts_sync --expired >> /data/massive/logs/cron.log 2>&1

@@ -21,7 +21,7 @@ files (the flat file always wins). Target host: Ubuntu 24.04 headless, repo at
 5. **Install the schedule:** cron does not expand `~`/`$HOME`, so first
    rewrite the placeholder user path, then install:
    ```
-   sed -i "s|/home/brad|$HOME|g" deploy/crontab
+   sed -i "s|/home/brad-lasater|$HOME|g" deploy/crontab
    crontab deploy/crontab
    ```
 

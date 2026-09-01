@@ -14,7 +14,7 @@ name: box
 # configured against this repo and started by the user-level systemd unit
 # ~/.config/systemd/user/actions-runner.service (ExecStart=run.sh; no sudo
 # needed, linger enabled). The unit sets
-#   EnvironmentFile=%h/data_ingest_infra/.env
+#   EnvironmentFile=%h/crack-the-sky/.env
 # so the job sees the credentials.
 
 on:

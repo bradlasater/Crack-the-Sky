@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>data_ingest_infra — headless box operations</title>
+  <title>Crack the Sky — headless box operations</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
@@ -103,9 +103,9 @@ Host: <code>brad-headless-server</code>, user <code>brad-lasater</code>, no pass
 <h2>Layout the repo assumes</h2>
 <table>
   <tr><th>Path</th><th>What it is</th></tr>
-  <tr><td><code>~/data_ingest_infra</code></td><td>Repo checkout. <strong>Tracks <code>main</code></strong> — cron and the runner execute whatever is checked out, so the box is pulled after merges, never left on a feature branch.</td></tr>
-  <tr><td><code>~/data_ingest_infra/venv</code></td><td>Python environment, built once by <code>scripts/bootstrap.sh</code>.</td></tr>
-  <tr><td><code>~/data_ingest_infra/.env</code></td><td>All credentials (below). Never committed; seeded from <code>.env.example</code>.</td></tr>
+  <tr><td><code>~/crack-the-sky</code></td><td>Repo checkout. <strong>Tracks <code>main</code></strong> — cron and the runner execute whatever is checked out, so the box is pulled after merges, never left on a feature branch.</td></tr>
+  <tr><td><code>~/crack-the-sky/venv</code></td><td>Python environment, built once by <code>scripts/bootstrap.sh</code>.</td></tr>
+  <tr><td><code>~/crack-the-sky/.env</code></td><td>All credentials (below). Never committed; seeded from <code>.env.example</code>.</td></tr>
   <tr><td><code>/data/massive</code></td><td><code>DATA_ROOT</code>: <code>raw/</code>, <code>clean/</code>, <code>logs/</code>, <code>_meta/</code>.</td></tr>
   <tr><td><code>~/actions-runner</code></td><td>GitHub Actions self-hosted runner install.</td></tr>
 </table>
@@ -140,7 +140,7 @@ repo as <code>ingest-box</code> (labels <code>self-hosted, linux, x64</code> —
 <code>.github/workflows/box.yml</code> targets). Runs as a user-level systemd unit, no sudo:</p>
 <pre><code>~/.config/systemd/user/actions-runner.service
   ExecStart = ~/actions-runner/run.sh        # foreground mode; runsvc.sh needs sudo
-  EnvironmentFile = ~/data_ingest_infra/.env # so jobs see the credentials
+  EnvironmentFile = ~/crack-the-sky/.env # so jobs see the credentials
   Restart = always
 loginctl enable-linger brad-lasater          # survives logout/reboot</code></pre>
 <p>Verify from anywhere: <code>gh api repos/{owner}/{repo}/actions/runners</code> should show

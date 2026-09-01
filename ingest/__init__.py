@@ -1,4 +1,4 @@
-"""data_ingest_infra: Massive.com (ex-Polygon.io) options data ingestion.
+"""Crack the Sky: Massive.com (ex-Polygon.io) options data ingestion.
 
 Subpackages:
     common:  shared config, HTTP client, market gate, landing writers, CLI runner.

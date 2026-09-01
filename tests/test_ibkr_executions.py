@@ -183,3 +183,142 @@ def test_empty_statement_is_not_a_failure() -> None:
              'accountId="U27766163"><Trades/></FlexStatement></FlexStatements>'
              '</FlexQueryResponse>')
     assert job.parse_trades(empty, "U27766163") == []
+
+
+# ---------------------------------------------------------------------------
+# The token must never reach a log, an exception, or Healthchecks
+# ---------------------------------------------------------------------------
+
+def test_http_errors_never_carry_the_token(monkeypatch, tmp_path) -> None:
+    """requests puts the prepared URL (with t=<token>) into HTTPError.
+
+    run_job logs str(exc) *and* posts it as the Healthchecks failure body,
+    which leaves the box -- so the token must be stripped at this boundary.
+    """
+    import requests
+
+    token = "573620193207778458194644"
+
+    class _Resp:
+        status_code = 500
+
+        def raise_for_status(self):
+            raise requests.HTTPError(
+                f"500 Server Error for url: https://x/GetStatement?t={token}&q=R&v=3",
+                response=self,
+            )
+
+    monkeypatch.setattr(job.requests, "get", lambda *a, **k: _Resp())
+    with pytest.raises(job.FlexError) as exc:
+        job.fetch_statement(_settings(tmp_path, ibkr_flex_token=token), _logger())
+    assert token not in str(exc.value)
+    assert "GetStatement" in str(exc.value) or "SendRequest" in str(exc.value)
+    assert "?" not in str(exc.value), "query string must be dropped entirely"
+
+
+def test_network_errors_never_carry_the_token(monkeypatch, tmp_path) -> None:
+    import requests
+
+    token = "573620193207778458194644"
+
+    def boom(*a, **k):
+        raise requests.ConnectionError(f"failed connecting to https://x?t={token}")
+
+    monkeypatch.setattr(job.requests, "get", boom)
+    with pytest.raises(job.FlexError) as exc:
+        job.fetch_statement(_settings(tmp_path, ibkr_flex_token=token), _logger())
+    assert token not in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# Account isolation
+# ---------------------------------------------------------------------------
+
+def test_row_without_account_id_is_excluded_when_filtering() -> None:
+    """Absent accountId must not bypass the filter it is supposed to satisfy."""
+    xml_text = (
+        '<FlexQueryResponse><FlexStatements><FlexStatement accountId="U27766163">'
+        '<Trades>'
+        '<Trade tradeID="1" symbol="X" assetCategory="STK" quantity="1"/>'
+        '<Trade accountId="U27766163" tradeID="2" symbol="Y" assetCategory="STK" quantity="1"/>'
+        '</Trades></FlexStatement></FlexStatements></FlexQueryResponse>'
+    )
+    kept = job.parse_trades(xml_text, "U27766163")
+    assert [r["trade_id"] for r in kept] == ["2"]
+    # Unfiltered still sees both.
+    assert len(job.parse_trades(xml_text)) == 2
+
+
+# ---------------------------------------------------------------------------
+# --date cannot relabel a statement
+# ---------------------------------------------------------------------------
+
+def test_statement_period_is_read_from_the_xml() -> None:
+    assert job.statement_period(FIXTURE.read_text()) == ("2026-08-28", "2026-08-28")
+
+
+def test_mismatched_date_is_rejected(monkeypatch, tmp_path) -> None:
+    """The saved Flex period decides the content; --date must not relabel it."""
+    import argparse
+
+    monkeypatch.setattr(job, "fetch_statement", lambda s, log: FIXTURE.read_text())
+    args = argparse.Namespace(date="2026-08-01", limit=None, dry_run=True,
+                              force=True, underlying=None)
+    with pytest.raises(ValueError, match="does not match the statement period"):
+        job._main_fn(args, _settings(tmp_path), _logger())
+
+
+def test_partition_follows_the_statement_not_the_clock(monkeypatch, tmp_path) -> None:
+    import argparse
+
+    monkeypatch.setattr(job, "fetch_statement", lambda s, log: FIXTURE.read_text())
+    args = argparse.Namespace(date=None, limit=None, dry_run=True,
+                              force=True, underlying=None)
+    out = job._main_fn(args, _settings(tmp_path), _logger())
+    assert out["date"] == "2026-08-28"
+
+
+# ---------------------------------------------------------------------------
+# The write path -- untested before, and it could not succeed
+# ---------------------------------------------------------------------------
+
+def test_non_dry_run_lands_raw_xml_verbatim_and_clean_parquet(monkeypatch, tmp_path) -> None:
+    """Regression: write_raw() has no fmt= and JSON-encodes iterables.
+
+    Passing the XML string to it raised TypeError, and without fmt it would
+    have written one JSON line per character instead of the document.
+    """
+    import argparse
+
+    import pyarrow.parquet as pq
+
+    xml_text = FIXTURE.read_text()
+    monkeypatch.setattr(job, "fetch_statement", lambda s, log: xml_text)
+    args = argparse.Namespace(date=None, limit=None, dry_run=False,
+                              force=True, underlying=None)
+    out = job._main_fn(args, _settings(tmp_path), _logger())
+    assert out["rows"] == 2
+    assert out["opra_resolved"] == 2
+
+    raw = list((tmp_path / "raw" / "ibkr_executions" / "dt=2026-08-28").glob("*.xml"))
+    assert len(raw) == 1, "raw XML must land with an .xml extension"
+    assert raw[0].read_text() == xml_text, "raw payload must be byte-for-byte"
+
+    clean = list((tmp_path / "clean" / "ibkr_executions" / "dt=2026-08-28").glob("*.parquet"))
+    assert len(clean) == 1
+    rows = {r["trade_id"]: r for r in pq.read_table(clean[0]).to_pylist()}
+    assert rows["7712345"]["opra_ticker"] == "O:SPXW260918P07600000"
+    assert rows["7712346"]["realized_pnl"] == 112.5
+
+
+def test_a_day_with_no_fills_writes_nothing_and_succeeds(monkeypatch, tmp_path) -> None:
+    import argparse
+
+    empty = ('<FlexQueryResponse><FlexStatements><FlexStatement accountId="U27766163" '
+             'fromDate="20260828" toDate="20260828"><Trades/></FlexStatement>'
+             '</FlexStatements></FlexQueryResponse>')
+    monkeypatch.setattr(job, "fetch_statement", lambda s, log: empty)
+    args = argparse.Namespace(date=None, limit=None, dry_run=False,
+                              force=True, underlying=None)
+    assert job._main_fn(args, _settings(tmp_path), _logger())["rows"] == 0
+    assert not (tmp_path / "clean" / "ibkr_executions").exists()

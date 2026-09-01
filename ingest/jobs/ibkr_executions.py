@@ -29,6 +29,7 @@ import time
 import xml.etree.ElementTree as ET
 from datetime import date
 from typing import Any
+from urllib.parse import urlsplit
 
 import requests
 
@@ -52,9 +53,13 @@ POLL_TRIES = 12
 
 # Codes worth naming in the error, because each has a different fix.
 FATAL_HINTS = {
-    "1012": "token is invalid — regenerate it in Flex Web Service",
-    "1014": "query id is invalid — check IBKR_FLEX_QUERY_ID",
-    "1015": "token has expired — regenerate it (they last ~1 year)",
+    "1012": "check IBKR_FLEX_TOKEN — regenerate it in Flex Web Service",
+    "1014": "check IBKR_FLEX_QUERY_ID — it is the Flex Query's numeric id, "
+            "not the token",
+    # Observed live: IBKR returns 1015 for a token that is malformed as well as
+    # one that has aged out, so do not assert which it is.
+    "1015": "check IBKR_FLEX_TOKEN — invalid or expired; regenerate it "
+            "(tokens last ~1 year)",
     "1020": "malformed request — check the token/query id are numeric",
 }
 
@@ -64,12 +69,31 @@ _MONTHS = {m: i for i, m in enumerate(
 
 
 class FlexError(RuntimeError):
-    """The Flex service refused the request."""
+    """The Flex service refused the request (never carries the token)."""
+
+
+def _safe_url(url: str) -> str:
+    """Path only -- the query string carries the token."""
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}{parts.path}"
 
 
 def _get(url: str, params: dict[str, str]) -> str:
-    resp = requests.get(url, params=params, timeout=TIMEOUT_S)
-    resp.raise_for_status()
+    """GET, never letting the token escape into an exception message.
+
+    ``raise_for_status()`` puts the fully prepared URL -- including ``t=<token>``
+    -- into the HTTPError, and ``run_job`` logs ``str(exc)`` AND posts it as the
+    Healthchecks failure body, which leaves the box. Any request failure is
+    therefore re-raised with the URL reduced to its path.
+    """
+    try:
+        resp = requests.get(url, params=params, timeout=TIMEOUT_S)
+        resp.raise_for_status()
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else "?"
+        raise FlexError(f"HTTP {status} from {_safe_url(url)}") from None
+    except requests.RequestException as exc:
+        raise FlexError(f"{type(exc).__name__} contacting {_safe_url(url)}") from None
     return resp.text
 
 
@@ -197,24 +221,57 @@ def _record(row: dict[str, str]) -> dict[str, Any]:
     }
 
 
+def statement_period(xml_text: str) -> tuple[str | None, str | None]:
+    """``(fromDate, toDate)`` of the first FlexStatement, as YYYY-MM-DD."""
+    def _iso(v: str | None) -> str | None:
+        v = (v or "").strip()
+        if len(v) == 8 and v.isdigit():
+            return f"{v[:4]}-{v[4:6]}-{v[6:]}"
+        return v or None
+
+    root = ET.fromstring(xml_text)
+    el = next(root.iter("FlexStatement"), None)
+    if el is None:
+        return (None, None)
+    return _iso(el.attrib.get("fromDate")), _iso(el.attrib.get("toDate"))
+
+
 def parse_trades(xml_text: str, account_id: str | None = None) -> list[dict[str, Any]]:
     """Every ``<Trade>`` in a Flex statement, optionally filtered by account."""
     root = ET.fromstring(xml_text)
     out: list[dict[str, Any]] = []
     for el in root.iter("Trade"):
         row = dict(el.attrib)
-        if account_id and row.get("accountId") and row["accountId"] != account_id:
+        if account_id and row.get("accountId") != account_id:
+            # Exact match required, including when accountId is absent: account
+            # isolation depends on this field, so a query configured without it
+            # must not silently ingest rows whose account cannot be verified.
             continue
         out.append(_record(row))
     return out
 
 
 def _main_fn(args, settings: Settings, logger: JsonlLogger):
-    run_date = (
-        date.fromisoformat(args.date) if args.date
-        else market_gate.previous_trading_day(market_gate.today_et())
-    )
+    requested = date.fromisoformat(args.date) if args.date else None
     xml_text = fetch_statement(settings, logger)
+
+    # The Flex query carries its own saved period ("Last Business Day"), which
+    # --date cannot change. Landing whatever came back under a requested date
+    # would file today's statement as history. Trust the statement.
+    from_date, to_date = statement_period(xml_text)
+    logger.log("flex_period", from_date=from_date, to_date=to_date,
+               requested=requested.isoformat() if requested else None)
+    if requested is not None and to_date and requested.isoformat() != to_date:
+        raise ValueError(
+            f"--date {requested} does not match the statement period "
+            f"{from_date}..{to_date}. The Flex query's saved period decides what "
+            "is returned; change the period in Account Management (or make a "
+            "second query) rather than relabelling this statement."
+        )
+    run_date = (
+        date.fromisoformat(to_date) if to_date
+        else requested or market_gate.previous_trading_day(market_gate.today_et())
+    )
     records = parse_trades(xml_text, settings.ibkr_account_id)
 
     if args.limit is not None:
@@ -231,11 +288,11 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger):
         # An empty statement is normal on a day with no fills. Say so plainly
         # rather than failing, but land nothing.
         logger.log("flex_no_trades", date=run_date.isoformat())
-        return {"rows": 0}
+        return {"rows": 0, "date": run_date.isoformat()}
 
     if not args.dry_run:
-        raw_path = landing.write_raw(
-            DATASET, run_date, xml_text, job=JOB, fmt="xml",
+        raw_path = landing.write_raw_text(
+            DATASET, run_date, xml_text, job=JOB, ext="xml",
             data_root=settings.data_root,
         )
         clean_path = landing.write_clean(
@@ -243,7 +300,8 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger):
         )
         logger.log("flex_written", rows=len(records),
                    raw_path=str(raw_path), clean_path=str(clean_path))
-    return {"rows": len(records), "opra_resolved": matched}
+    return {"rows": len(records), "opra_resolved": matched,
+            "date": run_date.isoformat()}
 
 
 def main(argv: list[str] | None = None) -> None:

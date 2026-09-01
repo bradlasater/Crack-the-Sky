@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Callable
+from datetime import date
 
 import requests
 
@@ -84,8 +85,11 @@ PROBES: list[tuple[str, str, str, Validator | None]] = [
     ("reference/contracts",   "/v3/reference/options/contracts?underlying_ticker=SPY&limit=1", ENTITLED, _v_contracts),
     ("snapshot/options SPY",  "/v3/snapshot/options/SPY?limit=1", ENTITLED, _v_snapshot),
     ("snapshot/options SPX",  "/v3/snapshot/options/I:SPX?limit=1", ENTITLED, None),
-    ("trades/option",         "/v3/trades/O:SPY260918C00770000?limit=1", ENTITLED, None),
-    ("aggs/option minute T-1", "/v2/aggs/ticker/O:SPY260918C00770000/range/1/minute/{d}/{d}?limit=1", ENTITLED, _v_minute_aggs),
+    # {contract} is resolved at run time -- see _resolve_probe_contract. A
+    # fixed ticker turns into a permanent CI failure the day it expires,
+    # because the aggregate request then returns an empty (but entitled) 200.
+    ("trades/option",         "/v3/trades/{contract}?limit=1", ENTITLED, None),
+    ("aggs/option minute T-1", "/v2/aggs/ticker/{contract}/range/1/minute/{d}/{d}?limit=1", ENTITLED, _v_minute_aggs),
     ("aggs/equity minute T-1", "/v2/aggs/ticker/SPY/range/1/minute/{d}/{d}?limit=1", ENTITLED, _v_minute_aggs),
     ("aggs/grouped stocks",   "/v2/aggs/grouped/locale/us/market/stocks/{d}?limit=1", ENTITLED, None),
     ("reference/dividends",   "/v3/reference/dividends?ticker=SPY&limit=1", ENTITLED, None),
@@ -93,8 +97,8 @@ PROBES: list[tuple[str, str, str, Validator | None]] = [
     # --- not entitled: do not build jobs against these -----------------------
     # Options NBBO. The single biggest structural gap: with no bid/ask, the
     # 1-minute snapshot sweep is the only record of option pricing state.
-    ("quotes/option NBBO",    "/v3/quotes/O:SPY260918C00770000?limit=1", FORBIDDEN, None),
-    ("last/nbbo option",      "/v2/last/nbbo/O:SPY260918C00770000", FORBIDDEN, None),
+    ("quotes/option NBBO",    "/v3/quotes/{contract}?limit=1", FORBIDDEN, None),
+    ("last/nbbo option",      "/v2/last/nbbo/{contract}", FORBIDDEN, None),
     # Index levels. I:SPX is recovered from put-call parity instead; see
     # ingest.jobs.forward_from_parity.
     ("aggs/index SPX",        "/v2/aggs/ticker/I:SPX/range/1/minute/{d}/{d}?limit=1", FORBIDDEN, None),
@@ -144,15 +148,68 @@ def _observed_rest(
         return "error", f"{type(exc).__name__}: {exc}"
 
 
+def _s3_credentials_missing(settings: Settings) -> str | None:
+    """Why S3 cannot be probed yet, or None when it can.
+
+    Both halves of the key pair matter, and a freshly bootstrapped .env holds
+    the dashboard placeholders -- sending those to S3 produces a FAIL/PASS
+    verdict about credentials rather than the SKIP this is meant to report.
+    """
+    key = settings.massive_s3_access_key_id or ""
+    secret = settings.massive_s3_secret_access_key or ""
+    if not key or not secret:
+        return "no S3 credentials"
+    if key.startswith(_PLACEHOLDER) or secret.startswith(_PLACEHOLDER):
+        return "placeholder S3 credentials"
+    return None
+
+
+def _resolve_probe_contract(settings: Settings, d: date) -> tuple[str | None, str]:
+    """A SPY contract that was live and traded on ``d``; ``(ticker, detail)``.
+
+    The option probes need a contract that still exists *and* printed on the
+    probe date -- an expired one returns an entitled-but-empty 200, which
+    ``_v_minute_aggs`` cannot distinguish from a revoked entitlement. The
+    snapshot chain carries day volume, so the busiest unexpired contract is
+    both live and guaranteed to have bars.
+    """
+    url = (
+        settings.massive_api_base.rstrip("/")
+        + "/v3/snapshot/options/SPY?limit=250&apiKey="
+        + settings.massive_api_key
+    )
+    try:
+        resp = requests.get(url, timeout=30)
+        results = resp.json().get("results") or [] if resp.ok else []
+    except (requests.RequestException, ValueError) as exc:
+        return None, f"{type(exc).__name__} resolving a probe contract"
+
+    best, best_volume = None, 0.0
+    for row in results:
+        details = row.get("details") or {}
+        ticker, expiry = details.get("ticker"), details.get("expiration_date")
+        if not ticker or not expiry or str(expiry) <= d.isoformat():
+            continue
+        volume = float((row.get("day") or {}).get("volume") or 0)
+        if volume > best_volume:
+            best, best_volume = ticker, volume
+    if best is None:
+        return None, "no unexpired SPY contract with volume in the chain"
+    return best, f"{best} (volume {best_volume:,.0f})"
+
+
 def _observed_s3(settings: Settings, key: str) -> tuple[str, str]:
     """Probe one flat-file key with HEAD; returns (observed, detail)."""
-    from botocore.exceptions import ClientError
-
-    if not settings.massive_s3_access_key_id:
-        return "skip", "no S3 credentials"
+    missing = _s3_credentials_missing(settings)
+    if missing:
+        return "skip", missing
     try:
+        # Imported inside the guard: on a box without boto3 this is the
+        # difference between a SKIP row and an ImportError traceback.
+        from botocore.exceptions import ClientError
+
         client = s3_client(settings)
-    except ImportError:  # pragma: no cover
+    except ImportError:
         return "skip", "boto3 unavailable"
     try:
         client.head_object(Bucket=settings.massive_s3_bucket, Key=key)
@@ -179,9 +236,16 @@ def main(argv: list[str] | None = None) -> int:
     # a morning run does not report a not-yet-published file as a mismatch.
     fd = market_gate.previous_trading_day(d)
 
+    contract, contract_detail = _resolve_probe_contract(settings, d)
+    print(f"probe contract: {contract_detail}", file=sys.stderr)
+
     rows: list[tuple[str, str, str, str, str]] = []
     for name, template, expected, validate in PROBES:
-        observed, detail = _observed_rest(settings, template.format(d=d.isoformat()), validate)
+        if "{contract}" in template and contract is None:
+            rows.append((name, expected, "skip", contract_detail, "REST"))
+            continue
+        path = template.format(d=d.isoformat(), contract=contract or "")
+        observed, detail = _observed_rest(settings, path, validate)
         rows.append((name, expected, observed, detail, "REST"))
     for name, template, expected in S3_PROBES:
         key = template.format(y=fd.year, m=f"{fd.month:02d}", d=fd.isoformat())

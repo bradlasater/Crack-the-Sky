@@ -115,10 +115,23 @@ def read_partition(settings: Settings, dataset: str, dt: date) -> list[dict[str,
 def latest_clean_records(
     settings: Settings, dataset: str, on_or_before: date
 ) -> list[dict[str, Any]]:
-    """Records of the most recent clean partition at or before ``on_or_before``."""
+    """Records of the most recent clean partition at or before ``on_or_before``.
+
+    Datasets written many times a day are read as-of (latest file per
+    underlying) rather than whole-partition. ``read_partition`` stays
+    fail-loud for them, but this helper is the "give me the current state"
+    accessor and must keep working: ``contracts_sync._previous_tickers`` calls
+    it for ``contracts``, and on a fresh run the SPY pass writes the first
+    file, so the SPX pass would otherwise hit its own partition and raise.
+    """
     dt = latest_partition(settings, dataset, on_or_before)
     if dt is None:
         return []
+    if dataset in catalog.ASOF_DATASETS:
+        try:
+            return catalog.read_asof(dataset, dt, data_root=settings.data_root).to_pylist()
+        except catalog.AsOfError:
+            return []
     return read_partition(settings, dataset, dt)
 
 

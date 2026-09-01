@@ -49,8 +49,9 @@ LOG=/data/massive/logs/cron.log
 
 # --- math vs vendor (canary): after the 16:35 EOD snapshot has written today's
 # snapshots + forwards. Own IV/Greeks vs vendor, after unit alignment.
-# Bounded SPY CRR (--spy-atm-pct 0.05, --max-rows 400). Exits non-zero on
-# drift / no data, which pings Healthchecks /fail and mails if MAILTO is set.
+# Bounded SPY CRR (--spy-atm-pct 0.05; --max-rows 400 caps CRR rows only).
+# Exits non-zero on drift / no data, which pings Healthchecks /fail and mails
+# if MAILTO is set.
 00 17 * * 1-5    cd $REPO && flock -n /tmp/massive-drift_check.lock $PY -m pricing.drift_check >> $LOG 2>&1
 
 # --- websocket minute bars (same-day tape) --------------------------------

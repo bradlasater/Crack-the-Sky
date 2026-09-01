@@ -403,6 +403,8 @@ def greeks_asof(
 
     ``moneyness`` (if set) skips strikes farther than that fraction of the
     parity forward so a cron CRR pass can stay on an ATM slice.
+    ``max_rows`` (if set) caps **American CRR** rows only; remaining American
+    names are European-priced so an SPX-first file concat cannot starve SPY.
     """
     if not math.isfinite(r):
         raise ChainError(f"non-finite r: {r!r}")
@@ -434,6 +436,7 @@ def greeks_asof(
     n_no_price = 0
     n_skipped = 0
     n_otm = 0
+    n_crr = 0
 
     for quote in quotes:
         if quote.contract.root not in allow:
@@ -477,6 +480,12 @@ def greeks_asof(
                 crr_steps=crr_steps,
                 spy_american_moneyness=spy_american_moneyness,
             )
+            if (
+                max_rows is not None
+                and eng.name == "american_crr"
+                and n_crr >= max_rows
+            ):
+                eng = EuropeanBSM()
             own_iv = implied_vol_quote(qte, r=r, forward=fwd)
             if not math.isfinite(own_iv):
                 raise ValueError(f"{qte.contract.ticker}: inverted IV is not finite")
@@ -544,8 +553,8 @@ def greeks_asof(
                 "diff_vega": _signed_diff(own_vega, vendor["vendor_vega"]),
             }
         )
-        if max_rows is not None and len(rows) >= max_rows:
-            break
+        if eng.name == "american_crr":
+            n_crr += 1
 
     if counts is not None:
         counts.n_quotes = len(quotes)
@@ -621,7 +630,7 @@ def main(argv: list[str] | None = None) -> int:
         "--max-rows",
         type=int,
         default=None,
-        help="stop after this many priced rows (smoke / CRR budget)",
+        help="cap American CRR rows; remaining American names are European BSM",
     )
     parser.add_argument(
         "--skip-uninvertible",

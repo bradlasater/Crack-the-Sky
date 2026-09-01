@@ -35,7 +35,8 @@ A name is beyond band on a greek when
 Cron bounds
 -----------
 SPY CRR is limited with ``--spy-atm-pct`` (default 5%) and ``--max-rows``
-(default 400). Combined with ``--atm-pct``, only the ATM slice is inverted.
+(default 400, CRR rows only — not a global chain cap). Combined with
+``--atm-pct``, only the ATM slice is inverted.
 ``--r`` defaults to ``DRIFT_CHECK_R`` (else 0.04); there is no rates warehouse.
 
 Run: ``python -m pricing.drift_check [--date YYYY-MM-DD]``
@@ -395,10 +396,22 @@ def _hc_target(file_vals: Mapping[str, str] | None = None) -> tuple[str | None, 
     return (url or None), False
 
 
+def _webhook_body(url: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Slack incoming webhooks need ``text``; other endpoints get the report JSON."""
+    if "hooks.slack.com" in url:
+        status = payload.get("status", FAIL)
+        date_s = payload.get("date", "")
+        lines = [f"{status} drift_check {date_s}".strip()]
+        for msg in payload.get("failures") or []:
+            lines.append(str(msg))
+        return {"text": "\n".join(lines)}
+    return payload
+
+
 def _post_webhook(url: str, payload: dict[str, Any]) -> None:
     """Best-effort POST of the FAIL report. Never raises."""
     try:
-        data = json.dumps(payload, default=str).encode("utf-8")
+        data = json.dumps(_webhook_body(url, payload), default=str).encode("utf-8")
         req = urllib.request.Request(url, data=data, method="POST")
         req.add_header("Content-Type", "application/json")
         with urllib.request.urlopen(req, timeout=5):
@@ -526,7 +539,7 @@ def main(argv: list[str] | None = None) -> int:
         "--max-rows",
         type=int,
         default=DEFAULT_MAX_ROWS,
-        help=f"CRR/cron budget (default {DEFAULT_MAX_ROWS})",
+        help=f"cap American CRR rows (default {DEFAULT_MAX_ROWS}; not a global row cap)",
     )
     parser.add_argument("--min-compare", type=int, default=DEFAULT_MIN_COMPARE)
     parser.add_argument("--fail-frac", type=float, default=DEFAULT_FAIL_FRAC)

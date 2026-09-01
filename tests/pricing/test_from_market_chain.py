@@ -493,3 +493,77 @@ def test_cli_output_oserror_exits_1(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     )
     assert rc == 1
     assert not out.exists()
+
+
+def test_max_rows_does_not_starve_spy_after_spx_file(tmp_path: Path) -> None:
+    """read_asof concatenates SPX before SPY; max_rows must not drop SPY."""
+    last_spy = _spy_last()
+    last_spxw = _spxw_last()
+    write_records(
+        partition_path(tmp_path, "option_snapshots", DT, f"snapshot_sweep-SPY-{ASOF_MS}.parquet"),
+        "option_snapshots",
+        [_spy_snap(last_spy)],
+    )
+    write_records(
+        partition_path(tmp_path, "option_snapshots", DT, f"snapshot_sweep-SPX-{ASOF_MS}.parquet"),
+        "option_snapshots",
+        [_spxw_snap(last_spxw)],
+    )
+    write_records(
+        partition_path(tmp_path, "forwards", DT, f"snapshot_sweep-SPY-{ASOF_MS}.parquet"),
+        "forwards",
+        [forward_row(underlying="SPY", expiry=EXPIRY, forward=_spy_forward(), asof_ns=ASOF_NS)],
+    )
+    write_records(
+        partition_path(tmp_path, "forwards", DT, f"snapshot_sweep-SPX-{ASOF_MS}.parquet"),
+        "forwards",
+        [forward_row(underlying="I:SPX", expiry=EXPIRY, forward=F_SPX, asof_ns=ASOF_NS)],
+    )
+    table = greeks_asof(
+        DT,
+        ASOF_NS,
+        r=R,
+        data_root=tmp_path,
+        roots=("SPY", "SPXW"),
+        crr_steps=21,
+        max_rows=1,
+    )
+    priced_roots = {row["root"] for row in table.to_pylist()}
+    assert priced_roots == {"SPY", "SPXW"}
+
+
+def test_max_rows_caps_crr_then_falls_back_to_european(tmp_path: Path) -> None:
+    last = _spy_last()
+    T = year_fraction(parse_opra(SPY), ASOF_NS)
+    last_put = float(bsm_price(S_SPY, 500.0, T, R, SIGMA, "put", q=0.01))
+    call = _spy_snap(last)
+    put = snapshot_row(
+        "O:SPY260918P00500000",
+        strike=500.0,
+        expiry=EXPIRY,
+        underlying="SPY",
+        cp="put",
+        vendor_iv=0.25,
+        vendor_delta=-0.45,
+    )
+    put["underlying_price"] = S_SPY
+    put["last_trade_price"] = last_put
+    put["day_close"] = last_put
+    _write(
+        tmp_path,
+        snap=[call, put],
+        fwd=[forward_row(underlying="SPY", expiry=EXPIRY, forward=_spy_forward(), asof_ns=ASOF_NS)],
+        underlying="SPY",
+    )
+    table = greeks_asof(
+        DT,
+        ASOF_NS,
+        r=R,
+        data_root=tmp_path,
+        roots=("SPY",),
+        crr_steps=21,
+        max_rows=1,
+    )
+    engines = [row["greeks_engine"] for row in table.to_pylist()]
+    assert engines.count("american_crr") == 1
+    assert engines.count("european_bsm") == 1

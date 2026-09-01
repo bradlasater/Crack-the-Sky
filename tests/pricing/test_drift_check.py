@@ -11,6 +11,7 @@ import pyarrow as pa
 import pytest
 
 from ingest.common import landing
+from pricing import drift_check as drift_mod
 from pricing.conventions import CALENDAR_DAYS_PER_YEAR
 from pricing.drift_check import (
     DEFAULT_THRESHOLDS,
@@ -23,7 +24,6 @@ from pricing.drift_check import (
     evaluate_drift,
     main,
     run_drift,
-    _post_webhook,
 )
 from pricing.from_market import ChainCounts, greeks_asof
 from tests.marketdata.conftest import forward_row
@@ -315,5 +315,35 @@ def test_webhook_closes_urlopen(monkeypatch: pytest.MonkeyPatch) -> None:
         return FakeResp()
 
     monkeypatch.setattr("pricing.drift_check.urllib.request.urlopen", fake_urlopen)
-    _post_webhook("http://example.test/hook", {"status": "FAIL"})
+    drift_mod._post_webhook("http://example.test/hook", {"status": "FAIL"})
     assert closed == [True]
+
+
+def test_slack_webhook_wraps_text_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[dict] = []
+
+    class FakeResp:
+        def __enter__(self) -> FakeResp:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    def fake_urlopen(req: object, timeout: float = 5) -> FakeResp:
+        captured.append(json.loads(req.data.decode("utf-8")))  # type: ignore[attr-defined]
+        return FakeResp()
+
+    monkeypatch.setattr("pricing.drift_check.urllib.request.urlopen", fake_urlopen)
+    drift_mod._post_webhook(
+        "https://hooks.slack.com/services/T/B/X",
+        {"status": "FAIL", "date": DT.isoformat(), "failures": ["median |ΔIV| too large"]},
+    )
+    assert len(captured) == 1
+    assert "text" in captured[0]
+    assert "FAIL drift_check" in captured[0]["text"]
+    assert "median |ΔIV|" in captured[0]["text"]
+
+    captured.clear()
+    drift_mod._post_webhook("http://example.test/hook", {"status": "FAIL", "date": DT.isoformat()})
+    assert captured[0]["status"] == "FAIL"
+    assert "text" not in captured[0]

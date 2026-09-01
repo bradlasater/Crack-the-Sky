@@ -446,7 +446,8 @@
           <code>× 365</code> and <code>× 100</code> respectively.
           Fails if median <code>|ΔIV|</code> on ATM names (&plusmn;5% of F) exceeds 4 vol pts,
           or if &gt;25% of those names sit beyond the abs/rel band on IV/delta/vega/gamma/theta.
-          SPY CRR is bounded (<code>--spy-atm-pct 0.05</code>, <code>--max-rows 400</code>).
+          SPY CRR is bounded (<code>--spy-atm-pct 0.05</code>;
+          <code>--max-rows 400</code> caps CRR rows, not the whole chain).
           <code>--r</code> from <code>DRIFT_CHECK_R</code> (default 0.04).
           Report: <code>_meta/drift_check.json</code>; JSONL under <code>logs/drift_check/</code>.
           Exit 1 pings Healthchecks <code>/fail</code> (and cron mail if <code>MAILTO</code> is set).
@@ -625,8 +626,9 @@
       FAIL when median <code>|ΔIV|</code> &gt; 0.04, or &gt;25% of ATM names exceed
       the abs/rel band on IV, delta, vega, gamma, or theta — not a single far-OTM tick.
       Uninvertible / T≤0 / missing quote are skipped and counted.
-      SPY CRR is an ATM slice (<code>--spy-atm-pct 0.05</code>, <code>--max-rows 400</code>)
-      so cron finishes. <code>DRIFT_CHECK_R=0.04</code> in <code>.env</code> (no rates warehouse).
+      SPY CRR is an ATM slice (<code>--spy-atm-pct 0.05</code>;
+      <code>--max-rows 400</code> caps American CRR rows only, so an SPX-first
+      concat cannot skip SPY) so cron finishes. <code>DRIFT_CHECK_R=0.04</code> in <code>.env</code> (no rates warehouse).
       Alert: structured JSONL + <code>_meta/drift_check.json</code>, exit 1
       (cron <code>MAILTO</code> if set; Healthchecks <code>massive-drift-check</code>
       <code>/fail</code>; optional <code>DRIFT_ALERT_WEBHOOK</code>).

@@ -23,6 +23,10 @@ alert on a run that hangs rather than only one that crashes. Exceptions send
 
 ``HEALTHCHECKS_PING_URL`` (a single check for everything) still works and takes
 lower precedence; it is kept only for back-compatibility.
+
+``HEALTHCHECKS_BASE`` is the **ping root**, not the site root. Hosted is
+``https://hc-ping.com`` (the default); a self-hosted instance serves pings
+under ``/ping``, so it must be set to ``https://hc.example.internal/ping``.
 """
 
 from __future__ import annotations
@@ -78,6 +82,8 @@ def healthcheck_url(settings: Settings, job_name: str) -> tuple[str | None, bool
     """Return ``(base_url, autocreate)`` for this job's check.
 
     Prefers the per-job ping-key form; falls back to the single shared URL.
+    ``settings.healthchecks_base`` is the ping root -- ``https://hc-ping.com``
+    hosted, ``https://<host>/ping`` self-hosted.
     """
     if settings.healthchecks_ping_key:
         base = f"{settings.healthchecks_base}/{settings.healthchecks_ping_key}"
@@ -141,7 +147,21 @@ def run_job(job_name: str, main_fn: MainFn, argv: list[str] | None = None) -> No
                    **{k: v for k, v in summary.items() if k not in ("rows", "bytes")})
         ping(ping_url, "", autocreate,
              body=f"{job_name} ok: rows={summary.get('rows', 0)} in {duration_s}s")
-    except SystemExit:
+    except SystemExit as exc:
+        # market_gate.require_trading_day() exits 0 on holidays, and cron fires
+        # on weekdays regardless of the market calendar. Without a terminal
+        # ping here the check stays in "started" and Healthchecks reports a
+        # hung run on every market holiday -- a false page roughly ten times a
+        # year, which is exactly how alerting gets muted and stops working.
+        code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+        duration_s = round(time.monotonic() - start, 3)
+        if code == 0:
+            ping(ping_url, "", autocreate,
+                 body=f"{job_name} exited early (not a trading day, or nothing to do)")
+        else:
+            ping(ping_url, "/fail", autocreate,
+                 body=f"{job_name} exited {code} after {duration_s}s")
+        logger.close()
         raise
     except Exception as exc:  # noqa: BLE001 - top-level job guard
         duration_s = round(time.monotonic() - start, 3)

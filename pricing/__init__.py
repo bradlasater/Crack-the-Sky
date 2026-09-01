@@ -5,5 +5,6 @@ Vendor snapshot greeks / IV columns are never inputs here. Pass
 from a market price with ``pricing.iv.implied_vol`` when needed.
 
 Import the submodules directly (``pricing.bsm``, ``pricing.iv``,
-``pricing.engine``, ``pricing.conventions``, ``pricing.from_market``).
+``pricing.engine``, ``pricing.conventions``, ``pricing.from_market``,
+``pricing.drift_check``).
 """

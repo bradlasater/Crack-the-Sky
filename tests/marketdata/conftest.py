@@ -66,6 +66,34 @@ def contract_row(ticker: str, *, strike: float = 420.0, underlying: str = "SPY")
     return rec
 
 
+def forward_row(
+    *,
+    underlying: str = "SPY",
+    expiry: str = "2026-09-18",
+    forward: float = 500.0,
+    atm_strike: float | None = None,
+    asof_ns: int = 1_700_000_000_000_000_000,
+    method: str = "parity",
+) -> dict[str, Any]:
+    """Minimal forwards record covering every schema field."""
+    schema = SCHEMAS["forwards"]
+    rec = {f.name: None for f in schema}
+    rec.update(
+        {
+            "underlying_ticker": underlying,
+            "expiration_date": expiry,
+            "atm_strike": atm_strike if atm_strike is not None else forward,
+            "forward": forward,
+            "call_price": 10.0,
+            "put_price": 10.0,
+            "pairs": 10,
+            "asof_ns": asof_ns,
+            "method": method,
+        }
+    )
+    return rec
+
+
 def write_records(
     path: Path,
     dataset: str,

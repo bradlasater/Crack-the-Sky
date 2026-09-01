@@ -376,6 +376,10 @@
       <div class="name">snapshot --eod</div>
       <div class="track"><span class="bar rest" style="left:95.8%; width:3%"></span></div>
     </div>
+    <div class="row">
+      <div class="name">drift_check</div>
+      <div class="track"><span class="bar ref" style="left:97%; width:3%"></span></div>
+    </div>
   </div>
 
   <h2>Everything that runs</h2>
@@ -429,6 +433,24 @@
         <td class="when">16:35</td>
         <td>Mon–Fri</td>
         <td>Same snapshot job, tagged EOD in filenames and logs.</td>
+      </tr>
+      <tr>
+        <td class="job">drift_check</td>
+        <td class="when">17:00</td>
+        <td>Mon–Fri</td>
+        <td>
+          Daily own-vs-vendor IV/Greeks canary
+          (<code>python -m pricing.drift_check</code>).
+          As-of is the last snapshot at or before <strong>16:40 ET</strong>.
+          Vendor theta is per calendar day and vega per 1% vol; we compare after
+          <code>× 365</code> and <code>× 100</code> respectively.
+          Fails if median <code>|ΔIV|</code> on ATM names (&plusmn;5% of F) exceeds 4 vol pts,
+          or if &gt;25% of those names sit beyond the abs/rel band on IV/delta/vega/gamma/theta.
+          SPY CRR is bounded (<code>--spy-atm-pct 0.05</code>, <code>--max-rows 400</code>).
+          <code>--r</code> from <code>DRIFT_CHECK_R</code> (default 0.04).
+          Report: <code>_meta/drift_check.json</code>; JSONL under <code>logs/drift_check/</code>.
+          Exit 1 pings Healthchecks <code>/fail</code> (and cron mail if <code>MAILTO</code> is set).
+        </td>
       </tr>
       <tr>
         <td class="job">underlying_bars --prev-trading-day<br><span class="tag rest">rest</span></td>
@@ -517,6 +539,16 @@
         <td class="when">before the monthly --apply</td>
         <td>Dry run (no <code>--apply</code>): prints what the scheduled prune would delete.</td>
       </tr>
+      <tr>
+        <td class="job">python -m pricing.from_market --date D --asof-ns N --r 0.04</td>
+        <td class="when">on demand</td>
+        <td>Own IV and Greeks as-of that instant. See Greeks as-of below.</td>
+      </tr>
+      <tr>
+        <td class="job">python -m pricing.drift_check --date D</td>
+        <td class="when">on demand / 17:00 ET cron</td>
+        <td>Own-vs-vendor canary for that session. See Daily drift check below.</td>
+      </tr>
     </tbody>
   </table>
 
@@ -562,6 +594,42 @@
       IV invert is Newton + Brent, <code>ValueError</code> never NaN.
       <code>Engine</code> protocol: <code>EuropeanBSM</code> analytic,
       <code>AmericanCRR</code> bump-and-revalue. No surface, no interpolator.
+    </dd>
+    <dt>Greeks as-of</dt>
+    <dd>
+      <code>python -m pricing.from_market --date YYYY-MM-DD --asof-ns N --r 0.04</code>
+      loads the last <code>option_snapshots</code> and <code>forwards</code>
+      files at or before that instant, inverts <strong>own</strong> IV, then
+      computes <strong>own</strong> Greeks.
+      Market price is <code>last_trade_price</code> if present, else
+      <code>day_close</code> — this tier has no NBBO, so there is no mid.
+      Engine: European BSM for SPX/SPXW, American CRR for SPY
+      (default 51 tree steps on the chain; <code>--spy-atm-pct</code> CRR-prices
+      only ATM SPY and European-prices the rest).
+      Vendor <code>greeks_*</code> / <code>implied_volatility</code> are copied
+      as diagnostics with signed diffs (own − vendor); they are never inputs.
+      T is ACT/365 to the settlement instant. <code>--r</code> is a scalar
+      (no rates warehouse). Exits nonzero on foreign roots, mixed underlyings,
+      required-nulls, empty allowlisted root, extra/missing parquet columns,
+      or a price outside no-arbitrage bounds.
+    </dd>
+    <dt>Daily drift check</dt>
+    <dd>
+      <code>python -m pricing.drift_check</code> at <strong>17:00 ET</strong> Mon–Fri,
+      after the 16:35 EOD snapshot. Loads the last snapshots/forwards at or before
+      16:40 ET, inverts own IV, computes own Greeks, then compares to vendor
+      after unit alignment: vendor theta (per calendar day) <code>× 365</code> to
+      per-year; vendor vega (per 1% vol) <code>× 100</code> to per 1.00 vol.
+      IV/delta/gamma need no conversion. Vendor is a canary, not gospel.
+      Compare set is ATM (<code>|K/F − 1| ≤ 5%</code>) with vendor IV present.
+      FAIL when median <code>|ΔIV|</code> &gt; 0.04, or &gt;25% of ATM names exceed
+      the abs/rel band on IV, delta, vega, gamma, or theta — not a single far-OTM tick.
+      Uninvertible / T≤0 / missing quote are skipped and counted.
+      SPY CRR is an ATM slice (<code>--spy-atm-pct 0.05</code>, <code>--max-rows 400</code>)
+      so cron finishes. <code>DRIFT_CHECK_R=0.04</code> in <code>.env</code> (no rates warehouse).
+      Alert: structured JSONL + <code>_meta/drift_check.json</code>, exit 1
+      (cron <code>MAILTO</code> if set; Healthchecks <code>massive-drift-check</code>
+      <code>/fail</code>; optional <code>DRIFT_ALERT_WEBHOOK</code>).
     </dd>
   </dl>
 

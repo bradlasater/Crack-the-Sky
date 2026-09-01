@@ -1,0 +1,267 @@
+"""Daily own-vs-vendor drift canary: aligned pass, poisoned fail, missing data."""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import pyarrow as pa
+import pytest
+
+from ingest.common import landing
+from pricing.conventions import CALENDAR_DAYS_PER_YEAR
+from pricing.drift_check import (
+    DEFAULT_THRESHOLDS,
+    VENDOR_THETA_TO_YEAR,
+    VENDOR_VEGA_TO_PER_1,
+    DriftReport,
+    Thresholds,
+    align_vendor,
+    cutoff_asof_ns,
+    evaluate_drift,
+    main,
+    run_drift,
+)
+from pricing.from_market import ChainCounts, greeks_asof
+from tests.marketdata.conftest import forward_row
+from tests.pricing.test_from_market_chain import (
+    ASOF_NS,
+    DT,
+    EXPIRY,
+    F_SPX,
+    SPXW,
+    R,
+    _spxw_last,
+    _spxw_snap,
+    _write,
+)
+
+LOOSE = Thresholds(min_compare=1, fail_frac=0.25, iv_median_abs=0.04, atm_pct=0.05)
+ET = ZoneInfo("America/New_York")
+
+
+def _vendor_matching_own(snap: dict, row: dict) -> dict:
+    """Vendor snapshot units: theta per day, vega per 1% — inverse of align_vendor."""
+    out = dict(snap)
+    out["implied_volatility"] = row["own_iv"]
+    out["greeks_delta"] = row["own_delta"]
+    out["greeks_gamma"] = row["own_gamma"]
+    out["greeks_theta"] = row["own_theta"] / VENDOR_THETA_TO_YEAR
+    out["greeks_vega"] = row["own_vega"] / VENDOR_VEGA_TO_PER_1
+    return out
+
+
+def _aligned_warehouse(tmp_path: Path, *, poison_iv: float | None = None) -> dict:
+    last = _spxw_last()
+    snap = _spxw_snap(last)
+    fwd = [forward_row(underlying="I:SPX", expiry=EXPIRY, forward=F_SPX, asof_ns=ASOF_NS)]
+    _write(tmp_path, snap=[snap], fwd=fwd)
+    row = greeks_asof(
+        DT, ASOF_NS, r=R, data_root=tmp_path, roots=("SPXW",), crr_steps=21
+    ).to_pylist()[0]
+    aligned = _vendor_matching_own(snap, row)
+    if poison_iv is not None:
+        aligned["implied_volatility"] = poison_iv
+        aligned["greeks_delta"] = 0.05
+    _write(tmp_path, snap=[aligned], fwd=fwd)
+    return row
+
+
+def test_vendor_theta_vega_scales_are_the_documented_conversions() -> None:
+    assert VENDOR_THETA_TO_YEAR == float(CALENDAR_DAYS_PER_YEAR) == 365.0
+    assert VENDOR_VEGA_TO_PER_1 == 100.0
+    # Naive own−vendor on unscaled theta/vega is always huge; aligned is not.
+    row = {
+        "own_theta": -365.0,
+        "own_vega": 20.0,
+        "vendor_theta": -1.0,
+        "vendor_vega": 0.20,
+        "vendor_iv": 0.16,
+        "vendor_delta": 0.5,
+        "vendor_gamma": 0.01,
+    }
+    aligned = align_vendor(row)
+    assert aligned["theta"] == pytest.approx(-365.0)
+    assert aligned["vega"] == pytest.approx(20.0)
+    assert abs(row["own_theta"] - row["vendor_theta"]) > 300
+
+
+def test_aligned_units_within_band_pass(tmp_path: Path) -> None:
+    _aligned_warehouse(tmp_path)
+    report = run_drift(
+        DT,
+        r=R,
+        data_root=tmp_path,
+        asof_ns=ASOF_NS,
+        roots=("SPXW",),
+        crr_steps=21,
+        spy_atm_pct=0.05,
+        atm_pct=0.05,
+        max_rows=50,
+        uninvertible="skip",
+        thresholds=LOOSE,
+    )
+    assert report.status == "PASS"
+    assert report.failures == []
+    assert report.counts["atm_compared"] == 1
+    assert report.median_abs_iv is not None
+    assert report.median_abs_iv < LOOSE.iv_median_abs
+
+
+def test_poisoned_vendor_divergence_fails(tmp_path: Path) -> None:
+    _aligned_warehouse(tmp_path, poison_iv=0.99)
+    report = run_drift(
+        DT,
+        r=R,
+        data_root=tmp_path,
+        asof_ns=ASOF_NS,
+        roots=("SPXW",),
+        crr_steps=21,
+        max_rows=50,
+        uninvertible="skip",
+        thresholds=LOOSE,
+    )
+    assert report.status == "FAIL"
+    assert report.median_abs_iv is not None
+    assert report.median_abs_iv > LOOSE.iv_median_abs
+    assert any("ΔIV" in f or "beyond band" in f for f in report.failures)
+
+
+def test_missing_partition_fails(tmp_path: Path) -> None:
+    rc = main(
+        [
+            "--date",
+            DT.isoformat(),
+            "--asof-ns",
+            str(ASOF_NS),
+            "--r",
+            str(R),
+            "--roots",
+            "SPXW",
+            "--data-root",
+            str(tmp_path),
+            "--min-compare",
+            "1",
+            "--force",
+        ]
+    )
+    assert rc == 1
+    payload = json.loads(
+        landing.meta_path("drift_check.json", data_root=tmp_path).read_text(encoding="utf-8")
+    )
+    assert payload["status"] == "FAIL"
+    assert payload["failures"]
+
+
+def test_aligned_cli_pass_and_poisoned_cli_nonzero(tmp_path: Path) -> None:
+    _aligned_warehouse(tmp_path)
+    common = [
+        "--date",
+        DT.isoformat(),
+        "--asof-ns",
+        str(ASOF_NS),
+        "--r",
+        str(R),
+        "--roots",
+        "SPXW",
+        "--data-root",
+        str(tmp_path),
+        "--min-compare",
+        "1",
+        "--crr-steps",
+        "21",
+        "--force",
+    ]
+    assert main(common) == 0
+    _aligned_warehouse(tmp_path, poison_iv=0.99)
+    assert main(common) == 1
+
+
+def test_skip_counts_expired_and_missing_quote(tmp_path: Path) -> None:
+    last = _spxw_last()
+    good = _spxw_snap(last)
+    expired = _spxw_snap(last)
+    expired["ticker"] = "O:SPXW260801C07700000"
+    expired["details_expiration_date"] = "2026-08-01"
+    no_px = _spxw_snap(last)
+    no_px["ticker"] = "O:SPXW260918C07705000"
+    no_px["details_strike_price"] = 7705.0
+    no_px["last_trade_price"] = None
+    no_px["day_close"] = None
+    fwd = [forward_row(underlying="I:SPX", expiry=EXPIRY, forward=F_SPX, asof_ns=ASOF_NS)]
+    _write(tmp_path, snap=[good, expired, no_px], fwd=fwd)
+    row = greeks_asof(
+        DT,
+        ASOF_NS,
+        r=R,
+        data_root=tmp_path,
+        roots=("SPXW",),
+        crr_steps=21,
+        uninvertible="skip",
+    ).to_pylist()[0]
+    _write(tmp_path, snap=[_vendor_matching_own(good, row), expired, no_px], fwd=fwd)
+    counts = ChainCounts()
+    table = greeks_asof(
+        DT,
+        ASOF_NS,
+        r=R,
+        data_root=tmp_path,
+        roots=("SPXW",),
+        crr_steps=21,
+        uninvertible="skip",
+        counts=counts,
+    )
+    assert counts.n_expired == 1
+    assert counts.n_no_price == 1
+    assert table.num_rows == 1
+    report = evaluate_drift(
+        table,
+        counts=counts,
+        thresholds=LOOSE,
+        dt=DT,
+        asof_ns=ASOF_NS,
+        r=R,
+    )
+    assert report.status == "PASS"
+    assert report.counts["expired"] == 1
+    assert report.counts["no_price"] == 1
+
+
+def test_cutoff_is_1640_et_on_the_partition_date() -> None:
+    ns = cutoff_asof_ns(DT, "16:40")
+    assert ns > ASOF_NS
+    got = datetime.fromtimestamp(ns / 1e9, tz=ET)
+    assert got.hour == 16 and got.minute == 40
+
+
+def test_evaluate_does_not_trip_on_a_single_name_inside_band() -> None:
+    """Far-OTM ticks are not the trigger; the rule is median / ATM fraction."""
+    row = {
+        "ticker": SPXW,
+        "strike": 7700.0,
+        "F": 7700.0,
+        "own_iv": 0.16,
+        "own_delta": 0.50,
+        "own_gamma": 0.001,
+        "own_vega": 20.0,
+        "own_theta": -365.0,
+        "vendor_iv": 0.16,
+        "vendor_delta": 0.50,
+        "vendor_gamma": 0.001,
+        "vendor_vega": 0.20,
+        "vendor_theta": -1.0,
+    }
+    table = pa.Table.from_pylist([row])
+    report = evaluate_drift(table, thresholds=LOOSE, dt=DT, asof_ns=ASOF_NS, r=R)
+    assert isinstance(report, DriftReport)
+    assert report.status == "PASS"
+
+
+def test_default_thresholds_are_the_documented_canary() -> None:
+    t = DEFAULT_THRESHOLDS
+    assert t.iv_median_abs == 0.04
+    assert t.fail_frac == 0.25
+    assert t.min_compare == 20
+    assert t.atm_pct == 0.05

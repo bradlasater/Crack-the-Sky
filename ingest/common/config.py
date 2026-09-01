@@ -19,6 +19,7 @@ DEFAULT_S3_BUCKET = "flatfiles"
 DEFAULT_DATA_ROOT = "/data/massive"
 DEFAULT_TZ = "America/New_York"
 DEFAULT_WS_DELAYED_URL = "wss://delayed.massive.com/options"
+DEFAULT_HEALTHCHECKS_BASE = "https://hc-ping.com"
 
 
 def _parse_env_file(path: Path) -> dict[str, str]:
@@ -55,6 +56,8 @@ class Settings:
     log_root: Path | None = None  # default: {data_root}/logs
     tz_name: str = DEFAULT_TZ
     healthchecks_ping_url: str | None = None
+    healthchecks_ping_key: str | None = None
+    healthchecks_base: str = DEFAULT_HEALTHCHECKS_BASE
     ws_delayed_url: str = DEFAULT_WS_DELAYED_URL
 
     def __post_init__(self) -> None:
@@ -113,5 +116,8 @@ class Settings:
             log_root=log_root,
             tz_name=tz_name,
             healthchecks_ping_url=get("HEALTHCHECKS_PING_URL") or None,
+            healthchecks_ping_key=get("HEALTHCHECKS_PING_KEY") or None,
+            healthchecks_base=(get("HEALTHCHECKS_BASE", DEFAULT_HEALTHCHECKS_BASE)
+                               or DEFAULT_HEALTHCHECKS_BASE).rstrip("/"),
             ws_delayed_url=get("WS_DELAYED_URL", DEFAULT_WS_DELAYED_URL) or DEFAULT_WS_DELAYED_URL,
         )

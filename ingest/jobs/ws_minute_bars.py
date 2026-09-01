@@ -53,7 +53,7 @@ from typing import Any
 import websockets
 
 from ingest.common import market_gate
-from ingest.common.cli import build_parser
+from ingest.common.cli import build_parser, healthcheck_url, ping
 from ingest.common.config import Settings
 from ingest.common.logging_utils import JsonlLogger, get_run_logger
 from ingest.jobs import latest_contracts, latest_spy_price, parse_underlyings
@@ -498,6 +498,11 @@ def main(argv: list[str] | None = None) -> int:
     settings = Settings.load()
     logger = get_run_logger(JOB, run_date, log_root=settings.log_root)
     started = time.monotonic()
+    # This job does not go through cli.run_job, so it wires its own pings --
+    # without them the one job that has historically produced nothing would
+    # also be the one job that never reported.
+    ping_url, autocreate = healthcheck_url(settings, JOB)
+    ping(ping_url, "/start", autocreate)
     try:
         logger.log("job_start", job=JOB, date=run_date.isoformat(), force=args.force,
                    duration_minutes=args.duration_minutes,
@@ -528,9 +533,18 @@ def main(argv: list[str] | None = None) -> int:
         duration_s = round(time.monotonic() - started, 3)
         logger.log("job_end", job=JOB, rows=writer.rows_written, duration_s=duration_s,
                    **stats)
+        # A capture window that ends with zero rows is a failure, not a
+        # success: the subscription ACKed and nothing arrived.
+        if writer.rows_written == 0:
+            ping(ping_url, "/fail", autocreate,
+                 body=f"{JOB} captured 0 rows in {duration_s}s; stats={stats}")
+        else:
+            ping(ping_url, "", autocreate,
+                 body=f"{JOB} ok: rows={writer.rows_written} in {duration_s}s; stats={stats}")
         return 0
     except _FatalAuth as exc:
         logger.log("job_error", job=JOB, error=str(exc))
+        ping(ping_url, "/fail", autocreate, body=f"{JOB} auth failure: {exc}")
         return 1
     except KeyboardInterrupt:
         logger.log("job_interrupted", job=JOB)

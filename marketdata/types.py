@@ -114,3 +114,21 @@ def quotes_from_snapshot_rows(rows: Any) -> list[Quote]:
             )
         )
     return out
+
+
+def forward_from_record(rec: dict[str, Any]) -> Forward:
+    """Map a ``forwards`` parquet row to :class:`Forward`."""
+    exp_raw = rec.get("expiration_date")
+    if not exp_raw:
+        raise ValueError("forwards row missing expiration_date")
+    return Forward(
+        underlying=str(rec.get("underlying_ticker") or ""),
+        expiry=date.fromisoformat(str(exp_raw)[:10]),
+        atm_strike=float(rec["atm_strike"]),
+        forward=float(rec["forward"]),
+        call_price=float(rec["call_price"]),
+        put_price=float(rec["put_price"]),
+        pairs=int(rec["pairs"]),
+        asof_ns=_opt_int(rec.get("asof_ns")),
+        method=str(rec.get("method") or ""),
+    )

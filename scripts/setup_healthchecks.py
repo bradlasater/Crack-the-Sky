@@ -43,6 +43,7 @@ JOBS: dict[str, tuple[str, int, str]] = {
     "flatfile_pull":    ("5 11 * * 2-6",    120, "T-1 S3 flat files - the authoritative record"),
     "reconcile":        ("30 11 * * 2-6",   120, "Rewrite minute bars from the flat file"),
     "coverage_audit":   ("30 12 * * 2-6",   180, "Did yesterday actually land? Fails loudly if not"),
+    "drift_check":      ("0 17 * * 1-5",    60,  "Own IV/Greeks vs vendor (canary). After EOD snapshot."),
 }
 
 SLUG_PREFIX = "massive-"

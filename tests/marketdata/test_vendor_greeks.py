@@ -53,21 +53,50 @@ def test_poisoned_vendor_iv_does_not_change_price() -> None:
     assert g0.vega == g1.vega
 
 
-def test_pricing_package_does_not_read_vendor_columns() -> None:
-    banned = (
-        "vendor_implied_volatility",
-        "vendor_delta",
-        "greeks_delta",
-        "greeks_gamma",
-        "greeks_theta",
-        "greeks_vega",
-        "implied_volatility",
-    )
+_BANNED_VENDOR_TOKENS = (
+    "vendor_implied_volatility",
+    "vendor_delta",
+    "greeks_delta",
+    "greeks_gamma",
+    "greeks_theta",
+    "greeks_vega",
+    "implied_volatility",
+)
+_CALCULATOR_MODULES = ("bsm.py", "iv.py", "engine.py", "conventions.py")
+_QUOTE_GLUE = (
+    "engine_for",
+    "expiry_instant",
+    "year_fraction",
+    "price_quote",
+    "greeks_quote",
+    "implied_vol_quote",
+    "_spot_t_cp",
+)
+
+
+def test_calculator_modules_do_not_mention_vendor_columns() -> None:
     root = REPO / "pricing"
-    for path in root.glob("*.py"):
-        text = path.read_text(encoding="utf-8")
-        for token in banned:
-            assert token not in text, f"{path.name} mentions {token}"
+    for name in _CALCULATOR_MODULES:
+        text = (root / name).read_text(encoding="utf-8")
+        for token in _BANNED_VENDOR_TOKENS:
+            assert token not in text, f"{name} mentions {token}"
+
+
+def test_quote_glue_does_not_use_vendor_as_inputs() -> None:
+    """Single-quote helpers stay vendor-blind; the chain copies diagnostics after."""
+    path = REPO / "pricing" / "from_market.py"
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    glue: list[str] = []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name in _QUOTE_GLUE:
+            segment = ast.get_source_segment(source, node)
+            assert segment is not None
+            glue.append(segment)
+    assert len(glue) == len(_QUOTE_GLUE)
+    blob = "\n".join(glue)
+    for token in _BANNED_VENDOR_TOKENS:
+        assert token not in blob, f"quote glue mentions {token}"
 
 
 def test_ingest_does_not_import_numpy_or_scipy() -> None:

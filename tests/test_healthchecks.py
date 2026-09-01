@@ -173,7 +173,7 @@ def _scheduled_jobs() -> set[str]:
     for line in crontab.splitlines():
         if line.lstrip().startswith("#") or not line.strip():
             continue
-        m = re.search(r"ingest\.jobs\.(\w+)", line)
+        m = re.search(r"(?:ingest\.jobs|pricing)\.(\w+)", line)
         if m:
             jobs.add(m.group(1))
     return jobs

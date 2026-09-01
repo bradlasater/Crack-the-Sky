@@ -10,7 +10,9 @@ repo at `~/data_ingest_infra`. Python 3.11+; deps: `requests`, `websockets`,
 Two sibling packages sit at repo root alongside `ingest/`: `marketdata/` (typed,
 schema-validated reads of the clean parquet tree, plus OPRA ticker parsing) and
 `pricing/` (Black–Scholes–Merton greeks and IV inversion — calculators, not a
-surface). See `docs/architecture.html` → "Market data + Greeks".
+surface). A daily 17:00 ET cron (`python -m pricing.drift_check`) re-derives IV
+and greeks from the warehouse and pages on divergence from the vendor snapshot
+columns. See `docs/architecture.html` → "Market data + Greeks".
 
 ## The one thing to understand
 

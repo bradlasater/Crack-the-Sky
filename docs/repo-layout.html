@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>data_ingest_infra — repo layout</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="site.css">
+</head>
+<body id="top">
+  <a class="skip" href="#main">Skip to content</a>
+  <div class="shell">
+    <nav class="toc" aria-label="Handbook index">
+      <div class="toc-kicker">data_ingest_infra</div>
+      <div class="toc-title">System handbook</div>
+      <ol>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="repo-layout.html" class="active">Repo layout</a></li>
+        <li><a href="data-flow.html">Data flow</a></li>
+        <li>
+          <a href="ingest.html">Ingest</a>
+          <ol class="sub">
+            <li><a href="ingest.html#ingest-constraints">Massive / Polygon constraints</a></li>
+            <li><a href="ingest.html#ingest-jobs">Jobs that exist</a></li>
+            <li><a href="ingest.html#ingest-cron">NY cron</a></li>
+            <li><a href="ingest.html#ingest-session">Weekday session</a></li>
+            <li><a href="ingest.html#ingest-entitlements">Entitlements</a></li>
+            <li><a href="ingest.html#ingest-smoke">Smoke</a></li>
+          </ol>
+        </li>
+        <li><a href="marketdata.html">marketdata</a></li>
+        <li><a href="pricing.html">pricing</a></li>
+        <li><a href="warehouse-math.html">Warehouse → math</a></li>
+        <li><a href="canary.html">Daily canary</a></li>
+        <li><a href="conventions.html">Desk conventions</a></li>
+        <li><a href="not-built.html">Not built</a></li>
+        <li><a href="formula-stubs.html">Formula stubs</a></li>
+        <li><a href="knobs.html">Documented knobs</a></li>
+        <li class="toc-sep"></li>
+        <li><a href="box-operations.html">Box operations (off-repo)</a></li>
+      </ol>
+    </nav>
+
+    <main id="main">
+      <header class="doc">
+        <div>
+          <div class="kicker">data_ingest_infra</div>
+          <h1>Repo layout</h1>
+        </div>
+        <div class="meta"><a href="index.html">← overview</a></div>
+      </header>
+
+      <p>
+        Three Python packages plus tests and ops scripts. Jobs are
+        <code>python -m ingest.jobs.&lt;name&gt;</code> from a venv, not an
+        installed distribution.
+      </p>
+      <table>
+        <thead>
+          <tr><th>Path</th><th>What it is</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="job">ingest/</td>
+            <td>Capture. REST, delayed websocket, S3 flat files, schemas, cron jobs, smoke, entitlements probe.</td>
+          </tr>
+          <tr>
+            <td class="job">marketdata/</td>
+            <td>Typed reads of clean parquet. OPRA parse, <code>Contract</code>/<code>Quote</code>/<code>Forward</code>, catalog as-of, fail-loud validate.</td>
+          </tr>
+          <tr>
+            <td class="job">pricing/</td>
+            <td>Calculators, not a surface. BSM catalog, IV invert, Engine (European analytic / American CRR), <code>from_market</code>, <code>drift_check</code>.</td>
+          </tr>
+          <tr>
+            <td class="job">tests/</td>
+            <td>Offline pytest: ingest, <code>tests/marketdata/</code>, <code>tests/pricing/</code>, plus Healthchecks/crontab drift tests.</td>
+          </tr>
+          <tr>
+            <td class="job">docs/</td>
+            <td>This handbook: <code>index.html</code> plus one page per section, and <code>box-operations.html</code> for off-repo machine state.</td>
+          </tr>
+          <tr>
+            <td class="job">deploy/</td>
+            <td><code>crontab</code> (source of schedule) and an optional systemd unit for the websocket job.</td>
+          </tr>
+          <tr>
+            <td class="job">scripts/</td>
+            <td>bootstrap, backfill, repair, prune_raw, Healthchecks setup. Not a package.</td>
+          </tr>
+        </tbody>
+      </table>
+      <p>
+        There is no <code>surfaces/</code>, no rates package, no ClickHouse
+        client. The schemas module mentions ClickHouse in a docstring; no DDL
+        ships.
+      </p>
+
+      <footer>
+        docs/repo-layout.html — data_ingest_infra handbook.
+        Index: index.html. Do not commit .env.
+      </footer>
+    </main>
+  </div>
+</body>
+</html>

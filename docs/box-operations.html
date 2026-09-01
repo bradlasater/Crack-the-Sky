@@ -50,6 +50,8 @@
       border-bottom: 1px solid var(--line);
     }
     p { margin-bottom: 12px; }
+    a { color: var(--copper); text-decoration: none; }
+    a:hover { text-decoration: underline; }
     ul { margin: 0 0 12px 22px; }
     li { margin-bottom: 6px; }
     code {
@@ -91,7 +93,8 @@
 <body>
 
 <h1>Headless box — operations outside the repo</h1>
-<p class="sub">Companion to <code>docs/architecture.html</code>. The repo declares what the system
+<p class="sub">Companion to the <a href="index.html">system handbook</a>
+(<code>docs/index.html</code>). The repo declares what the system
 should be; this page records the machine state it cannot declare — secrets, the installed
 schedule, services, and the external accounts — and how each piece was put in place.
 Host: <code>brad-headless-server</code>, user <code>brad-lasater</code>, no passwordless sudo

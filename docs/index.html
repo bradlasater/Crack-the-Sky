@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>data_ingest_infra — system overview</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="site.css">
+</head>
+<body id="top">
+  <a class="skip" href="#main">Skip to content</a>
+  <div class="shell">
+    <nav class="toc" aria-label="Handbook index">
+      <div class="toc-kicker">data_ingest_infra</div>
+      <div class="toc-title">System handbook</div>
+      <ol>
+        <li><a href="index.html" class="active">Overview</a></li>
+        <li><a href="repo-layout.html">Repo layout</a></li>
+        <li><a href="data-flow.html">Data flow</a></li>
+        <li>
+          <a href="ingest.html">Ingest</a>
+          <ol class="sub">
+            <li><a href="ingest.html#ingest-constraints">Massive / Polygon constraints</a></li>
+            <li><a href="ingest.html#ingest-jobs">Jobs that exist</a></li>
+            <li><a href="ingest.html#ingest-cron">NY cron</a></li>
+            <li><a href="ingest.html#ingest-session">Weekday session</a></li>
+            <li><a href="ingest.html#ingest-entitlements">Entitlements</a></li>
+            <li><a href="ingest.html#ingest-smoke">Smoke</a></li>
+          </ol>
+        </li>
+        <li><a href="marketdata.html">marketdata</a></li>
+        <li><a href="pricing.html">pricing</a></li>
+        <li><a href="warehouse-math.html">Warehouse → math</a></li>
+        <li><a href="canary.html">Daily canary</a></li>
+        <li><a href="conventions.html">Desk conventions</a></li>
+        <li><a href="not-built.html">Not built</a></li>
+        <li><a href="formula-stubs.html">Formula stubs</a></li>
+        <li><a href="knobs.html">Documented knobs</a></li>
+        <li class="toc-sep"></li>
+        <li><a href="box-operations.html">Box operations (off-repo)</a></li>
+      </ol>
+    </nav>
+
+    <main id="main">
+      <header class="doc">
+        <div>
+          <div class="kicker">data_ingest_infra</div>
+          <h1>SPY / SPX system overview</h1>
+        </div>
+        <div class="meta">
+          multi-page · dark · indexed<br>
+          clock America/New_York<br>
+          DATA_ROOT /data/massive
+        </div>
+      </header>
+
+      <p class="lead">
+        This is the system design index for the running box. It exists so the
+        code on <code>main</code> and Brad’s mental model stay the same document.
+      </p>
+      <div class="callout">
+        <strong>Rule.</strong> If these pages and the Python disagree, the Python
+        on <code>origin/main</code> wins. Status chips mark
+        <span class="badge shipped">shipped</span>
+        <span class="badge writeonly">write-only</span>
+        <span class="badge forbidden">403 / not entitled</span>
+        <span class="badge missing">not built</span>
+        so design intent is not mistaken for running code.
+      </div>
+      <p>
+        One file per section — pick a page from the index on the left or the
+        cards below. High-level first; formula pages are stub anchors only — no
+        derivations here. No pandas lecture, no secrets, no API keys.
+      </p>
+
+      <h2>The whole system on one slide</h2>
+      <div class="diagram" aria-label="System overview">
+        <svg viewBox="0 0 1180 320" xmlns="http://www.w3.org/2000/svg" role="img">
+          <title>Sources into ingest into the warehouse into math into the canary</title>
+          <defs>
+            <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#6a6458"/>
+            </marker>
+          </defs>
+
+          <!-- sources -->
+          <text x="101" y="14" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Mono, monospace" font-size="10" letter-spacing="1.5">SOURCES</text>
+          <rect x="16" y="24" width="170" height="56" fill="#161b20" stroke="#d08c44" stroke-width="1.2"/>
+          <text x="101" y="47" text-anchor="middle" fill="#d08c44" font-family="IBM Plex Mono, monospace" font-size="11">WS delayed</text>
+          <text x="101" y="64" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="10">wss://delayed.massive.com</text>
+          <rect x="16" y="92" width="170" height="56" fill="#161b20" stroke="#7aa3b0" stroke-width="1.2"/>
+          <text x="101" y="115" text-anchor="middle" fill="#7aa3b0" font-family="IBM Plex Mono, monospace" font-size="11">REST</text>
+          <text x="101" y="132" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="10">api.polygon.io</text>
+          <rect x="16" y="160" width="170" height="56" fill="#161b20" stroke="#c47d7d" stroke-width="1.2"/>
+          <text x="101" y="183" text-anchor="middle" fill="#c47d7d" font-family="IBM Plex Mono, monospace" font-size="11">S3 flat files</text>
+          <text x="101" y="200" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="10">files.massive.com / flatfiles</text>
+          <rect x="16" y="228" width="170" height="56" fill="#161b20" stroke="#2a3238"/>
+          <text x="101" y="251" text-anchor="middle" fill="#e8e4d9" font-family="IBM Plex Mono, monospace" font-size="11">IBKR Flex</text>
+          <text x="101" y="268" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="10">executions, read-only</text>
+
+          <!-- capture -->
+          <text x="331" y="82" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Mono, monospace" font-size="10" letter-spacing="1.5">CAPTURE</text>
+          <rect x="246" y="96" width="170" height="128" fill="#161b20" stroke="#2a3238"/>
+          <text x="331" y="128" text-anchor="middle" fill="#e8e4d9" font-family="IBM Plex Mono, monospace" font-size="12">ingest/ jobs</text>
+          <text x="331" y="150" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="11">cron · flock · ET</text>
+          <text x="331" y="170" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="11">15-min delayed</text>
+          <text x="331" y="196" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="10">snapshots are irreplaceable;</text>
+          <text x="331" y="210" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="10">flat file always wins</text>
+
+          <!-- warehouse -->
+          <text x="561" y="82" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Mono, monospace" font-size="10" letter-spacing="1.5">WAREHOUSE</text>
+          <rect x="476" y="96" width="170" height="128" fill="#161b20" stroke="#2a3238"/>
+          <text x="561" y="128" text-anchor="middle" fill="#e8e4d9" font-family="IBM Plex Mono, monospace" font-size="12">/data/massive</text>
+          <text x="561" y="152" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Mono, monospace" font-size="11">raw/ · clean/</text>
+          <text x="561" y="172" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Mono, monospace" font-size="11">_meta/ · logs/</text>
+          <text x="561" y="198" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="10">parquet, dt=YYYY-MM-DD</text>
+
+          <!-- math -->
+          <text x="806" y="38" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Mono, monospace" font-size="10" letter-spacing="1.5">MATH</text>
+          <rect x="706" y="52" width="200" height="76" fill="#161b20" stroke="#2a3238"/>
+          <text x="806" y="80" text-anchor="middle" fill="#e8e4d9" font-family="IBM Plex Mono, monospace" font-size="12">marketdata/</text>
+          <text x="806" y="100" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="11">typed as-of reads · fail-loud</text>
+          <rect x="706" y="156" width="200" height="76" fill="#161b20" stroke="#2a3238"/>
+          <text x="806" y="184" text-anchor="middle" fill="#e8e4d9" font-family="IBM Plex Mono, monospace" font-size="12">pricing/</text>
+          <text x="806" y="204" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="11">own IV · BSM / American CRR</text>
+
+          <!-- watchdog -->
+          <text x="1065" y="38" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Mono, monospace" font-size="10" letter-spacing="1.5">WATCHDOG</text>
+          <rect x="966" y="52" width="198" height="76" fill="#161b20" stroke="#2a3238"/>
+          <text x="1065" y="80" text-anchor="middle" fill="#e8e4d9" font-family="IBM Plex Mono, monospace" font-size="12">drift_check</text>
+          <text x="1065" y="100" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="11">17:00 ET · ATM identities</text>
+          <rect x="966" y="156" width="198" height="76" fill="#161b20" stroke="#2a3238"/>
+          <text x="1065" y="184" text-anchor="middle" fill="#e8e4d9" font-family="IBM Plex Mono, monospace" font-size="12">Healthchecks</text>
+          <text x="1065" y="204" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="11">one check per cron job · /fail</text>
+
+          <!-- arrows -->
+          <line x1="186" y1="52" x2="246" y2="120" stroke="#6a6458" stroke-width="1.2" marker-end="url(#arrow)"/>
+          <line x1="186" y1="120" x2="246" y2="140" stroke="#6a6458" stroke-width="1.2" marker-end="url(#arrow)"/>
+          <line x1="186" y1="188" x2="246" y2="180" stroke="#6a6458" stroke-width="1.2" marker-end="url(#arrow)"/>
+          <line x1="186" y1="256" x2="246" y2="200" stroke="#6a6458" stroke-width="1.2" marker-end="url(#arrow)"/>
+          <line x1="416" y1="160" x2="476" y2="160" stroke="#6a6458" stroke-width="1.2" marker-end="url(#arrow)"/>
+          <line x1="646" y1="130" x2="706" y2="90" stroke="#6a6458" stroke-width="1.2" marker-end="url(#arrow)"/>
+          <line x1="646" y1="190" x2="706" y2="194" stroke="#6a6458" stroke-width="1.2" marker-end="url(#arrow)"/>
+          <line x1="906" y1="194" x2="966" y2="100" stroke="#6a6458" stroke-width="1.2" marker-end="url(#arrow)"/>
+          <line x1="1065" y1="128" x2="1065" y2="156" stroke="#6a6458" stroke-width="1.2" marker-end="url(#arrow)"/>
+        </svg>
+        <div class="legend">
+          <span><i style="background:var(--copper)"></i>websocket</span>
+          <span><i style="background:var(--rest)"></i>REST</span>
+          <span><i style="background:var(--s3)"></i>S3 flat file</span>
+          <span><i style="background:#6a6458"></i>broker / on-box</span>
+        </div>
+      </div>
+
+      <h2>Warehouse → math at a glance</h2>
+      <div class="flow" aria-label="Warehouse to canary">
+        <div class="step">
+          <div class="n">1 parquet</div>
+          <p><code>clean/</code> under <code>DATA_ROOT</code> (default <code>/data/massive</code>)</p>
+        </div>
+        <div class="step">
+          <div class="n">2 as-of</div>
+          <p><code>marketdata.catalog.read_asof</code> — last file ≤ instant, per underlying</p>
+        </div>
+        <div class="step">
+          <div class="n">3 own IV</div>
+          <p>European BSM invert of last/close. Never NaN; never vendor σ</p>
+        </div>
+        <div class="step">
+          <div class="n">4 own Greeks</div>
+          <p>SPX/SPXW analytic BSM; SPY American CRR (ATM slice on cron)</p>
+        </div>
+        <div class="step">
+          <div class="n">5 canary</div>
+          <p><code>pricing.drift_check</code> — ATM identities first; vendor diffs optional</p>
+        </div>
+      </div>
+      <p class="flow-caption">python -m pricing.from_market &nbsp;→&nbsp; python -m pricing.drift_check</p>
+
+      <h2>Sections</h2>
+      <div class="cards">
+        <a class="card" href="repo-layout.html">
+          <div class="card-title">Repo layout</div>
+          <p>Three packages — ingest, marketdata, pricing — plus tests, deploy, scripts.</p>
+        </a>
+        <a class="card" href="data-flow.html">
+          <div class="card-title">Data flow</div>
+          <p>What lands where; irreplaceable vs backfillable; write-only datasets.</p>
+        </a>
+        <a class="card" href="ingest.html">
+          <div class="card-title">Ingest</div>
+          <p>Sources, vendor constraints, every job, the NY crontab, session timeline, entitlements, smoke.</p>
+        </a>
+        <a class="card" href="marketdata.html">
+          <div class="card-title">marketdata</div>
+          <p>Typed parquet reads, OPRA allowlist, as-of semantics, fail-loud validate.</p>
+        </a>
+        <a class="card" href="pricing.html">
+          <div class="card-title">pricing</div>
+          <p>Engines (European BSM / American CRR), IV invert, greek conventions catalog.</p>
+        </a>
+        <a class="card" href="warehouse-math.html">
+          <div class="card-title">Warehouse → math</div>
+          <p>The <code>from_market</code> chain end to end: as-of load → own IV → own Greeks.</p>
+        </a>
+        <a class="card" href="canary.html">
+          <div class="card-title">Daily canary</div>
+          <p><code>drift_check</code> at 17:00 ET — identity-first pass/fail, alert path.</p>
+        </a>
+        <a class="card" href="conventions.html">
+          <div class="card-title">Desk conventions</div>
+          <p>Vega, theta, F, T, r — this repo’s units vs the usual vendor traps.</p>
+        </a>
+        <a class="card" href="not-built.html">
+          <div class="card-title">Not built</div>
+          <p>Surfaces, rates warehouse, ClickHouse — deliberately absent, not half-landed.</p>
+        </a>
+        <a class="card" href="formula-stubs.html">
+          <div class="card-title">Formula stubs</div>
+          <p>Anchors into <code>pricing/</code>; derivations live in code, not here.</p>
+        </a>
+        <a class="card" href="knobs.html">
+          <div class="card-title">Documented knobs</div>
+          <p>Every <code>.env</code> variable and code-level setting that changes behavior.</p>
+        </a>
+        <a class="card" href="box-operations.html">
+          <div class="card-title">Box operations (off-repo)</div>
+          <p>Secrets, installed crontab, self-hosted runner, Healthchecks, IBKR Flex — machine state the repo cannot declare.</p>
+        </a>
+      </div>
+
+      <footer>
+        Source of schedule: deploy/crontab.
+        Packages: ingest/ · marketdata/ · pricing/.
+        One page per section — this index is docs/index.html.
+        Do not commit .env.
+      </footer>
+    </main>
+  </div>
+</body>
+</html>

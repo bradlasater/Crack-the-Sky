@@ -12,7 +12,9 @@ schema-validated reads of the clean parquet tree, plus OPRA ticker parsing) and
 `pricing/` (Black–Scholes–Merton greeks and IV inversion — calculators, not a
 surface). A daily 17:00 ET cron (`python -m pricing.drift_check`) re-derives IV
 and greeks from the warehouse and pages if ATM identities break (vendor diffs
-are diagnostic when present). System handbook (dark, indexed): `docs/architecture.html`.
+are diagnostic when present). System handbook (dark, multi-page):
+`docs/index.html` (landing) with one page per section; off-repo machine state
+in `docs/box-operations.html`.
 
 ## The one thing to understand
 

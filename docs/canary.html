@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>data_ingest_infra — daily canary</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="site.css">
+</head>
+<body id="top">
+  <a class="skip" href="#main">Skip to content</a>
+  <div class="shell">
+    <nav class="toc" aria-label="Handbook index">
+      <div class="toc-kicker">data_ingest_infra</div>
+      <div class="toc-title">System handbook</div>
+      <ol>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="repo-layout.html">Repo layout</a></li>
+        <li><a href="data-flow.html">Data flow</a></li>
+        <li>
+          <a href="ingest.html">Ingest</a>
+          <ol class="sub">
+            <li><a href="ingest.html#ingest-constraints">Massive / Polygon constraints</a></li>
+            <li><a href="ingest.html#ingest-jobs">Jobs that exist</a></li>
+            <li><a href="ingest.html#ingest-cron">NY cron</a></li>
+            <li><a href="ingest.html#ingest-session">Weekday session</a></li>
+            <li><a href="ingest.html#ingest-entitlements">Entitlements</a></li>
+            <li><a href="ingest.html#ingest-smoke">Smoke</a></li>
+          </ol>
+        </li>
+        <li><a href="marketdata.html">marketdata</a></li>
+        <li><a href="pricing.html">pricing</a></li>
+        <li><a href="warehouse-math.html">Warehouse → math</a></li>
+        <li><a href="canary.html" class="active">Daily canary</a></li>
+        <li><a href="conventions.html">Desk conventions</a></li>
+        <li><a href="not-built.html">Not built</a></li>
+        <li><a href="formula-stubs.html">Formula stubs</a></li>
+        <li><a href="knobs.html">Documented knobs</a></li>
+        <li class="toc-sep"></li>
+        <li><a href="box-operations.html">Box operations (off-repo)</a></li>
+      </ol>
+    </nav>
+
+    <main id="main">
+      <header class="doc">
+        <div>
+          <div class="kicker">data_ingest_infra</div>
+          <h1>Daily canary</h1>
+        </div>
+        <div class="meta"><a href="index.html">← overview</a></div>
+      </header>
+
+      <p>
+        <code>python -m pricing.drift_check</code> at <strong>17:00 ET</strong>
+        Mon–Fri, after the 16:35 EOD snapshot. As-of is the last snapshot at or
+        before <strong>16:40 ET</strong>.
+      </p>
+      <p>
+        Pass/fail is <strong>identity-first</strong> on ATM names
+        (<code>|K/F − 1| ≤ 5%</code>):
+      </p>
+      <ul>
+        <li>Reprice: <code>market_price</code> vs stored <code>own_price</code> (CRR for American rows, BSM for European).</li>
+        <li>European pairs: Γ_call ≈ Γ_put and vega_call ≈ vega_put at a <em>shared</em> σ (mean of the two inverted IVs), plus PCP on day-close quotes vs <code>S e^{-qT} − K e^{-rT}</code>. PCP is skipped when either leg used a last-trade (possibly a different instant).</li>
+        <li>FAIL when median reprice error exceeds its band, or &gt;25% of ATM names fail identities. Too few ATM names (&lt; 20) is also FAIL.</li>
+      </ul>
+      <p>
+        Vendor diffs are diagnostic. Null vendor IV is not a FAIL
+        (<code>vendor_compare_skipped</code>). Vendor drift can FAIL only with
+        enough vendor-comparable ATM names. Still fail-loud on no snapshots,
+        schema errors, foreign roots, empty allowlisted root, filesystem errors.
+      </p>
+      <p>
+        Cron bounds: <code>--spy-atm-pct 0.05</code>, <code>--max-rows 400</code>
+        (CRR rows only). <code>--r</code> from <code>DRIFT_CHECK_R</code>
+        (default 0.04). Report: <code>_meta/drift_check.json</code> + JSONL under
+        <code>logs/drift_check/</code>. Exit 1 pings Healthchecks
+        <code>massive-drift-check</code> <code>/fail</code>; optional
+        <code>DRIFT_ALERT_WEBHOOK</code> (Slack-wrapped if the URL is hooks.slack.com).
+        Holidays: skip with exit 0 unless <code>--force</code>.
+      </p>
+
+      <footer>
+        docs/canary.html — data_ingest_infra handbook.
+        Index: index.html. Do not commit .env.
+      </footer>
+    </main>
+  </div>
+</body>
+</html>

@@ -186,6 +186,39 @@ def _build_schemas() -> dict[str, Any]:
         pa.field("pce_spending", pa.float64()),
     ]
 
+    # IBKR Flex trade rows. Deliberately close to the Flex field names so a
+    # row can be traced back to the source XML without a mapping table.
+    # Money is float64 like every other price here; quantity is signed by the
+    # buy/sell side as IBKR reports it.
+    ibkr_execution_fields = [
+        pa.field("account_id", pa.string()),
+        pa.field("trade_id", pa.string()),
+        pa.field("exec_id", pa.string()),
+        pa.field("order_id", pa.string()),
+        pa.field("symbol", pa.string()),           # IBKR local symbol
+        pa.field("opra_ticker", pa.string()),      # O:... when reconstructable
+        pa.field("underlying_symbol", pa.string()),
+        pa.field("asset_class", pa.string()),      # OPT / FOP / STK / FUT
+        pa.field("put_call", pa.string()),
+        pa.field("strike", pa.float64()),
+        pa.field("expiry", pa.string()),
+        pa.field("multiplier", pa.float64()),
+        pa.field("buy_sell", pa.string()),
+        pa.field("quantity", pa.float64()),
+        pa.field("trade_price", pa.float64()),
+        pa.field("trade_money", pa.float64()),
+        pa.field("proceeds", pa.float64()),
+        pa.field("commission", pa.float64()),
+        pa.field("realized_pnl", pa.float64()),
+        pa.field("currency", pa.string()),
+        pa.field("trade_date", pa.string()),
+        pa.field("trade_datetime", pa.string()),   # as reported, not parsed
+        pa.field("order_time", pa.string()),
+        pa.field("open_close", pa.string()),
+        pa.field("exchange", pa.string()),
+        pa.field("notes", pa.string()),
+    ]
+
     dividend_fields = [
         pa.field("ticker", pa.string()),
         pa.field("dividend_id", pa.string()),
@@ -234,6 +267,7 @@ def _build_schemas() -> dict[str, Any]:
         "option_trades": pa.schema(trade_fields),
         "underlying_minute_bars": pa.schema(underlying_bar_fields),
         "underlying_day_bars": pa.schema(underlying_day_bar_fields),
+        "ibkr_executions": pa.schema(ibkr_execution_fields),
         "treasury_yields": pa.schema(treasury_yield_fields),
         "inflation": pa.schema(inflation_fields),
         "dividends": pa.schema(dividend_fields),

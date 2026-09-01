@@ -1,0 +1,255 @@
+"""ibkr_executions: broker fills via the IBKR Flex Web Service.
+
+No gateway, no TWS, no market-data subscription -- plain HTTPS in two steps:
+
+    SendRequest(t=token, q=queryId, v=3)  -> ReferenceCode + Url
+    GetStatement(t=token, q=ReferenceCode, v=3) -> the statement XML
+
+The statement is generated asynchronously, so ``GetStatement`` answers with
+error 1019 ("statement generation in progress") for the first few seconds; that
+is expected and is polled, not an error.
+
+Why this lives next to the market data: an execution is only interpretable
+against the tape it happened in. Landing fills beside ``option_trades`` and
+``option_snapshots`` means a fill can be placed in the chain -- what the
+surface looked like, where the print sat in the day's volume -- which is the
+whole point of collecting them here rather than reading them in a browser.
+
+The vendor XML is landed verbatim under ``raw/`` and the projection under
+``clean/``, exactly as flat files are handled: the vendor payload is the record
+of truth and is never rewritten.
+
+Run: ``python -m ingest.jobs.ibkr_executions [--date YYYY-MM-DD]``
+"""
+
+from __future__ import annotations
+
+import re
+import time
+import xml.etree.ElementTree as ET
+from datetime import date
+from typing import Any
+
+import requests
+
+from ingest.common import landing, market_gate
+from ingest.common.cli import run_job
+from ingest.common.config import Settings
+from ingest.common.logging_utils import JsonlLogger
+
+JOB = "ibkr_executions"
+DATASET = "ibkr_executions"
+
+SEND_PATH = "/SendRequest"
+GET_PATH = "/GetStatement"
+API_VERSION = "3"
+TIMEOUT_S = 60
+
+# Flex generates asynchronously; 1019 means "not ready yet".
+IN_PROGRESS_CODES = {"1019"}
+POLL_SLEEP_S = 5
+POLL_TRIES = 12
+
+# Codes worth naming in the error, because each has a different fix.
+FATAL_HINTS = {
+    "1012": "token is invalid — regenerate it in Flex Web Service",
+    "1014": "query id is invalid — check IBKR_FLEX_QUERY_ID",
+    "1015": "token has expired — regenerate it (they last ~1 year)",
+    "1020": "malformed request — check the token/query id are numeric",
+}
+
+_MONTHS = {m: i for i, m in enumerate(
+    ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+     "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"], start=1)}
+
+
+class FlexError(RuntimeError):
+    """The Flex service refused the request."""
+
+
+def _get(url: str, params: dict[str, str]) -> str:
+    resp = requests.get(url, params=params, timeout=TIMEOUT_S)
+    resp.raise_for_status()
+    return resp.text
+
+
+def _fault(xml_text: str) -> tuple[str, str] | None:
+    """``(code, message)`` when the response is a Flex error, else None."""
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return ("?", xml_text[:200])
+    if (root.findtext("Status") or "").strip().lower() == "fail":
+        return (root.findtext("ErrorCode") or "?", root.findtext("ErrorMessage") or "")
+    return None
+
+
+def fetch_statement(settings: Settings, logger: JsonlLogger) -> str:
+    """Run the two-step Flex exchange and return the statement XML."""
+    if not settings.ibkr_flex_token:
+        raise FlexError("IBKR_FLEX_TOKEN is not set in .env")
+    if not settings.ibkr_flex_query_id:
+        raise FlexError(
+            "IBKR_FLEX_QUERY_ID is not set in .env — create an Activity Flex "
+            "Query in Account Management and use its numeric id"
+        )
+    base = settings.ibkr_flex_base
+    auth = {"t": settings.ibkr_flex_token, "v": API_VERSION}
+
+    body = _get(base + SEND_PATH, {**auth, "q": settings.ibkr_flex_query_id})
+    fault = _fault(body)
+    if fault:
+        code, msg = fault
+        raise FlexError(f"SendRequest failed [{code}] {msg}"
+                        + (f" — {FATAL_HINTS[code]}" if code in FATAL_HINTS else ""))
+    root = ET.fromstring(body)
+    ref = (root.findtext("ReferenceCode") or "").strip()
+    url = (root.findtext("Url") or (base + GET_PATH)).strip()
+    if not ref:
+        raise FlexError(f"SendRequest returned no ReferenceCode: {body[:200]}")
+    logger.log("flex_requested", reference_code=ref)
+
+    for attempt in range(1, POLL_TRIES + 1):
+        body = _get(url, {**auth, "q": ref})
+        fault = _fault(body)
+        if fault is None:
+            logger.log("flex_ready", attempt=attempt)
+            return body
+        code, msg = fault
+        if code not in IN_PROGRESS_CODES:
+            raise FlexError(f"GetStatement failed [{code}] {msg}"
+                            + (f" — {FATAL_HINTS[code]}" if code in FATAL_HINTS else ""))
+        logger.log("flex_generating", attempt=attempt, retry_in_s=POLL_SLEEP_S)
+        time.sleep(POLL_SLEEP_S)
+    raise FlexError(
+        f"statement still generating after {POLL_TRIES * POLL_SLEEP_S}s (ref {ref})"
+    )
+
+
+def _f(value: str | None) -> float | None:
+    if value is None or value.strip() in ("", "-"):
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def opra_ticker(row: dict[str, str]) -> str | None:
+    """Rebuild the OPRA symbol so a fill can be joined to the tape.
+
+    IBKR reports the pieces (underlying, expiry, strike, right) rather than an
+    OPRA symbol, and its ``symbol`` field is the IBKR local symbol. Producing
+    ``O:{root}{YYMMDD}{C|P}{strike*1000}`` is what lets an execution be looked
+    up in ``option_trades`` / ``option_snapshots``.
+    """
+    if (row.get("assetCategory") or "").upper() not in ("OPT", "FOP"):
+        return None
+    root = (row.get("underlyingSymbol") or "").strip().upper()
+    right = (row.get("putCall") or "").strip().upper()[:1]
+    strike = _f(row.get("strike"))
+    expiry = (row.get("expiry") or "").strip()
+    if not (root and right in ("C", "P") and strike and expiry):
+        return None
+    m = re.fullmatch(r"(\d{4})(\d{2})(\d{2})", expiry)
+    if m:
+        yy, mm, dd = m.group(1)[2:], m.group(2), m.group(3)
+    else:
+        m = re.fullmatch(r"(\d{2})([A-Z]{3})(\d{2})", expiry.upper())  # 16SEP26
+        if not m:
+            return None
+        dd, mon, yy = m.group(1), m.group(2), m.group(3)
+        mm = f"{_MONTHS.get(mon, 0):02d}"
+        if mm == "00":
+            return None
+    return f"O:{root}{yy}{mm}{dd}{right}{int(round(strike * 1000)):08d}"
+
+
+def _record(row: dict[str, str]) -> dict[str, Any]:
+    """Map one Flex ``<Trade>`` element's attributes to the schema."""
+    return {
+        "account_id": row.get("accountId"),
+        "trade_id": row.get("tradeID"),
+        "exec_id": row.get("ibExecID") or row.get("execID"),
+        "order_id": row.get("ibOrderID") or row.get("orderID"),
+        "symbol": row.get("symbol"),
+        "opra_ticker": opra_ticker(row),
+        "underlying_symbol": row.get("underlyingSymbol"),
+        "asset_class": row.get("assetCategory"),
+        "put_call": row.get("putCall"),
+        "strike": _f(row.get("strike")),
+        "expiry": row.get("expiry"),
+        "multiplier": _f(row.get("multiplier")),
+        "buy_sell": row.get("buySell"),
+        "quantity": _f(row.get("quantity")),
+        "trade_price": _f(row.get("tradePrice")),
+        "trade_money": _f(row.get("tradeMoney")),
+        "proceeds": _f(row.get("proceeds")),
+        "commission": _f(row.get("ibCommission")),
+        "realized_pnl": _f(row.get("fifoPnlRealized")),
+        "currency": row.get("currency"),
+        "trade_date": row.get("tradeDate"),
+        "trade_datetime": row.get("dateTime") or row.get("tradeTime"),
+        "order_time": row.get("orderTime"),
+        "open_close": row.get("openCloseIndicator"),
+        "exchange": row.get("exchange"),
+        "notes": row.get("notes") or row.get("notes/codes"),
+    }
+
+
+def parse_trades(xml_text: str, account_id: str | None = None) -> list[dict[str, Any]]:
+    """Every ``<Trade>`` in a Flex statement, optionally filtered by account."""
+    root = ET.fromstring(xml_text)
+    out: list[dict[str, Any]] = []
+    for el in root.iter("Trade"):
+        row = dict(el.attrib)
+        if account_id and row.get("accountId") and row["accountId"] != account_id:
+            continue
+        out.append(_record(row))
+    return out
+
+
+def _main_fn(args, settings: Settings, logger: JsonlLogger):
+    run_date = (
+        date.fromisoformat(args.date) if args.date
+        else market_gate.previous_trading_day(market_gate.today_et())
+    )
+    xml_text = fetch_statement(settings, logger)
+    records = parse_trades(xml_text, settings.ibkr_account_id)
+
+    if args.limit is not None:
+        records = records[: args.limit]
+
+    matched = sum(1 for r in records if r["opra_ticker"])
+    logger.log(
+        "flex_parsed",
+        rows=len(records),
+        opra_resolved=matched,
+        accounts=sorted({r["account_id"] for r in records if r["account_id"]}),
+    )
+    if not records:
+        # An empty statement is normal on a day with no fills. Say so plainly
+        # rather than failing, but land nothing.
+        logger.log("flex_no_trades", date=run_date.isoformat())
+        return {"rows": 0}
+
+    if not args.dry_run:
+        raw_path = landing.write_raw(
+            DATASET, run_date, xml_text, job=JOB, fmt="xml",
+            data_root=settings.data_root,
+        )
+        clean_path = landing.write_clean(
+            DATASET, run_date, records, job=JOB, data_root=settings.data_root
+        )
+        logger.log("flex_written", rows=len(records),
+                   raw_path=str(raw_path), clean_path=str(clean_path))
+    return {"rows": len(records), "opra_resolved": matched}
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Entry point: ``python -m ingest.jobs.ibkr_executions``."""
+    run_job(JOB, _main_fn, argv)
+
+
+if __name__ == "__main__":
+    main()

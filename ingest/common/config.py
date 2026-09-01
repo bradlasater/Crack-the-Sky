@@ -19,6 +19,9 @@ DEFAULT_S3_BUCKET = "flatfiles"
 DEFAULT_DATA_ROOT = "/data/massive"
 DEFAULT_WS_DELAYED_URL = "wss://delayed.massive.com/options"
 DEFAULT_HEALTHCHECKS_BASE = "https://hc-ping.com"
+DEFAULT_IBKR_FLEX_BASE = (
+    "https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService"
+)
 
 
 def _parse_env_file(path: Path) -> dict[str, str]:
@@ -55,6 +58,10 @@ class Settings:
     log_root: Path | None = None  # default: {data_root}/logs
     healthchecks_ping_key: str | None = None
     healthchecks_base: str = DEFAULT_HEALTHCHECKS_BASE
+    ibkr_flex_token: str | None = None
+    ibkr_flex_query_id: str | None = None
+    ibkr_account_id: str | None = None
+    ibkr_flex_base: str = DEFAULT_IBKR_FLEX_BASE
     ws_delayed_url: str = DEFAULT_WS_DELAYED_URL
 
     def __post_init__(self) -> None:
@@ -126,6 +133,11 @@ class Settings:
             data_root=data_root,
             log_root=log_root,
             healthchecks_ping_key=ping_key,
+            ibkr_flex_token=get("IBKR_FLEX_TOKEN") or None,
+            ibkr_flex_query_id=get("IBKR_FLEX_QUERY_ID") or None,
+            ibkr_account_id=get("IBKR_ACCOUNT_ID") or None,
+            ibkr_flex_base=(get("IBKR_FLEX_BASE", DEFAULT_IBKR_FLEX_BASE)
+                            or DEFAULT_IBKR_FLEX_BASE).rstrip("/"),
             healthchecks_base=(get("HEALTHCHECKS_BASE", DEFAULT_HEALTHCHECKS_BASE)
                                or DEFAULT_HEALTHCHECKS_BASE).rstrip("/"),
             ws_delayed_url=get("WS_DELAYED_URL", DEFAULT_WS_DELAYED_URL) or DEFAULT_WS_DELAYED_URL,

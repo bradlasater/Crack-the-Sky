@@ -3,7 +3,7 @@ name: CI
 # Offline correctness gate. Runs on every push and PR, with no API key and no
 # /data/massive, so it can only exercise the fixture tests -- which is exactly
 # what is wanted for reviewing your own PRs. Anything needing live credentials
-# or the real data tree runs on the Buildkite agent instead (.buildkite/).
+# or the real data tree runs on the self-hosted box workflow instead (box.yml).
 
 on:
   push:

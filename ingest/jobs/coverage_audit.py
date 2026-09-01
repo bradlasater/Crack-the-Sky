@@ -7,7 +7,7 @@ the websocket job that had never once produced a file were both invisible for
 exactly this reason.
 
 This job asserts expectations for one trading day and exits non-zero when any
-of them fail, so cron, Healthchecks.io and Buildkite all surface it:
+of them fail, so cron, Healthchecks.io and the box CI workflow all surface it:
 
   * ``option_snapshots`` -- sweeps landed vs. sweeps the schedule implies
     (derived from ``market_gate``, not hardcoded, so early closes are

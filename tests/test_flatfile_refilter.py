@@ -192,6 +192,51 @@ def test_no_reuse_when_the_file_is_absent(tmp_path: Path) -> None:
 # Replace
 # ---------------------------------------------------------------------------
 
+def test_same_millisecond_writes_do_not_overwrite(tmp_path: Path, monkeypatch) -> None:
+    """Two writes inside one millisecond must be two files, not one.
+
+    The stamp is millisecond resolution and two back-to-back writes land in
+    the same millisecond about half the time, so the second silently
+    overwrote the first. Freezing the clock pins the case deterministically
+    rather than leaving it to timing.
+    """
+    from datetime import date
+
+    monkeypatch.setattr(landing, "_epoch_ms", lambda: 1788298047097)
+    rows = [{f.name: None for f in schemas.SCHEMAS["option_day_bars"]}]
+    paths = [
+        landing.write_clean("option_day_bars", date(2026, 8, 28), rows,
+                            job="flatfile_pull", data_root=tmp_path)
+        for _ in range(2)
+    ]
+    assert paths[0] != paths[1]
+    part = tmp_path / "clean" / "option_day_bars" / "dt=2026-08-28"
+    assert len(list(part.glob("*.parquet"))) == 2
+
+
+def test_collision_keeps_the_parseable_name_shape(tmp_path: Path, monkeypatch) -> None:
+    """Readers rsplit on '-' and int() the last token; nudging must preserve that.
+
+    ``coverage_audit._sweep_stamps`` reads sweep times straight out of the
+    file name, so a ``-2`` style suffix would be parsed as an underlying and
+    the stamp would silently become ``2``.
+    """
+    from datetime import date
+
+    monkeypatch.setattr(landing, "_epoch_ms", lambda: 1788298047097)
+    rows = [{f.name: None for f in schemas.SCHEMAS["option_snapshots"]}]
+    for _ in range(2):
+        landing.write_clean("option_snapshots", date(2026, 8, 28), rows,
+                            job="snapshot_sweep-SPY", data_root=tmp_path)
+    part = tmp_path / "clean" / "option_snapshots" / "dt=2026-08-28"
+    stamps = []
+    for path in part.glob("*.parquet"):
+        label, underlying, epoch = path.stem.rsplit("-", 2)
+        assert (label, underlying) == ("snapshot_sweep", "SPY")
+        stamps.append(int(epoch))
+    assert sorted(stamps) == [1788298047097, 1788298047098]
+
+
 def test_quarantine_prior_moves_not_deletes(tmp_path: Path) -> None:
     """Re-filtering must not leave two files to be double-counted."""
     from datetime import date

@@ -34,6 +34,27 @@ def _epoch_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _unique_clean_path(out_dir: Path, job: str) -> Path:
+    """A parquet path in ``out_dir`` that no file already occupies.
+
+    Names carry a millisecond stamp, so two writes to one partition inside the
+    same millisecond produce the same name and the second silently overwrites
+    the first -- measured at roughly even odds for back-to-back writes, which
+    is what made ``test_quarantine_prior_moves_not_deletes`` flaky.
+
+    Nudging the stamp forward is the fix that keeps the name's *shape*.
+    Readers parse the final ``-``-separated token as an integer stamp
+    (``coverage_audit._sweep_stamps``, ``catalog.files_by_underlying``), so a
+    ``-2`` style suffix would be misread as an underlying, and moving to
+    microseconds would break sweep-gap arithmetic against the millisecond-named
+    files already on disk.
+    """
+    stamp = _epoch_ms()
+    while (path := out_dir / f"{job}-{stamp}.parquet").exists():
+        stamp += 1
+    return path
+
+
 def write_raw(
     dataset: str,
     dt: date | str,
@@ -108,7 +129,7 @@ def write_clean(
     day = dt.isoformat() if isinstance(dt, date) else str(dt)
     out_dir = _data_root(data_root) / "clean" / dataset / f"dt={day}"
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{job}-{_epoch_ms()}.parquet"
+    path = _unique_clean_path(out_dir, job)
     pq.write_table(table, path)
     return path
 
@@ -137,7 +158,7 @@ def write_clean_table(
     day = dt.isoformat() if isinstance(dt, date) else str(dt)
     out_dir = _data_root(data_root) / "clean" / dataset / f"dt={day}"
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{job}-{_epoch_ms()}.parquet"
+    path = _unique_clean_path(out_dir, job)
     pq.write_table(table, path)
     return path
 

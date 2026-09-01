@@ -23,6 +23,27 @@ from marketdata.types import CallPut, Contract, ExerciseStyle
 ALLOWED_ROOTS: tuple[str, ...] = ("SPY", "SPX", "SPXW")
 MULTIPLIER: int = 100
 
+# Settlement time of day, ET, per root. Expiry is an instant, not a date: SPX
+# is AM-settled off the opening prints, while SPY and the SPXW weeklies settle
+# at the close. Treating expiry as UTC midnight (20:00 ET the day before)
+# understates T by ~20h at every tenor, which biases inverted IV by ~108bp at
+# 7 DTE and ~15bp at 30 DTE, and makes every same-day expiry look expired.
+SETTLEMENT_ET: dict[str, tuple[int, int]] = {
+    "SPY": (16, 0),    # PM settled
+    "SPXW": (16, 0),   # PM settled weeklies
+    "SPX": (9, 30),    # AM settled monthlies
+}
+
+
+def settlement_time_et(root: str) -> tuple[int, int]:
+    """``(hour, minute)`` ET at which ``root`` settles on its expiry date."""
+    try:
+        return SETTLEMENT_ET[root]
+    except KeyError:
+        raise OPRAParseError(
+            f"no settlement time for root {root!r}; known: {sorted(SETTLEMENT_ET)}"
+        ) from None
+
 _ROOT_META: dict[str, tuple[str, ExerciseStyle]] = {
     "SPY": ("SPY", "american"),
     "SPX": ("SPX", "european"),

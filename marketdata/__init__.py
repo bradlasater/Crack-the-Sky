@@ -23,7 +23,13 @@ from marketdata.opra import (
     parse_opra,
     ticker_root,
 )
-from marketdata.types import Contract, Forward, Quote, quotes_from_snapshot_table
+from marketdata.types import (
+    Contract,
+    Forward,
+    Quote,
+    quotes_from_snapshot_rows,
+    quotes_from_snapshot_table,
+)
 from marketdata.validate import Check, validate_table, validate_tickers
 
 __all__ = [
@@ -41,6 +47,7 @@ __all__ = [
     "format_opra",
     "list_partitions",
     "parse_opra",
+    "quotes_from_snapshot_rows",
     "quotes_from_snapshot_table",
     "read_asof",
     "read_partition",

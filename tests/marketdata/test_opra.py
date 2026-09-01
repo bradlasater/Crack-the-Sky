@@ -77,3 +77,30 @@ def test_foreign_roots_rejected(ticker: str) -> None:
 def test_malformed_rejected(ticker: str) -> None:
     with pytest.raises(OPRAParseError):
         parse_opra(ticker)
+
+
+def test_quotes_from_snapshot_rows_accepts_a_pyarrow_table() -> None:
+    """The old name said 'table' but the parameter was rows.
+
+    Passing an actual Table failed deep inside with
+    ``'ChunkedArray' object has no attribute 'get'``.
+    """
+    import pyarrow as pa
+
+    from marketdata.types import quotes_from_snapshot_rows, quotes_from_snapshot_table
+
+    row = {
+        "ticker": "O:SPY260918C00770000",
+        "last_trade_price": 6.87,
+        "day_close": 6.87,
+        "underlying_price": 767.38,
+        "underlying_last_updated_ns": 1788215198897256807,
+        "open_interest": 17524,
+    }
+    table = pa.Table.from_pylist([row])
+    from_rows = quotes_from_snapshot_rows([row])
+    from_table = quotes_from_snapshot_rows(table)
+    assert len(from_rows) == len(from_table) == 1
+    assert from_rows[0].contract.ticker == from_table[0].contract.ticker
+    # Old name stays importable.
+    assert quotes_from_snapshot_table is quotes_from_snapshot_rows

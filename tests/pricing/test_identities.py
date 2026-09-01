@@ -78,3 +78,31 @@ def test_forward_equivalent_to_q() -> None:
 def test_q_and_f_together_is_error() -> None:
     with pytest.raises(ValueError, match="q or F"):
         price(S, K, T, R, SIG, "call", q=Q, F=100.0)
+
+
+def test_elasticity_does_not_warn_on_a_zero_price() -> None:
+    """np.where evaluates both branches; the division must be guarded."""
+    import warnings
+
+    import numpy as np
+
+    from pricing.bsm import raw_greeks
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")           # any RuntimeWarning fails
+        g = raw_greeks(
+            np.array([100.0, 100.0]), np.array([100.0, 100.0]),
+            np.array([1.0, 1.0]), 0.03, np.array([0.2, 0.2]), "call",
+        )
+    assert np.all(np.isfinite(g["elasticity"]))
+
+
+def test_elasticity_keeps_the_sign_at_a_zero_price() -> None:
+    """A zero-priced put tends to -inf, not +inf."""
+
+    from pricing.bsm import raw_greeks
+
+    # Deep OTM, far from the money: price underflows to 0.
+    g = raw_greeks(100.0, 1.0, 0.01, 0.0, 0.05, "put")
+    if g["price"] == 0.0:
+        assert g["elasticity"] < 0

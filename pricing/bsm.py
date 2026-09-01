@@ -240,7 +240,13 @@ def raw_greeks(
     dGamma_dT = gamma * (-qv - d1 * d1_dT - 1.0 / (2.0 * T))
     color = -dGamma_dT
 
-    elasticity = np.where(px == 0.0, np.inf, delta * S / px)
+    # np.where evaluates both branches, so a naive expression still divides by
+    # zero and warns before the result is discarded. Guard the division, and
+    # keep the sign: a zero-priced put tends to -inf, not +inf.
+    elasticity = np.full(np.shape(px), np.nan, dtype=float)
+    nz = px != 0.0
+    np.divide(delta * S, px, out=elasticity, where=nz)
+    elasticity = np.where(nz, elasticity, np.copysign(np.inf, delta))
 
     likes = (S,)
 

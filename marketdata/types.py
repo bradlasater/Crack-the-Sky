@@ -84,12 +84,18 @@ def _opt_int(value: Any) -> int | None:
     return int(value)
 
 
-def quotes_from_snapshot_table(rows: list[dict[str, Any]]) -> list[Quote]:
+def quotes_from_snapshot_rows(rows: Any) -> list[Quote]:
     """Map option_snapshots records to :class:`Quote`. Parses every ticker.
+
+    Accepts a list of dicts or a ``pyarrow.Table``. The previous name said
+    "table" while the parameter was rows, so passing an actual Table failed
+    deep inside with ``'ChunkedArray' object has no attribute 'get'``.
 
     Vendor greeks/IV are copied onto the Quote and must stay unused by
     :mod:`pricing`.
     """
+    if hasattr(rows, "to_pylist"):  # pyarrow.Table / RecordBatch
+        rows = rows.to_pylist()
     # Imported here to keep types importable without the parser cycle... there
     # is no cycle if opra imports Contract from here; this helper needs parse.
     from marketdata.opra import parse_opra
@@ -137,3 +143,7 @@ def forward_from_record(rec: dict[str, Any]) -> Forward:
         asof_ns=_opt_int(rec.get("asof_ns")),
         method=str(rec.get("method") or ""),
     )
+
+
+# Back-compat alias for the pre-rename name.
+quotes_from_snapshot_table = quotes_from_snapshot_rows

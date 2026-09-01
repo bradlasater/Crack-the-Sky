@@ -22,16 +22,22 @@ _PRICE_TOL = 1e-12
 
 
 def discounted_bounds(
-    S: ArrayLike,
-    K: ArrayLike,
-    T: ArrayLike,
-    r: ArrayLike,
-    call_put: CallPut | ArrayLike = "call",
+    S: float,
+    K: float,
+    T: float,
+    r: float,
+    call_put: CallPut = "call",
     *,
-    q: ArrayLike | None = None,
-    F: ArrayLike | None = None,
+    q: float | None = None,
+    F: float | None = None,
 ) -> tuple[float, float]:
-    """``(lower, upper)`` no-arbitrage bounds on the undiscounted-for-cash price."""
+    """``(lower, upper)`` no-arbitrage bounds on the option premium.
+
+    Both bounds are discounted: spot by the dividend yield and strike by the
+    rate, i.e. a call sits in ``[max(Se^{-qT} - Ke^{-rT}, 0), Se^{-qT}]``.
+    Scalar-only -- the body casts with ``float()``/``bool()`` and would raise
+    on arrays, so the signature says so rather than implying it vectorizes.
+    """
     S_ = np.asarray(S, dtype=float)
     K_ = np.asarray(K, dtype=float)
     T_ = np.asarray(T, dtype=float)

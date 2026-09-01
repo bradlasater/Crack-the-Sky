@@ -874,11 +874,12 @@
         <dl class="notes">
           <dt>OPRA allowlist</dt>
           <dd>
-            Exactly <code>SPY, SPX, SPXW</code>. The parser alternates
-            longest-first (<code>SPXW</code> before <code>SPX</code>) so
-            <code>SPXW</code> is never truncated to <code>SPX</code>. Prefix
-            <code>O:SPY</code> would admit SPYL/SPYS/SPYG; the parser does not.
-            <code>parse_opra</code> raises <code>OPRAParseError</code> — never a partial.
+            Allowlist is exactly <code>SPY</code>, <code>SPX</code>, <code>SPXW</code>.
+            The parser alternation is longest-first (<code>SPXW</code> before
+            <code>SPX</code>) so <code>O:SPXW…</code> is not captured as
+            <code>SPX</code>. A prefix match on <code>O:SPY</code> would admit
+            SPYL/SPYS/SPYG; <code>parse_opra</code> does not.
+            Raises <code>OPRAParseError</code> — never a partial.
           </dd>
           <dt>Contract</dt>
           <dd>
@@ -1015,7 +1016,7 @@
             </tr>
             <tr>
               <td>F</td>
-              <td>put-call parity on the chain: <code>F = K + C − P</code> at min |C−P| (undiscounted approximation of <code>F = K + e^{rT}(C − P)</code>)</td>
+              <td>put-call parity on the chain: undiscounted approximation <code>F = K + C − P</code> at min |C−P| (exact parity is <code>F = K + e<sup>rT</sup>(C − P)</code>). Matches <code>forward_from_parity</code>; ingest is unchanged.</td>
               <td>I:SPX print (not entitled)</td>
             </tr>
             <tr>
@@ -1112,7 +1113,7 @@
           <strong>CRR tree</strong> — <code>pricing.engine.crr_price</code>. American early exercise; risk-neutral p outside [0,1] is an error, not clipped.
         </div>
         <div class="stub" id="formula-parity-f">
-          <strong>Parity forward</strong> — <code>ingest.jobs.forward_from_parity</code>. <code>F = K + C − P</code> at the strike minimising |C−P| — the undiscounted approximation of exact parity <code>F = K + e^{rT}(C − P)</code>.
+          <strong>Parity forward</strong> — <code>ingest.jobs.forward_from_parity</code>. Undiscounted approximation <code>F = K + C − P</code> at the strike minimising |C−P|. Exact parity is <code>F = K + e<sup>rT</sup>(C − P)</code>; the job uses the approximation.
         </div>
         <div class="stub" id="formula-year-fraction">
           <strong>Year fraction</strong> — <code>pricing.from_market.year_fraction</code>. ACT/365 to settlement instant.
@@ -1138,7 +1139,7 @@
             <tr><td class="job">WS_DELAYED_URL</td><td>Default <code>wss://delayed.massive.com/options</code>.</td></tr>
             <tr><td class="job">MASSIVE_S3_*</td><td>Flat-file endpoint, bucket, access keys (placeholder exits 3 on pull).</td></tr>
             <tr><td class="job">DATA_ROOT</td><td>Warehouse root. Default <code>/data/massive</code>.</td></tr>
-            <tr><td class="job">LOG_ROOT</td><td>Logs. Default <code>DATA_ROOT/logs</code>.</td></tr>
+            <tr><td class="job">LOG_ROOT</td><td>Logs. Default <code>DATA_ROOT/logs</code> (not the warehouse root). <code>Settings.load</code> in <code>ingest/common/config.py</code>.</td></tr>
             <tr><td class="job">HEALTHCHECKS_PING_KEY</td><td>Per-job checks. Without it, a dead job is silent.</td></tr>
             <tr><td class="job">HEALTHCHECKS_BASE</td><td>Ping root (hosted <code>https://hc-ping.com</code>; self-host <code>https://&lt;host&gt;/ping</code>).</td></tr>
             <tr><td class="job">DRIFT_CHECK_R</td><td>Scalar r for the 17:00 canary (default 0.04).</td></tr>
@@ -1178,12 +1179,14 @@
         if (map[id]) map[id].classList.add("active");
       }
       var main = document.querySelector("main");
+      var lockUntil = 0;
       function go(id) {
         var el = document.getElementById(id);
         if (!el || !main) return false;
         var y = el.getBoundingClientRect().top - main.getBoundingClientRect().top + main.scrollTop - 8;
         main.scrollTo({ top: Math.max(0, y), behavior: "auto" });
         setActive(id);
+        lockUntil = Date.now() + 250;
         return true;
       }
       links.forEach(function (a) {
@@ -1201,19 +1204,47 @@
         if (location.hash) go(location.hash.slice(1));
       });
       if ("IntersectionObserver" in window) {
+        var observed = {};
+        var intersecting = {};
+        function tocId(el) {
+          return el.getAttribute("data-toc-id") || el.id;
+        }
+        function headingTarget(el) {
+          if (!el) return null;
+          if (el.tagName === "H2" || el.tagName === "H3") return el;
+          return el.querySelector(":scope > h2, :scope > h3") || el;
+        }
+        function pickActive() {
+          if (!main || Date.now() < lockUntil) return;
+          var rootTop = main.getBoundingClientRect().top;
+          var best = null;
+          var bestDist = Infinity;
+          Object.keys(intersecting).forEach(function (id) {
+            var el = observed[id];
+            if (!el) return;
+            var dist = Math.abs(el.getBoundingClientRect().top - rootTop);
+            if (dist < bestDist) {
+              bestDist = dist;
+              best = id;
+            }
+          });
+          if (best) setActive(best);
+        }
         var io = new IntersectionObserver(function (entries) {
-          var visible = entries
-            .filter(function (e) { return e.isIntersecting; })
-            .map(function (e) {
-              var rootTop = e.rootBounds ? e.rootBounds.top : 0;
-              return { id: e.target.id, d: Math.abs(e.boundingClientRect.top - rootTop) };
-            })
-            .sort(function (a, b) { return a.d - b.d; });
-          if (visible[0] && visible[0].id) setActive(visible[0].id);
+          entries.forEach(function (e) {
+            var id = tocId(e.target);
+            if (!id) return;
+            if (e.isIntersecting) intersecting[id] = true;
+            else delete intersecting[id];
+          });
+          pickActive();
         }, { root: main, rootMargin: "0px 0px -70% 0px", threshold: 0.05 });
         ids.forEach(function (id) {
-          var el = document.getElementById(id);
-          if (el) io.observe(el);
+          var el = headingTarget(document.getElementById(id));
+          if (!el) return;
+          el.setAttribute("data-toc-id", id);
+          observed[id] = el;
+          io.observe(el);
         });
       }
       if (location.hash) go(location.hash.slice(1));

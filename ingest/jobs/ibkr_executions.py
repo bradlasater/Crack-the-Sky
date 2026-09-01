@@ -251,6 +251,39 @@ def parse_trades(xml_text: str, account_id: str | None = None) -> list[dict[str,
     return out
 
 
+def check_parsed(records: list[dict[str, Any]]) -> None:
+    """Fail when rows arrived but the field names clearly did not match.
+
+    Flex attribute spellings depend on how the query was configured, and
+    ``dict.get`` on a name IBKR does not emit yields None rather than an
+    error. Without this, a query missing (say) UnderlyingSymbol/Strike/Expiry
+    lands a full set of rows whose every column is null, and the job reports
+    success. These two checks are deliberately narrow -- they fire only when
+    a whole class of fields is absent, never on one odd row.
+    """
+    if not records:
+        return
+
+    priced = [r for r in records if r["trade_price"] is not None
+              or r["quantity"] is not None]
+    if not priced:
+        raise FlexError(
+            f"parsed {len(records)} trade rows but every trade_price and "
+            "quantity is null -- the Flex query is almost certainly missing "
+            "TradePrice/Quantity, or emits different field names. Check the "
+            "query's selected fields in Account Management."
+        )
+
+    options = [r for r in records if (r["asset_class"] or "").upper() in ("OPT", "FOP")]
+    if options and not any(r["opra_ticker"] for r in options):
+        raise FlexError(
+            f"parsed {len(options)} option rows but rebuilt no OPRA ticker -- "
+            "the query is missing UnderlyingSymbol, Expiry, Strike or "
+            "Put/Call, so fills cannot be joined to option_trades. Add those "
+            "fields to the Flex query."
+        )
+
+
 def _main_fn(args, settings: Settings, logger: JsonlLogger):
     requested = date.fromisoformat(args.date) if args.date else None
     xml_text = fetch_statement(settings, logger)
@@ -284,6 +317,8 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger):
         opra_resolved=matched,
         accounts=sorted({r["account_id"] for r in records if r["account_id"]}),
     )
+    check_parsed(records)
+
     if not records:
         # An empty statement is normal on a day with no fills. Say so plainly
         # rather than failing, but land nothing.

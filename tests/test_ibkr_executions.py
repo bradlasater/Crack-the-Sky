@@ -322,3 +322,73 @@ def test_a_day_with_no_fills_writes_nothing_and_succeeds(monkeypatch, tmp_path) 
                               force=True, underlying=None)
     assert job._main_fn(args, _settings(tmp_path), _logger())["rows"] == 0
     assert not (tmp_path / "clean" / "ibkr_executions").exists()
+
+
+# ---------------------------------------------------------------------------
+# A misconfigured query must not land a table of nulls and call it success
+# ---------------------------------------------------------------------------
+
+def test_all_null_prices_is_a_misconfigured_query() -> None:
+    """Flex attribute spellings depend on the query's selected fields.
+
+    dict.get on a name IBKR does not emit returns None, so a query missing
+    TradePrice/Quantity lands a full set of rows whose every column is null
+    and the job reports success.
+    """
+    xml_text = (
+        '<FlexQueryResponse><FlexStatements><FlexStatement accountId="U1" '
+        'fromDate="20260828" toDate="20260828"><Trades>'
+        '<Trade accountId="U1" tradeID="1" symbol="X" assetCategory="STK"/>'
+        '<Trade accountId="U1" tradeID="2" symbol="Y" assetCategory="STK"/>'
+        '</Trades></FlexStatement></FlexStatements></FlexQueryResponse>'
+    )
+    with pytest.raises(job.FlexError, match="every trade_price and quantity is null"):
+        job.check_parsed(job.parse_trades(xml_text, "U1"))
+
+
+def test_option_rows_that_never_resolve_are_a_misconfigured_query() -> None:
+    """Without UnderlyingSymbol/Expiry/Strike/PutCall a fill joins to nothing."""
+    xml_text = (
+        '<FlexQueryResponse><FlexStatements><FlexStatement accountId="U1" '
+        'fromDate="20260828" toDate="20260828"><Trades>'
+        '<Trade accountId="U1" tradeID="1" symbol="SPY 260918C770" '
+        'assetCategory="OPT" quantity="1" tradePrice="6.87"/>'
+        '</Trades></FlexStatement></FlexStatements></FlexQueryResponse>'
+    )
+    with pytest.raises(job.FlexError, match="rebuilt no OPRA ticker"):
+        job.check_parsed(job.parse_trades(xml_text, "U1"))
+
+
+def test_the_guard_accepts_a_well_formed_statement() -> None:
+    job.check_parsed(job.parse_trades(FIXTURE.read_text(), "U27766163"))
+
+
+def test_an_empty_statement_passes_the_guard() -> None:
+    """A day with no fills must stay a normal, silent success."""
+    job.check_parsed([])
+
+
+def test_a_stock_only_statement_passes() -> None:
+    """No option rows means nothing to reconstruct; that is not a failure."""
+    xml_text = (
+        '<FlexQueryResponse><FlexStatements><FlexStatement accountId="U1" '
+        'fromDate="20260828" toDate="20260828"><Trades>'
+        '<Trade accountId="U1" tradeID="1" symbol="AAPL" assetCategory="STK" '
+        'quantity="100" tradePrice="212.4"/>'
+        '</Trades></FlexStatement></FlexStatements></FlexQueryResponse>'
+    )
+    job.check_parsed(job.parse_trades(xml_text, "U1"))
+
+
+def test_one_odd_row_does_not_trip_the_guard() -> None:
+    """The checks fire on a whole missing class of fields, not a single row."""
+    xml_text = (
+        '<FlexQueryResponse><FlexStatements><FlexStatement accountId="U1" '
+        'fromDate="20260828" toDate="20260828"><Trades>'
+        '<Trade accountId="U1" tradeID="1" symbol="SPY 260918C770" '
+        'underlyingSymbol="SPY" assetCategory="OPT" putCall="C" strike="770" '
+        'expiry="20260918" quantity="1" tradePrice="6.87"/>'
+        '<Trade accountId="U1" tradeID="2" symbol="broken" assetCategory="OPT"/>'
+        '</Trades></FlexStatement></FlexStatements></FlexQueryResponse>'
+    )
+    job.check_parsed(job.parse_trades(xml_text, "U1"))

@@ -110,3 +110,35 @@ def test_cli_ok_on_clean_spy(tmp_path) -> None:
         ]
     )
     assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# --roots narrows the allowlist; it must never extend it
+# ---------------------------------------------------------------------------
+
+def test_roots_cannot_admit_a_foreign_root() -> None:
+    """`--roots SPYL` would otherwise make SPYL pass the purity check."""
+    import pytest
+
+    from marketdata.validate import narrow_roots
+
+    with pytest.raises(ValueError, match="not in the catalog allowlist"):
+        narrow_roots(("SPYL",))
+    with pytest.raises(ValueError, match="not in the catalog allowlist"):
+        narrow_roots(("SPY", "SPXL"))
+
+
+def test_roots_can_narrow() -> None:
+    from marketdata.validate import narrow_roots
+
+    assert narrow_roots(("SPY",)) == ("SPY",)
+    assert narrow_roots(("spy", " SPXW ")) == ("SPY", "SPXW")
+
+
+def test_empty_roots_rejected() -> None:
+    import pytest
+
+    from marketdata.validate import narrow_roots
+
+    with pytest.raises(ValueError, match="no roots"):
+        narrow_roots(())

@@ -68,13 +68,32 @@ class Check:
     data: dict[str, Any] = field(default_factory=dict)
 
 
+def narrow_roots(roots: tuple[str, ...]) -> tuple[str, ...]:
+    """Restrict ``roots`` to the catalog allowlist; reject anything outside it.
+
+    ``--roots`` selects a subset to check, it does not redefine what counts as
+    ours. Without this, ``--roots SPYL`` would make SPYL records *pass* the
+    purity check that exists precisely to keep leveraged-ETF options out.
+    """
+    requested = tuple(r.strip().upper() for r in roots if str(r).strip())
+    if not requested:
+        raise ValueError("no roots requested")
+    outside = [r for r in requested if r not in ALLOWED_ROOTS]
+    if outside:
+        raise ValueError(
+            f"roots {outside} are not in the catalog allowlist {list(ALLOWED_ROOTS)}; "
+            "--roots narrows the allowlist, it cannot extend it"
+        )
+    return requested
+
+
 def validate_tickers(
     tickers: list[str],
     roots: tuple[str, ...] = ALLOWED_ROOTS,
 ) -> list[Check]:
     """Foreign roots, empty allowlisted root, malformed tickers."""
     checks: list[Check] = []
-    allow = tuple(roots)
+    allow = narrow_roots(roots)
     counts: dict[str, int] = {}
     foreign: dict[str, int] = {}
     malformed = 0
@@ -204,7 +223,13 @@ def main(argv: list[str] | None = None) -> int:
         default=os.environ.get("DATA_ROOT", "/data/massive"),
     )
     args = parser.parse_args(argv)
-    roots = tuple(r.strip() for r in args.roots.split(",") if r.strip())
+    # Fail before doing any I/O when --roots asks for something outside the
+    # catalog allowlist, rather than deep inside the per-column checks.
+    try:
+        roots = narrow_roots(tuple(args.roots.split(",")))
+    except ValueError as exc:
+        print(f"FAIL  roots  {exc}", file=sys.stderr)
+        return 1
     dt = date.fromisoformat(args.date)
 
     try:

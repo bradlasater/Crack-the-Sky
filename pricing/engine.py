@@ -93,6 +93,22 @@ class EuropeanBSM:
         return bsm_greeks(S, K, T, r, sigma, call_put, q=q, F=F, conventions=conventions)
 
 
+_CALL_PUT = {"call": True, "c": True, "put": False, "p": False}
+
+
+def _is_call(call_put: Any) -> bool:
+    """Strict call/put normalizer shared by every CRR entry point.
+
+    ``str(x).lower().startswith("c")`` silently read "invalid" as a put and
+    priced it, which differs from the BSM API and turns a typo into a
+    plausible number.
+    """
+    key = str(call_put).strip().lower()
+    if key not in _CALL_PUT:
+        raise ValueError(f"call_put must be call/put, got {call_put!r}")
+    return _CALL_PUT[key]
+
+
 def crr_price(
     S: float,
     K: float,
@@ -111,7 +127,7 @@ def crr_price(
     n = int(n_steps)
     if n < 2:
         raise ValueError("n_steps must be >= 2")
-    is_call = str(call_put).lower().startswith("c")
+    is_call = _is_call(call_put)
     dt = T / n
     u = float(np.exp(sigma * np.sqrt(dt)))
     d = 1.0 / u
@@ -121,9 +137,16 @@ def crr_price(
         raise ValueError("CRR u-d underflow")
     p = (a - d) / denom
     if not (0.0 <= p <= 1.0):
-        # Extreme vol/rate: still evaluate, but p outside [0,1] is a warning
-        # for the caller; we clip only to keep probabilities finite.
-        p = float(np.clip(p, 0.0, 1.0))
+        # A CRR tree is only arbitrage-free while d < e^{(r-q)dt} < u. Clipping
+        # p silently changes the expected growth rate and returns a
+        # plausible-looking but wrong price, which is worse than no price.
+        # More steps shrink dt and usually restore the condition.
+        raise ValueError(
+            f"CRR risk-neutral probability {p:.6g} outside [0, 1]: the tree is "
+            f"not arbitrage-free at n_steps={n} (needs d < exp((r-q)dt) < u, "
+            f"got d={d:.6g}, exp((r-q)dt)={a:.6g}, u={u:.6g}). "
+            "Increase n_steps, or check sigma/r/q."
+        )
     disc = float(np.exp(-r * dt))
     j = np.arange(n + 1, dtype=float)
     spot = S * u**j * d ** (n - j)
@@ -163,7 +186,7 @@ class AmericanCRR:
         r_ = float(np.asarray(r, dtype=float))
         sig = float(np.asarray(sigma, dtype=float))
         qv = float(resolve_q(S_, T_, r_, q=q, F=F))
-        cp: CallPut = "call" if str(call_put).lower().startswith("c") else "put"
+        cp: CallPut = "call" if _is_call(call_put) else "put"
         return crr_price(S_, K_, T_, r_, sig, cp, q=qv, n_steps=self.n_steps, american=True)
 
     def greeks(
@@ -185,7 +208,7 @@ class AmericanCRR:
         r_ = float(np.asarray(r, dtype=float))
         sig = float(np.asarray(sigma, dtype=float))
         qv = float(resolve_q(S_, T_, r_, q=q, F=F))
-        cp: CallPut = "call" if str(call_put).lower().startswith("c") else "put"
+        cp: CallPut = "call" if _is_call(call_put) else "put"
         raw = _bump_greeks(S_, K_, T_, r_, sig, qv, cp, self.n_steps)
         return apply_conventions(raw, conventions)
 

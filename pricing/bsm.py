@@ -215,9 +215,15 @@ def raw_greeks(
 
     # charm = ∂Δ/∂t (calendar). ∂d1/∂T = (r-q)/(σ√T) - d2/(2T)
     d1_dT = (r - qv) / (sig * sqrtT) - d2 / (2.0 * T)
-    # ∂Δ_c/∂T = -q e^{-qT} N(d1) + e^{-qT} n(d1) ∂d1/∂T
+    # Δ_c = e^{-qT} N(d1)   =>  ∂Δ_c/∂T = -q e^{-qT} N(d1) + e^{-qT} n(d1) ∂d1/∂T
+    # Δ_p = -e^{-qT} N(-d1)  =>  ∂Δ_p/∂T =  q e^{-qT} N(-d1) + e^{-qT} n(d1) ∂d1/∂T
+    #
+    # Both carry the n(d1)·∂d1/∂T term with a PLUS sign: for the put the two
+    # sign flips (the leading minus, and ∂N(-d1)/∂T = -n(d1)·∂d1/∂T) cancel.
+    # Getting that wrong is checkable against put-call parity, since
+    # Δ_c - Δ_p = e^{-qT} forces ∂Δ_c/∂T - ∂Δ_p/∂T = -q e^{-qT}.
     dDelta_c_dT = -qv * dq * Nd1 + dq * nd1 * d1_dT
-    dDelta_p_dT = qv * dq * Nmd1 - dq * nd1 * d1_dT
+    dDelta_p_dT = qv * dq * Nmd1 + dq * nd1 * d1_dT
     charm = np.where(is_call, -dDelta_c_dT, -dDelta_p_dT)
 
     # veta = ∂vega/∂t (calendar) = -∂vega/∂T

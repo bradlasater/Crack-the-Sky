@@ -499,7 +499,13 @@
 
   <h2>Market data + Greeks (sibling packages)</h2>
   <p>
-    Ingest jobs are unchanged. Two sibling packages sit at repo root:
+    Ingest capture behaviour is unchanged, but the shared job runner is not:
+    <code>cli.run_job</code> and <code>ws_minute_bars</code> now send a
+    terminal Healthchecks ping on every exit path (including the market
+    gate's clean exit on holidays, and <code>KeyboardInterrupt</code>), so a
+    skipped or interrupted run reports its outcome instead of sitting in
+    <em>started</em> until it is reported as a hung run. Nothing about what is
+    captured, or where it lands, changed. Two sibling packages sit at repo root:
     <code>marketdata/</code> (typed parquet I/O) and <code>pricing/</code>
     (calculators, not a surface). Vendor snapshot <code>greeks_*</code> and
     <code>implied_volatility</code> are diagnostics only — every Greek we

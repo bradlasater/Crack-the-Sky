@@ -163,13 +163,22 @@ def run_job(job_name: str, main_fn: MainFn, argv: list[str] | None = None) -> No
                  body=f"{job_name} exited {code} after {duration_s}s")
         logger.close()
         raise
-    except Exception as exc:  # noqa: BLE001 - top-level job guard
+    except BaseException as exc:  # noqa: BLE001 - must not leave the check hung
+        # BaseException, not Exception: KeyboardInterrupt and other
+        # BaseExceptions would otherwise skip every handler here and leave the
+        # check in "started" until Healthchecks called it a hung run.
         duration_s = round(time.monotonic() - start, 3)
-        logger.log("job_error", job=job_name, error=f"{type(exc).__name__}: {exc}",
-                   duration_s=duration_s)
+        interrupted = isinstance(exc, KeyboardInterrupt)
+        logger.log(
+            "job_interrupted" if interrupted else "job_error",
+            job=job_name, error=f"{type(exc).__name__}: {exc}", duration_s=duration_s,
+        )
         ping(ping_url, "/fail", autocreate,
-             body=f"{job_name} failed after {duration_s}s: {type(exc).__name__}: {exc}")
+             body=f"{job_name} {'interrupted' if interrupted else 'failed'} "
+                  f"after {duration_s}s: {type(exc).__name__}: {exc}")
         logger.close()
+        if interrupted:
+            raise
         sys.exit(1)
     logger.close()
     sys.exit(0)

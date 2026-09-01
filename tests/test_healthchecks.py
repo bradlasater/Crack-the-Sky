@@ -293,3 +293,57 @@ def test_setup_script_accepts_a_custom_api_base() -> None:
     assert mod.DEFAULT_API_BASE == "https://healthchecks.io/api/v3"
     import inspect
     assert "api_base" in inspect.signature(mod._request).parameters
+
+
+def test_keyboard_interrupt_still_settles_the_check(tmp_path, monkeypatch, recorder):
+    """KeyboardInterrupt is a BaseException and skipped both handlers.
+
+    A run interrupted at the console otherwise left the check 'started' until
+    Healthchecks reported a hung run.
+    """
+    settings = _settings(tmp_path, healthchecks_ping_key="KEY")
+    monkeypatch.setattr(cli.Settings, "load", classmethod(lambda cls: settings))
+
+    def interrupted(a, s, log):
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        cli.run_job("contracts_sync", interrupted, [])
+    assert _suffixes(recorder) == ["/start", "/fail"]
+
+
+def test_base_exception_still_settles_the_check(tmp_path, monkeypatch, recorder):
+    settings = _settings(tmp_path, healthchecks_ping_key="KEY")
+    monkeypatch.setattr(cli.Settings, "load", classmethod(lambda cls: settings))
+
+    class Weird(BaseException):
+        pass
+
+    def boom(a, s, log):
+        raise Weird("not an Exception subclass")
+
+    with pytest.raises(SystemExit):
+        cli.run_job("contracts_sync", boom, [])
+    assert _suffixes(recorder) == ["/start", "/fail"]
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    ["ok", "sysexit0", "sysexit2", "exception", "keyboard-interrupt"],
+)
+def test_terminal_ping_matrix(outcome, tmp_path, monkeypatch, recorder):
+    """Every documented exit path sends exactly one terminal ping."""
+    settings = _settings(tmp_path, healthchecks_ping_key="KEY")
+    monkeypatch.setattr(cli.Settings, "load", classmethod(lambda cls: settings))
+    fns = {
+        "ok": lambda a, s, log: {"rows": 1},
+        "sysexit0": lambda a, s, log: sys.exit(0),
+        "sysexit2": lambda a, s, log: sys.exit(2),
+        "exception": lambda a, s, log: (_ for _ in ()).throw(RuntimeError("x")),
+        "keyboard-interrupt": lambda a, s, log: (_ for _ in ()).throw(KeyboardInterrupt()),
+    }
+    with pytest.raises(BaseException):  # noqa: B017 - SystemExit or KeyboardInterrupt
+        cli.run_job("contracts_sync", fns[outcome], [])
+    suf = _suffixes(recorder)
+    assert suf[0] == "/start"
+    assert len(suf) == 2, f"{outcome}: expected one terminal ping, got {suf}"

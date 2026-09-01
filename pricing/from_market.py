@@ -26,11 +26,31 @@ from marketdata.opra import settlement_time_et
 from marketdata.types import Contract, Forward, Quote
 from pricing.bsm import CallPut
 from pricing.conventions import DEFAULT_CONVENTIONS, GreeksCatalog, GreeksConventions
-from pricing.engine import Engine, EuropeanBSM
+from pricing.engine import AmericanCRR, Engine, EuropeanBSM
 from pricing.iv import implied_vol as invert_iv
 
 ET = ZoneInfo("America/New_York")
-_ENGINE = EuropeanBSM()
+
+# Engines are chosen by the contract's own exercise style, not by a module
+# default. SPY options are American; valuing them as European silently drops
+# the early-exercise premium, which is exactly the kind of quiet modelling
+# error this package exists to avoid. Callers can still pass `engine=` to
+# override (e.g. to price SPY European deliberately, for comparison).
+_ENGINES: dict[str, Engine] = {
+    "european": EuropeanBSM(),
+    "american": AmericanCRR(),
+}
+
+
+def engine_for(contract: Contract) -> Engine:
+    """Default pricing engine for a contract's exercise style."""
+    try:
+        return _ENGINES[contract.exercise_style]
+    except KeyError:
+        raise ValueError(
+            f"no engine for exercise_style {contract.exercise_style!r}; "
+            f"known: {sorted(_ENGINES)}"
+        ) from None
 
 
 def expiry_instant(contract: Contract) -> datetime:
@@ -69,7 +89,7 @@ def price_quote(
 ) -> float:
     """Price using quote.underlying_price and contract fields — not vendor IV."""
     S, T, cp, F = _spot_t_cp(quote, forward, r)
-    eng = engine or _ENGINE
+    eng = engine or engine_for(quote.contract)
     return float(eng.price(S, quote.contract.strike, T, r, sigma, cp, q=q, F=F))
 
 
@@ -85,7 +105,7 @@ def greeks_quote(
 ) -> GreeksCatalog:
     """Greeks from market spot and our σ. Vendor greeks on the quote are ignored."""
     S, T, cp, F = _spot_t_cp(quote, forward, r)
-    eng = engine or _ENGINE
+    eng = engine or engine_for(quote.contract)
     return eng.greeks(S, quote.contract.strike, T, r, sigma, cp, q=q, F=F, conventions=conventions)
 
 

@@ -508,7 +508,7 @@
       <section id="repo-layout">
         <h2>2. Repo layout</h2>
         <p>
-          Four Python packages plus tests and ops scripts. Jobs are
+          Three Python packages plus tests and ops scripts. Jobs are
           <code>python -m ingest.jobs.&lt;name&gt;</code> from a venv, not an
           installed distribution.
         </p>
@@ -874,8 +874,10 @@
         <dl class="notes">
           <dt>OPRA allowlist</dt>
           <dd>
-            Longest-first <code>SPY, SPX, SPXW</code>. Prefix <code>O:SPY</code>
-            would admit SPYL/SPYS/SPYG; the parser does not.
+            Exactly <code>SPY, SPX, SPXW</code>. The parser alternates
+            longest-first (<code>SPXW</code> before <code>SPX</code>) so
+            <code>SPXW</code> is never truncated to <code>SPX</code>. Prefix
+            <code>O:SPY</code> would admit SPYL/SPYS/SPYG; the parser does not.
             <code>parse_opra</code> raises <code>OPRAParseError</code> — never a partial.
           </dd>
           <dt>Contract</dt>
@@ -1013,7 +1015,7 @@
             </tr>
             <tr>
               <td>F</td>
-              <td>put-call parity on the chain: <code>F = K + C − P</code> at min |C−P|</td>
+              <td>put-call parity on the chain: <code>F = K + C − P</code> at min |C−P| (undiscounted approximation of <code>F = K + e^{rT}(C − P)</code>)</td>
               <td>I:SPX print (not entitled)</td>
             </tr>
             <tr>
@@ -1110,7 +1112,7 @@
           <strong>CRR tree</strong> — <code>pricing.engine.crr_price</code>. American early exercise; risk-neutral p outside [0,1] is an error, not clipped.
         </div>
         <div class="stub" id="formula-parity-f">
-          <strong>Parity forward</strong> — <code>ingest.jobs.forward_from_parity</code>. <code>F = K + C − P</code> at the strike minimising |C−P|.
+          <strong>Parity forward</strong> — <code>ingest.jobs.forward_from_parity</code>. <code>F = K + C − P</code> at the strike minimising |C−P| — the undiscounted approximation of exact parity <code>F = K + e^{rT}(C − P)</code>.
         </div>
         <div class="stub" id="formula-year-fraction">
           <strong>Year fraction</strong> — <code>pricing.from_market.year_fraction</code>. ACT/365 to settlement instant.
@@ -1135,7 +1137,8 @@
             <tr><td class="job">MASSIVE_API_BASE</td><td>Default <code>https://api.polygon.io</code>.</td></tr>
             <tr><td class="job">WS_DELAYED_URL</td><td>Default <code>wss://delayed.massive.com/options</code>.</td></tr>
             <tr><td class="job">MASSIVE_S3_*</td><td>Flat-file endpoint, bucket, access keys (placeholder exits 3 on pull).</td></tr>
-            <tr><td class="job">DATA_ROOT / LOG_ROOT</td><td>Warehouse and logs. Default <code>/data/massive</code>.</td></tr>
+            <tr><td class="job">DATA_ROOT</td><td>Warehouse root. Default <code>/data/massive</code>.</td></tr>
+            <tr><td class="job">LOG_ROOT</td><td>Logs. Default <code>DATA_ROOT/logs</code>.</td></tr>
             <tr><td class="job">HEALTHCHECKS_PING_KEY</td><td>Per-job checks. Without it, a dead job is silent.</td></tr>
             <tr><td class="job">HEALTHCHECKS_BASE</td><td>Ping root (hosted <code>https://hc-ping.com</code>; self-host <code>https://&lt;host&gt;/ping</code>).</td></tr>
             <tr><td class="job">DRIFT_CHECK_R</td><td>Scalar r for the 17:00 canary (default 0.04).</td></tr>
@@ -1201,8 +1204,12 @@
         var io = new IntersectionObserver(function (entries) {
           var visible = entries
             .filter(function (e) { return e.isIntersecting; })
-            .sort(function (a, b) { return a.boundingClientRect.top - b.boundingClientRect.top; });
-          if (visible[0] && visible[0].target.id) setActive(visible[0].target.id);
+            .map(function (e) {
+              var rootTop = e.rootBounds ? e.rootBounds.top : 0;
+              return { id: e.target.id, d: Math.abs(e.boundingClientRect.top - rootTop) };
+            })
+            .sort(function (a, b) { return a.d - b.d; });
+          if (visible[0] && visible[0].id) setActive(visible[0].id);
         }, { root: main, rootMargin: "0px 0px -70% 0px", threshold: 0.05 });
         ids.forEach(function (id) {
           var el = document.getElementById(id);

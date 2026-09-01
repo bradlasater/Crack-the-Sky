@@ -28,7 +28,8 @@ scheduled at all.
 3. **Edit `.env`:** set `MASSIVE_API_KEY` and the flat-file S3 creds
    (`MASSIVE_S3_ACCESS_KEY_ID` / `MASSIVE_S3_SECRET_ACCESS_KEY` from the
    Massive dashboard → S3 Access Keys). Placeholder S3 creds exit code 3.
-   Set `HEALTHCHECKS_PING_URL` too — without it, a job that dies dies silently.
+   Set `HEALTHCHECKS_PING_KEY` too (see Monitoring below) — without it, a job
+   that dies dies silently.
 4. **Smoke test:** `venv/bin/python -m ingest.smoke` — 6 live checks,
    prints a PASS/FAIL/SKIP table.
 5. **Install the schedule:** cron does not expand `~`/`$HOME`, so first
@@ -131,6 +132,39 @@ appear, and that no foreign roots (`SPXL`, `SPYG`, …) leaked in.
 
 **To fix a gap:** `bash scripts/repair.sh 2026-08-28` (re-pull → reconcile →
 re-audit). Snapshots are the exception: they cannot be repaired after the fact.
+
+## Monitoring
+
+Every job gets **its own** Healthchecks.io check, named `massive-<job>`. This is
+the whole point: one shared check reports green the moment any single job
+succeeds, so nine dead jobs hide behind one healthy one — and "this job stopped
+running", the failure that actually happens here, cannot be detected at all.
+
+Each run pings `/start` first (so a hung run alerts, not just a crashing one)
+and `/fail` with the error text on exception. `ws_minute_bars` also fails its
+check when a capture window ends with **zero rows**, since a silent feed is a
+failure that looks like success.
+
+One-time setup:
+
+```
+# 1. Create the checks, with schedules matching deploy/crontab.
+#    Needs the MANAGEMENT key (Settings -> API Access), not the ping key.
+venv/bin/python scripts/setup_healthchecks.py --api-key hcak_xxx --dry-run
+venv/bin/python scripts/setup_healthchecks.py --api-key hcak_xxx
+
+# 2. Put the PING key (Settings -> Ping Key) in .env:
+#    HEALTHCHECKS_PING_KEY=...
+
+# 3. Add a notification channel in the Healthchecks UI, or nothing reaches you.
+```
+
+`scripts/setup_healthchecks.py` is idempotent and carries the schedule and
+grace period per job. Tests assert that its job list matches `deploy/crontab`
+exactly, so adding a cron line without a check fails CI. `eod_dayaggs_rest` is
+deliberately in neither.
+
+Self-hosting instead? Point `HEALTHCHECKS_BASE` at your instance.
 
 ## Development
 

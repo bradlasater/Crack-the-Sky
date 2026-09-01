@@ -307,6 +307,11 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger):
     )
     records = parse_trades(xml_text, settings.ibkr_account_id)
 
+    # Validate against the whole statement before --limit slices it: the
+    # guard reasons about entire classes of fields, and a testing cap must
+    # not change which rows it sees.
+    check_parsed(records)
+
     if args.limit is not None:
         records = records[: args.limit]
 
@@ -317,7 +322,6 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger):
         opra_resolved=matched,
         accounts=sorted({r["account_id"] for r in records if r["account_id"]}),
     )
-    check_parsed(records)
 
     if not records:
         # An empty statement is normal on a day with no fills. Say so plainly

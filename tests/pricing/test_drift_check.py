@@ -1,4 +1,4 @@
-"""Daily own-vs-vendor drift canary: aligned pass, poisoned fail, missing data."""
+"""Daily identity canary: own math first; vendor diffs diagnostic when present."""
 
 from __future__ import annotations
 
@@ -12,6 +12,8 @@ import pytest
 
 from ingest.common import landing
 from pricing import drift_check as drift_mod
+from pricing.bsm import price as bsm_price
+from pricing.bsm import raw_greeks
 from pricing.conventions import CALENDAR_DAYS_PER_YEAR
 from pricing.drift_check import (
     DEFAULT_THRESHOLDS,
@@ -41,6 +43,23 @@ from tests.pricing.test_from_market_chain import (
 
 LOOSE = Thresholds(min_compare=1, fail_frac=0.25, iv_median_abs=0.04, atm_pct=0.05)
 ET = ZoneInfo("America/New_York")
+SPXW_PUT = "O:SPXW260918P07700000"
+
+_CLI = [
+    "--date",
+    DT.isoformat(),
+    "--asof-ns",
+    str(ASOF_NS),
+    "--r",
+    str(R),
+    "--roots",
+    "SPXW",
+    "--min-compare",
+    "1",
+    "--crr-steps",
+    "21",
+    "--force",
+]
 
 
 def _vendor_matching_own(snap: dict, row: dict) -> dict:
@@ -51,6 +70,16 @@ def _vendor_matching_own(snap: dict, row: dict) -> dict:
     out["greeks_gamma"] = row["own_gamma"]
     out["greeks_theta"] = row["own_theta"] / VENDOR_THETA_TO_YEAR
     out["greeks_vega"] = row["own_vega"] / VENDOR_VEGA_TO_PER_1
+    return out
+
+
+def _null_vendor(snap: dict) -> dict:
+    out = dict(snap)
+    out["implied_volatility"] = None
+    out["greeks_delta"] = None
+    out["greeks_gamma"] = None
+    out["greeks_theta"] = None
+    out["greeks_vega"] = None
     return out
 
 
@@ -70,10 +99,53 @@ def _aligned_warehouse(tmp_path: Path, *, poison_iv: float | None = None) -> dic
     return row
 
 
+def _null_vendor_warehouse(tmp_path: Path) -> None:
+    last = _spxw_last()
+    snap = _null_vendor(_spxw_snap(last, vendor_iv=None, vendor_delta=None))
+    fwd = [forward_row(underlying="I:SPX", expiry=EXPIRY, forward=F_SPX, asof_ns=ASOF_NS)]
+    _write(tmp_path, snap=[snap], fwd=fwd)
+
+
+def _consistent_euro_row(
+    *,
+    ticker: str,
+    cp: str,
+    poison_gamma: float | None = None,
+    poison_market: float | None = None,
+) -> dict:
+    S, K, T, rate, q, sig = 7700.0, 7700.0, 0.05, 0.04, 0.0, 0.16
+    g = raw_greeks(S, K, T, rate, sig, cp, q=q)
+    mkt = float(bsm_price(S, K, T, rate, sig, cp, q=q))
+    return {
+        "ticker": ticker,
+        "root": "SPXW",
+        "expiry": EXPIRY,
+        "call_put": cp,
+        "strike": K,
+        "F": K,
+        "S": S,
+        "T": T,
+        "r": rate,
+        "q": q,
+        "exercise_style": "european",
+        "greeks_engine": "european_bsm",
+        "own_iv": sig,
+        "own_delta": float(g["delta"]),
+        "own_gamma": poison_gamma if poison_gamma is not None else float(g["gamma"]),
+        "own_vega": float(g["vega"]),
+        "own_theta": float(g["theta"]),
+        "market_price": poison_market if poison_market is not None else mkt,
+        "vendor_iv": None,
+        "vendor_delta": None,
+        "vendor_gamma": None,
+        "vendor_vega": None,
+        "vendor_theta": None,
+    }
+
+
 def test_vendor_theta_vega_scales_are_the_documented_conversions() -> None:
     assert VENDOR_THETA_TO_YEAR == float(CALENDAR_DAYS_PER_YEAR) == 365.0
     assert VENDOR_VEGA_TO_PER_1 == 100.0
-    # Naive own−vendor on unscaled theta/vega is always huge; aligned is not.
     row = {
         "own_theta": -365.0,
         "own_vega": 20.0,
@@ -107,8 +179,11 @@ def test_aligned_units_within_band_pass(tmp_path: Path) -> None:
     assert report.status == "PASS"
     assert report.failures == []
     assert report.counts["atm_compared"] == 1
+    assert report.vendor_compare_skipped is False
     assert report.median_abs_iv is not None
     assert report.median_abs_iv < LOOSE.iv_median_abs
+    assert report.median_abs_reprice is not None
+    assert report.median_abs_reprice < LOOSE.reprice_median_abs
 
 
 def test_poisoned_vendor_divergence_fails(tmp_path: Path) -> None:
@@ -125,29 +200,73 @@ def test_poisoned_vendor_divergence_fails(tmp_path: Path) -> None:
         thresholds=LOOSE,
     )
     assert report.status == "FAIL"
+    assert report.vendor_compare_skipped is False
     assert report.median_abs_iv is not None
     assert report.median_abs_iv > LOOSE.iv_median_abs
     assert any("ΔIV" in f or "beyond band" in f for f in report.failures)
 
 
-def test_missing_partition_fails(tmp_path: Path) -> None:
-    rc = main(
-        [
-            "--date",
-            DT.isoformat(),
-            "--asof-ns",
-            str(ASOF_NS),
-            "--r",
-            str(R),
-            "--roots",
-            "SPXW",
-            "--data-root",
-            str(tmp_path),
-            "--min-compare",
-            "1",
-            "--force",
-        ]
+def test_null_vendor_iv_identities_hold_exit_0(tmp_path: Path) -> None:
+    _null_vendor_warehouse(tmp_path)
+    rc = main([*_CLI, "--data-root", str(tmp_path)])
+    assert rc == 0
+    payload = json.loads(
+        landing.meta_path("drift_check.json", data_root=tmp_path).read_text(encoding="utf-8")
     )
+    assert payload["status"] == "PASS"
+    assert payload["vendor_compare_skipped"] is True
+    assert payload["failures"] == []
+
+
+def test_identities_broken_poisoned_price_exit_1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _null_vendor_warehouse(tmp_path)
+    real = drift_mod.greeks_asof
+
+    def poison(*args: object, **kwargs: object) -> pa.Table:
+        table = real(*args, **kwargs)
+        rows = table.to_pylist()
+        rows[0]["market_price"] = float(rows[0]["market_price"]) + 50.0
+        return pa.Table.from_pylist(rows, schema=table.schema)
+
+    monkeypatch.setattr(drift_mod, "greeks_asof", poison)
+    rc = main([*_CLI, "--data-root", str(tmp_path)])
+    assert rc == 1
+    payload = json.loads(
+        landing.meta_path("drift_check.json", data_root=tmp_path).read_text(encoding="utf-8")
+    )
+    assert payload["status"] == "FAIL"
+    assert payload["vendor_compare_skipped"] is True
+    assert any("BSM" in f or "identit" in f for f in payload["failures"])
+
+
+def test_identities_broken_poisoned_gamma() -> None:
+    call = _consistent_euro_row(ticker=SPXW, cp="call", poison_gamma=0.9)
+    put = _consistent_euro_row(ticker=SPXW_PUT, cp="put")
+    table = pa.Table.from_pylist([call, put])
+    report = evaluate_drift(table, thresholds=LOOSE, dt=DT, asof_ns=ASOF_NS, r=R)
+    assert report.status == "FAIL"
+    assert report.beyond_by_identity["gamma_pair"] >= 1
+    assert any("identit" in f for f in report.failures)
+
+
+def test_null_vendor_pair_identities_hold() -> None:
+    call = _consistent_euro_row(ticker=SPXW, cp="call")
+    put = _consistent_euro_row(ticker=SPXW_PUT, cp="put")
+    table = pa.Table.from_pylist([call, put])
+    report = evaluate_drift(table, thresholds=LOOSE, dt=DT, asof_ns=ASOF_NS, r=R)
+    assert report.status == "PASS"
+    assert report.vendor_compare_skipped is True
+    assert report.counts["atm_pairs"] == 1
+    assert report.beyond_by_identity["gamma_pair"] == 0
+    assert report.beyond_by_identity["vega_pair"] == 0
+    assert report.beyond_by_identity["pcp"] == 0
+    assert report.beyond_by_identity["reprice"] == 0
+
+
+def test_missing_partition_fails(tmp_path: Path) -> None:
+    rc = main([*_CLI, "--data-root", str(tmp_path)])
     assert rc == 1
     payload = json.loads(
         landing.meta_path("drift_check.json", data_root=tmp_path).read_text(encoding="utf-8")
@@ -158,23 +277,7 @@ def test_missing_partition_fails(tmp_path: Path) -> None:
 
 def test_aligned_cli_pass_and_poisoned_cli_nonzero(tmp_path: Path) -> None:
     _aligned_warehouse(tmp_path)
-    common = [
-        "--date",
-        DT.isoformat(),
-        "--asof-ns",
-        str(ASOF_NS),
-        "--r",
-        str(R),
-        "--roots",
-        "SPXW",
-        "--data-root",
-        str(tmp_path),
-        "--min-compare",
-        "1",
-        "--crr-steps",
-        "21",
-        "--force",
-    ]
+    common = [*_CLI, "--data-root", str(tmp_path)]
     assert main(common) == 0
     _aligned_warehouse(tmp_path, poison_iv=0.99)
     assert main(common) == 1
@@ -239,25 +342,36 @@ def test_cutoff_is_1640_et_on_the_partition_date() -> None:
 
 def test_evaluate_does_not_trip_on_a_single_name_inside_band() -> None:
     """Far-OTM ticks are not the trigger; the rule is median / ATM fraction."""
-    row = {
-        "ticker": SPXW,
-        "strike": 7700.0,
-        "F": 7700.0,
-        "own_iv": 0.16,
-        "own_delta": 0.50,
-        "own_gamma": 0.001,
-        "own_vega": 20.0,
-        "own_theta": -365.0,
-        "vendor_iv": 0.16,
-        "vendor_delta": 0.50,
-        "vendor_gamma": 0.001,
-        "vendor_vega": 0.20,
-        "vendor_theta": -1.0,
-    }
+    row = _consistent_euro_row(ticker=SPXW, cp="call")
+    row.update(
+        {
+            "vendor_iv": 0.16,
+            "vendor_delta": row["own_delta"],
+            "vendor_gamma": row["own_gamma"],
+            "vendor_vega": row["own_vega"] / VENDOR_VEGA_TO_PER_1,
+            "vendor_theta": row["own_theta"] / VENDOR_THETA_TO_YEAR,
+        }
+    )
     table = pa.Table.from_pylist([row])
     report = evaluate_drift(table, thresholds=LOOSE, dt=DT, asof_ns=ASOF_NS, r=R)
     assert isinstance(report, DriftReport)
     assert report.status == "PASS"
+    assert report.vendor_compare_skipped is False
+
+
+def test_vendor_present_but_too_few_to_fail_is_skipped() -> None:
+    """A single drifting vendor name must not FAIL when min_compare is 20."""
+    row = _consistent_euro_row(ticker=SPXW, cp="call")
+    row["vendor_iv"] = 0.99
+    row["vendor_delta"] = 0.05
+    table = pa.Table.from_pylist([row])
+    report = evaluate_drift(
+        table, thresholds=DEFAULT_THRESHOLDS, dt=DT, asof_ns=ASOF_NS, r=R
+    )
+    assert report.vendor_compare_skipped is True
+    assert report.status == "FAIL"
+    assert any("identities" in f for f in report.failures)
+    assert not any("ΔIV" in f or "vendor ATM" in f for f in report.failures)
 
 
 def test_default_thresholds_are_the_documented_canary() -> None:
@@ -266,6 +380,7 @@ def test_default_thresholds_are_the_documented_canary() -> None:
     assert t.fail_frac == 0.25
     assert t.min_compare == 20
     assert t.atm_pct == 0.05
+    assert t.reprice_median_abs == 0.05
 
 
 def test_oserror_writes_fail_stub_and_exits_1(

@@ -1,36 +1,26 @@
-"""Daily canary: own IV/Greeks vs vendor snapshot columns.
+"""Daily canary: own IV/Greeks identities on the as-of chain.
 
-Vendor numbers are a **canary**, not gospel. A sudden jump in own-vs-vendor
-delta or IV usually means the pipeline or the maths broke (schema drift, a
-bad invert, a silent engine swap). Model disagreement on far OTM ticks is
-expected and is not this job's trigger.
+The live test is **our math on new quotes**, not vendor-as-gospel. We always
+invert own IV and compute own Greeks from the as-of snapshot
+(:mod:`pricing.from_market`). Pass/fail is identity / self-consistency on
+ATM names (``|K/F − 1| ≤ atm_pct``, default 5%):
 
-Unit alignment (mandatory)
---------------------------
-Massive/Polygon snapshot greeks are **not** in this package's native units:
+* inverted σ reprices the input: ``market_price`` vs ``BSM(σ_own)``
+* European put–call pairs: ``Γ_call ≈ Γ_put``, ``vega_call ≈ vega_put``,
+  and put–call parity on the quotes vs ``S e^{-qT} − K e^{-rT}``
 
-* ``implied_volatility``, ``delta``, ``gamma`` — same as ours (decimal vol,
-  spot derivatives).
-* ``theta`` — per **calendar day**. Ours is per **year**. Compare after
-  ``vendor_theta * 365``.
-* ``vega`` — per **1% vol**. Ours is per **1.00 vol**. Compare after
-  ``vendor_vega * 100``.
+Far-OTM ticks are not the trigger. The job FAILs when the median reprice
+error exceeds its band, or when more than ``fail_frac`` of ATM names fail
+identities — the same median / fraction philosophy as before.
 
-Naive ``own_theta - vendor_theta`` will always look like a break.
+Vendor diffs are **diagnostic**. When vendor IV/greeks are present they are
+unit-aligned (theta ``× 365``, vega ``× 100``) and written into the report.
+Vendor drift FAILs only if there are at least ``min_compare`` ATM names with
+vendor IV. Null vendor IV is **not** a FAIL: the report logs
+``vendor_compare_skipped`` and the job still PASSes when identities hold.
 
-Fail rule
----------
-Only ATM names (``|K/F − 1| ≤ atm_pct``, default 5%) that carry vendor IV
-enter the compare set. The job FAILs (exit 1) when any of:
-
-* no data / schema / foreign roots / nothing priced
-* fewer than ``min_compare`` ATM names with vendor IV
-* median ``|ΔIV|`` on that set exceeds ``iv_median_abs`` (default 4 vol pts)
-* the fraction of ATM names with any core greek (IV, delta, vega, gamma,
-  theta) beyond its abs/rel band exceeds ``fail_frac`` (default 25%)
-
-A name is beyond band on a greek when
-``|own − vendor_aligned| > max(abs, rel * max(|own|, |vendor_aligned|))``.
+Still fail-loud for: no snapshots, schema errors, foreign roots, empty
+allowlisted root, too few ATM names to test identities.
 
 Cron bounds
 -----------
@@ -68,6 +58,7 @@ from ingest.common.market_gate import require_trading_day, today_et
 from marketdata.catalog import CatalogError, SchemaError
 from marketdata.opra import ALLOWED_ROOTS
 from marketdata.validate import narrow_roots
+from pricing.bsm import price as bsm_price
 from pricing.conventions import CALENDAR_DAYS_PER_YEAR
 from pricing.from_market import (
     CHAIN_CRR_STEPS,
@@ -103,7 +94,7 @@ class DriftError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class Thresholds:
-    """Abs + rel bands and the ATM-set fail rule."""
+    """Abs + rel bands and the ATM-set fail rule (identities, then vendor)."""
 
     iv_abs: float = 0.04
     iv_rel: float = 0.25
@@ -116,6 +107,15 @@ class Thresholds:
     theta_abs: float = 150.0
     theta_rel: float = 0.60
     iv_median_abs: float = 0.04
+    reprice_abs: float = 0.05
+    reprice_rel: float = 0.01
+    reprice_median_abs: float = 0.05
+    gamma_pair_abs: float = 0.002
+    gamma_pair_rel: float = 0.35
+    vega_pair_abs: float = 10.0
+    vega_pair_rel: float = 0.35
+    pcp_abs: float = 1.0
+    pcp_rel: float = 0.05
     fail_frac: float = DEFAULT_FAIL_FRAC
     min_compare: int = DEFAULT_MIN_COMPARE
     atm_pct: float = DEFAULT_ATM_PCT
@@ -136,8 +136,12 @@ class DriftReport:
     failures: list[str] = field(default_factory=list)
     counts: dict[str, Any] = field(default_factory=dict)
     median_abs_iv: float | None = None
+    median_abs_reprice: float | None = None
     frac_beyond: float | None = None
+    frac_identity_beyond: float | None = None
     beyond_by_greek: dict[str, int] = field(default_factory=dict)
+    beyond_by_identity: dict[str, int] = field(default_factory=dict)
+    vendor_compare_skipped: bool = False
     thresholds: dict[str, Any] = field(default_factory=dict)
     units: dict[str, Any] = field(default_factory=dict)
     spy_atm_pct: float | None = None
@@ -215,6 +219,87 @@ def _thr_for(thresholds: Thresholds, greek: str) -> tuple[float, float]:
     }[greek]
 
 
+def _pair_key(row: Mapping[str, Any]) -> tuple[str, str, float] | None:
+    root = row.get("root")
+    expiry = row.get("expiry")
+    strike = _opt(row.get("strike"))
+    if root is None or expiry is None or strike is None:
+        return None
+    return (str(root), str(expiry), strike)
+
+
+def _cp_side(row: Mapping[str, Any]) -> str | None:
+    raw = row.get("call_put")
+    if raw is None:
+        return None
+    token = str(raw).strip().lower()
+    if token in ("call", "c"):
+        return "call"
+    if token in ("put", "p"):
+        return "put"
+    return None
+
+
+def _is_european_row(row: Mapping[str, Any]) -> bool:
+    """Pair identities apply to European names; American early exercise does not."""
+    style = str(row.get("exercise_style") or "").strip().lower()
+    engine = str(row.get("greeks_engine") or "").strip().lower()
+    return not (style == "american" or engine.startswith("american"))
+
+
+def atm_pairs(
+    rows: list[dict[str, Any]],
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """Pair ATM calls and puts that share root, expiry, and strike."""
+    buckets: dict[tuple[str, str, float], dict[str, dict[str, Any]]] = {}
+    for rec in rows:
+        key = _pair_key(rec)
+        side = _cp_side(rec)
+        if key is None or side is None:
+            continue
+        buckets.setdefault(key, {})[side] = rec
+    return [
+        (sides["call"], sides["put"])
+        for sides in buckets.values()
+        if "call" in sides and "put" in sides
+    ]
+
+
+def bsm_reprice(row: Mapping[str, Any]) -> float | None:
+    """European BSM price at own IV. None when the row cannot be repriced."""
+    spot = _opt(row.get("S"))
+    strike = _opt(row.get("strike"))
+    tte = _opt(row.get("T"))
+    rate = _opt(row.get("r"))
+    sigma = _opt(row.get("own_iv"))
+    cp = _cp_side(row)
+    if None in (spot, strike, tte, rate, sigma, cp):
+        return None
+    if spot <= 0 or strike <= 0 or tte <= 0 or sigma <= 0:
+        return None
+    q = _opt(row.get("q"))
+    if q is None:
+        q = 0.0
+    try:
+        return float(bsm_price(spot, strike, tte, rate, sigma, cp, q=q))
+    except ValueError:
+        return None
+
+
+def _pcp_rhs(row: Mapping[str, Any]) -> float | None:
+    """``S e^{-qT} - K e^{-rT}`` (put-call parity right-hand side)."""
+    spot = _opt(row.get("S"))
+    strike = _opt(row.get("strike"))
+    tte = _opt(row.get("T"))
+    rate = _opt(row.get("r"))
+    if None in (spot, strike, tte, rate):
+        return None
+    q = _opt(row.get("q"))
+    if q is None:
+        q = 0.0
+    return spot * math.exp(-q * tte) - strike * math.exp(-rate * tte)
+
+
 def evaluate_drift(
     table: pa.Table,
     *,
@@ -227,24 +312,103 @@ def evaluate_drift(
     spy_atm_pct: float | None = None,
     max_rows: int | None = None,
 ) -> DriftReport:
-    """Apply the ATM median-IV / beyond-band rule to a priced chain."""
+    """ATM identity checks (pass/fail) plus optional vendor diagnostics."""
     rows = table.to_pylist()
-    atm: list[dict[str, Any]] = []
-    n_no_vendor = 0
-    for rec in rows:
-        if not is_atm(rec, thresholds.atm_pct):
-            continue
-        if _opt(rec.get("vendor_iv")) is None:
-            n_no_vendor += 1
-            continue
-        atm.append(rec)
+    atm = [rec for rec in rows if is_atm(rec, thresholds.atm_pct)]
+    vendor_atm = [rec for rec in atm if _opt(rec.get("vendor_iv")) is not None]
+    n_no_vendor = len(atm) - len(vendor_atm)
 
     failures: list[str] = []
+    beyond_by_identity = {"reprice": 0, "gamma_pair": 0, "vega_pair": 0, "pcp": 0}
     beyond_by_greek = dict.fromkeys(CORE_GREEKS, 0)
-    n_beyond = 0
-    iv_abs: list[float] = []
 
+    pairs = atm_pairs(atm)
+    n_euro_pairs = 0
+    pair_failed: set[int] = set()
+    for call, put in pairs:
+        if not (_is_european_row(call) and _is_european_row(put)):
+            continue
+        n_euro_pairs += 1
+        hit = False
+        gamma_c, gamma_p = _own(call, "gamma"), _own(put, "gamma")
+        if (
+            gamma_c is not None
+            and gamma_p is not None
+            and beyond_band(
+                gamma_c, gamma_p, thresholds.gamma_pair_abs, thresholds.gamma_pair_rel
+            )
+        ):
+            beyond_by_identity["gamma_pair"] += 1
+            hit = True
+        vega_c, vega_p = _own(call, "vega"), _own(put, "vega")
+        if (
+            vega_c is not None
+            and vega_p is not None
+            and beyond_band(
+                vega_c, vega_p, thresholds.vega_pair_abs, thresholds.vega_pair_rel
+            )
+        ):
+            beyond_by_identity["vega_pair"] += 1
+            hit = True
+        call_px = _opt(call.get("market_price"))
+        put_px = _opt(put.get("market_price"))
+        rhs = _pcp_rhs(call)
+        if (
+            call_px is not None
+            and put_px is not None
+            and rhs is not None
+            and beyond_band(
+                call_px - put_px, rhs, thresholds.pcp_abs, thresholds.pcp_rel
+            )
+        ):
+            beyond_by_identity["pcp"] += 1
+            hit = True
+        if hit:
+            pair_failed.add(id(call))
+            pair_failed.add(id(put))
+
+    reprice_abs: list[float] = []
+    n_identity_beyond = 0
     for rec in atm:
+        hit = id(rec) in pair_failed
+        model = bsm_reprice(rec)
+        mkt = _opt(rec.get("market_price"))
+        if model is None or mkt is None:
+            beyond_by_identity["reprice"] += 1
+            hit = True
+        else:
+            reprice_abs.append(abs(model - mkt))
+            if beyond_band(model, mkt, thresholds.reprice_abs, thresholds.reprice_rel):
+                beyond_by_identity["reprice"] += 1
+                hit = True
+        if hit:
+            n_identity_beyond += 1
+
+    median_reprice = _median(reprice_abs) if reprice_abs else None
+    frac_identity = (n_identity_beyond / len(atm)) if atm else None
+
+    if len(atm) < thresholds.min_compare:
+        failures.append(
+            f"only {len(atm)} ATM names to test identities "
+            f"(need ≥ {thresholds.min_compare})"
+        )
+    if (
+        median_reprice is not None
+        and median_reprice > thresholds.reprice_median_abs
+    ):
+        failures.append(
+            f"median |price − BSM(σ)|={median_reprice:.4f} exceeds "
+            f"{thresholds.reprice_median_abs}"
+        )
+    if frac_identity is not None and frac_identity > thresholds.fail_frac:
+        failures.append(
+            f"{n_identity_beyond}/{len(atm)} ATM names fail identities "
+            f"({frac_identity:.0%} > {thresholds.fail_frac:.0%})"
+        )
+
+    iv_abs: list[float] = []
+    n_vendor_beyond = 0
+    for rec in vendor_atm:
         aligned = align_vendor(rec)
         hit = False
         own_iv = _own(rec, "iv")
@@ -261,25 +425,21 @@ def evaluate_drift(
                 beyond_by_greek[greek] += 1
                 hit = True
         if hit:
-            n_beyond += 1
+            n_vendor_beyond += 1
 
     median_iv = _median(iv_abs) if iv_abs else None
-    frac = (n_beyond / len(atm)) if atm else None
-
-    if len(atm) < thresholds.min_compare:
-        failures.append(
-            f"only {len(atm)} ATM names with vendor IV "
-            f"(need ≥ {thresholds.min_compare})"
-        )
-    if median_iv is not None and median_iv > thresholds.iv_median_abs:
-        failures.append(
-            f"median |ΔIV|={median_iv:.4f} exceeds {thresholds.iv_median_abs}"
-        )
-    if frac is not None and frac > thresholds.fail_frac:
-        failures.append(
-            f"{n_beyond}/{len(atm)} ATM names beyond band "
-            f"({frac:.0%} > {thresholds.fail_frac:.0%})"
-        )
+    frac_vendor = (n_vendor_beyond / len(vendor_atm)) if vendor_atm else None
+    vendor_compare_skipped = len(vendor_atm) < thresholds.min_compare
+    if not vendor_compare_skipped:
+        if median_iv is not None and median_iv > thresholds.iv_median_abs:
+            failures.append(
+                f"median |ΔIV|={median_iv:.4f} exceeds {thresholds.iv_median_abs}"
+            )
+        if frac_vendor is not None and frac_vendor > thresholds.fail_frac:
+            failures.append(
+                f"{n_vendor_beyond}/{len(vendor_atm)} vendor ATM names beyond band "
+                f"({frac_vendor:.0%} > {thresholds.fail_frac:.0%})"
+            )
 
     chain_counts = {
         "quotes": counts.n_quotes if counts else None,
@@ -289,8 +449,11 @@ def evaluate_drift(
         "uninvertible": counts.n_uninvertible if counts else None,
         "otm": counts.n_otm if counts else None,
         "atm_compared": len(atm),
+        "atm_pairs": n_euro_pairs,
         "no_vendor_iv": n_no_vendor,
-        "beyond_band": n_beyond,
+        "vendor_compared": len(vendor_atm),
+        "identity_beyond": n_identity_beyond,
+        "beyond_band": n_vendor_beyond,
     }
     status = FAIL if failures else PASS
     return DriftReport(
@@ -302,8 +465,12 @@ def evaluate_drift(
         failures=failures,
         counts=chain_counts,
         median_abs_iv=median_iv,
-        frac_beyond=frac,
+        median_abs_reprice=median_reprice,
+        frac_beyond=frac_vendor,
+        frac_identity_beyond=frac_identity,
         beyond_by_greek=beyond_by_greek,
+        beyond_by_identity=beyond_by_identity,
+        vendor_compare_skipped=vendor_compare_skipped,
         thresholds=asdict(thresholds),
         units={
             "own": {"vega": "per_1.00", "theta": "per_year"},
@@ -314,6 +481,10 @@ def evaluate_drift(
                 "iv": "decimal (no conversion)",
                 "delta": "spot (no conversion)",
                 "gamma": "spot (no conversion)",
+            },
+            "identities": {
+                "reprice": "market_price vs BSM(σ_own)",
+                "pairs": "european Γ_call≈Γ_put, vega_call≈vega_put, PCP",
             },
         },
         spy_atm_pct=spy_atm_pct,
@@ -338,18 +509,27 @@ def cutoff_asof_ns(dt: date, cutoff_et: str = DEFAULT_CUTOFF_ET) -> int:
 
 
 def _render(report: DriftReport) -> str:
+    vendor_note = (
+        "vendor_compare_skipped"
+        if report.vendor_compare_skipped
+        else f"median_|ΔIV|={report.median_abs_iv}"
+    )
     lines = [
         f"drift_check -- {report.date}  asof_ns={report.asof_ns}  "
         f"cutoff_et={report.cutoff_et} ET",
         "-" * 72,
-        f"{report.status:<5} median_|ΔIV|={report.median_abs_iv}  "
-        f"frac_beyond={report.frac_beyond}  "
-        f"atm={report.counts.get('atm_compared')}",
+        f"{report.status:<5} identities median_|price−BSM|={report.median_abs_reprice}  "
+        f"frac_identity={report.frac_identity_beyond}  "
+        f"atm={report.counts.get('atm_compared')}  "
+        f"pairs={report.counts.get('atm_pairs')}",
+        f"      {vendor_note}  frac_vendor={report.frac_beyond}  "
+        f"vendor_atm={report.counts.get('vendor_compared')}",
         f"      priced={report.counts.get('priced')}  "
         f"expired={report.counts.get('expired')}  "
         f"no_price={report.counts.get('no_price')}  "
         f"uninvertible={report.counts.get('uninvertible')}  "
         f"otm={report.counts.get('otm')}",
+        f"      beyond_by_identity={report.beyond_by_identity}",
         f"      beyond_by_greek={report.beyond_by_greek}",
         f"      units: vendor theta * {VENDOR_THETA_TO_YEAR:g} (day→year), "
         f"vendor vega * {VENDOR_VEGA_TO_PER_1:g} (1%→1.00)",
@@ -436,7 +616,7 @@ def run_drift(
     uninvertible: str = "skip",
     thresholds: Thresholds | None = None,
 ) -> DriftReport:
-    """Load as-of chain, compare aligned vendor diagnostics, return a report."""
+    """Load as-of chain, run identity checks, attach vendor diagnostics."""
     thr = thresholds or DEFAULT_THRESHOLDS
     if thresholds is None or thresholds.atm_pct != atm_pct:
         thr = Thresholds(**{**asdict(thr), "atm_pct": atm_pct})
@@ -489,14 +669,14 @@ def _alert_fail(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI: exit 0 on PASS, 1 on drift / no data / schema. Exit 0 on holidays."""
+    """CLI: exit 0 on PASS, 1 on identity/vendor/data failure. Exit 0 on holidays."""
     file_vals = _dotenv()
     parser = argparse.ArgumentParser(
         prog="python -m pricing.drift_check",
         description=(
-            "Daily own-vs-vendor IV/Greeks canary. Vendor is a canary, not "
-            "gospel. Theta/vega are unit-aligned before compare. Exits 1 on "
-            "drift so cron/Healthchecks can alert."
+            "Daily identity canary on own IV/Greeks from the as-of chain. "
+            "Vendor diffs are diagnostic when present; null vendor IV is not "
+            "a FAIL. Exits 1 when identities break or data is missing."
         ),
     )
     parser.add_argument("--date", default=None, help="partition date YYYY-MM-DD (default: today ET)")
@@ -542,7 +722,15 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_MAX_ROWS,
         help=f"cap American CRR rows (default {DEFAULT_MAX_ROWS}; not a global row cap)",
     )
-    parser.add_argument("--min-compare", type=int, default=DEFAULT_MIN_COMPARE)
+    parser.add_argument(
+        "--min-compare",
+        type=int,
+        default=DEFAULT_MIN_COMPARE,
+        help=(
+            "min ATM names for identity tests; also the min vendor-comparable "
+            "ATM names before vendor drift can FAIL"
+        ),
+    )
     parser.add_argument("--fail-frac", type=float, default=DEFAULT_FAIL_FRAC)
     parser.add_argument("--iv-median-abs", type=float, default=DEFAULT_THRESHOLDS.iv_median_abs)
     parser.add_argument("--force", action="store_true", help="run even on closed days")
@@ -620,6 +808,13 @@ def main(argv: list[str] | None = None) -> int:
         )
         payload = report.to_dict()
         logger.log("drift", **{k: v for k, v in payload.items() if k != "units"})
+        if report.vendor_compare_skipped:
+            logger.log(
+                "vendor_compare_skipped",
+                vendor_compared=report.counts.get("vendor_compared"),
+                no_vendor_iv=report.counts.get("no_vendor_iv"),
+                min_compare=report.thresholds.get("min_compare"),
+            )
         print(_render(report), file=sys.stderr)
         if not args.dry_run:
             path = _write_report(report, data_root)

@@ -439,13 +439,17 @@
         <td class="when">17:00</td>
         <td>Mon–Fri</td>
         <td>
-          Daily own-vs-vendor IV/Greeks canary
+          Daily identity canary
           (<code>python -m pricing.drift_check</code>).
           As-of is the last snapshot at or before <strong>16:40 ET</strong>.
-          Vendor theta is per calendar day and vega per 1% vol; we compare after
-          <code>× 365</code> and <code>× 100</code> respectively.
-          Fails if median <code>|ΔIV|</code> on ATM names (&plusmn;5% of F) exceeds 4 vol pts,
-          or if &gt;25% of those names sit beyond the abs/rel band on IV/delta/vega/gamma/theta.
+          Always invert own IV and compute own Greeks; pass/fail is ATM
+          self-consistency (reprice vs BSM(σ), European put–call Γ/vega/PCP).
+          Vendor IV/greeks are diagnostic when present (theta <code>× 365</code>,
+          vega <code>× 100</code>); null vendor IV is not a FAIL
+          (<code>vendor_compare_skipped</code>). Vendor drift FAILs only with
+          enough vendor-comparable ATM names. Still fail-loud on no snapshots,
+          schema errors, foreign roots, empty allowlisted root, or too few ATM
+          names to test identities.
           SPY CRR is bounded (<code>--spy-atm-pct 0.05</code>;
           <code>--max-rows 400</code> caps CRR rows, not the whole chain).
           <code>--r</code> from <code>DRIFT_CHECK_R</code> (default 0.04).
@@ -548,7 +552,7 @@
       <tr>
         <td class="job">python -m pricing.drift_check --date D</td>
         <td class="when">on demand / 17:00 ET cron</td>
-        <td>Own-vs-vendor canary for that session. See Daily drift check below.</td>
+        <td>Identity-first canary for that session. See Daily drift check below.</td>
       </tr>
     </tbody>
   </table>
@@ -618,14 +622,20 @@
     <dd>
       <code>python -m pricing.drift_check</code> at <strong>17:00 ET</strong> Mon–Fri,
       after the 16:35 EOD snapshot. Loads the last snapshots/forwards at or before
-      16:40 ET, inverts own IV, computes own Greeks, then compares to vendor
-      after unit alignment: vendor theta (per calendar day) <code>× 365</code> to
-      per-year; vendor vega (per 1% vol) <code>× 100</code> to per 1.00 vol.
-      IV/delta/gamma need no conversion. Vendor is a canary, not gospel.
-      Compare set is ATM (<code>|K/F − 1| ≤ 5%</code>) with vendor IV present.
-      FAIL when median <code>|ΔIV|</code> &gt; 0.04, or &gt;25% of ATM names exceed
-      the abs/rel band on IV, delta, vega, gamma, or theta — not a single far-OTM tick.
-      Uninvertible / T≤0 / missing quote are skipped and counted.
+      16:40 ET and always inverts own IV / computes own Greeks
+      (<code>pricing.from_market</code>). Pass/fail is identity / self-consistency
+      on ATM names (<code>|K/F − 1| ≤ 5%</code>): inverted σ must reprice the quote
+      (<code>market_price</code> vs <code>BSM(σ_own)</code>), and European put–call
+      pairs must satisfy <code>Γ_call ≈ Γ_put</code>, <code>vega_call ≈ vega_put</code>,
+      and put–call parity. FAIL when the median reprice error exceeds its band, or
+      &gt;25% of ATM names fail identities — not a single far-OTM tick. Too few ATM
+      names to test identities is also a FAIL. Vendor IV/greeks remain diagnostic
+      when present: unit-align theta (per calendar day) <code>× 365</code> to per-year
+      and vega (per 1% vol) <code>× 100</code> to per 1.00 vol, include aligned diffs
+      in the report, and FAIL on vendor drift only when enough vendor-comparable ATM
+      names exist. Null vendor IV is not a FAIL (<code>vendor_compare_skipped</code>).
+      Still fail-loud on no snapshots, schema errors, foreign roots, or an empty
+      allowlisted root. Uninvertible / T≤0 / missing quote are skipped and counted.
       SPY CRR is an ATM slice (<code>--spy-atm-pct 0.05</code>;
       <code>--max-rows 400</code> caps American CRR rows only, so an SPX-first
       concat cannot skip SPY) so cron finishes. <code>DRIFT_CHECK_R=0.04</code> in <code>.env</code> (no rates warehouse).

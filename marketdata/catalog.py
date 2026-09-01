@@ -1,8 +1,12 @@
-"""Partition listing, schema-strict parquet reads, and as-of snapshot selection.
+"""Partition listing, schema-strict parquet reads, and per-underlying file selection.
 
 Ingest writes many files per day for snapshots and contracts. Reading a whole
 partition double-counts. As-of takes the last file **at or before** ``asof_ns``
 per underlying, using the epoch-ms stamp in the filename.
+
+This module is the single home for clean-partition IO: ``ingest.jobs``
+delegates its ``Settings``-based, list-of-dicts readers here rather than
+re-walking ``dt=`` partitions itself.
 """
 
 from __future__ import annotations
@@ -102,6 +106,41 @@ def _parquet_files(part: Path) -> list[Path]:
     return sorted(part.glob("*.parquet"))
 
 
+def files_by_underlying(
+    dataset: str,
+    dt: date,
+    data_root: str | os.PathLike[str] | None = None,
+    asof_ns: int | None = None,
+) -> tuple[dict[str | None, Path], list[Path]]:
+    """Newest stamped parquet per underlying in one clean partition.
+
+    Returns ``(by_underlying, unstamped)``: the highest-epoch_ms file per
+    underlying label (key ``None`` for ``{job}-{epoch_ms}`` names), and every
+    file whose name carries no epoch-ms stamp. ``asof_ns`` keeps only files
+    stamped at or before that instant (ns epoch). Fail-loud callers
+    (:func:`read_asof`) treat ``unstamped`` as an error; tolerant callers
+    (``ingest.jobs``) read those files separately.
+    """
+    _schema(dataset)
+    part = _partition_dir(_data_root(data_root), dataset, dt)
+    files = _parquet_files(part)
+    if not files:
+        raise CatalogError(f"no parquet in {part}")
+    latest: dict[str | None, tuple[int, Path]] = {}
+    unstamped: list[Path] = []
+    for path in files:
+        epoch_ms, underlying = _parse_stamp(path)
+        if epoch_ms is None:
+            unstamped.append(path)
+            continue
+        if asof_ns is not None and epoch_ms * 1_000_000 > asof_ns:
+            continue
+        prev = latest.get(underlying)
+        if prev is None or epoch_ms > prev[0]:
+            latest[underlying] = (epoch_ms, path)
+    return {u: p for u, (_ms, p) in latest.items()}, unstamped
+
+
 def validate_arrow_schema(table: pa.Table, dataset: str) -> None:
     """Extra or missing columns are errors. Type mismatches are errors."""
     expected = _schema(dataset)
@@ -160,36 +199,18 @@ def read_asof(
     """Last file per underlying at or before ``asof_ns`` (ns epoch).
 
     ``asof_ns=None`` means the latest file per underlying in that partition.
-    Absence (no file at or before the instant) is an error.
+    Absence (no file at or before the instant) is an error, as is any file
+    whose name carries no epoch-ms stamp.
     """
-    _schema(dataset)
     root = _data_root(data_root)
     part = _partition_dir(root, dataset, dt)
-    files = _parquet_files(part)
-    if not files:
-        raise CatalogError(f"no parquet in {part}")
-
-    stamped: list[tuple[Path, int, str | None]] = []
-    for path in files:
-        epoch_ms, underlying = _parse_stamp(path)
-        if epoch_ms is None:
-            raise AsOfError(
-                f"cannot as-of {path.name}: filename is not "
-                "{{job}}-{{underlying}}-{{epoch_ms}}.parquet"
-            )
-        stamped.append((path, epoch_ms, underlying))
-
-    if asof_ns is not None:
-        stamped = [t for t in stamped if t[1] * 1_000_000 <= asof_ns]
-        if not stamped:
-            raise AsOfError(f"no {dataset} file in {part} at or before asof_ns={asof_ns}")
-
-    latest: dict[str | None, tuple[int, Path]] = {}
-    for path, epoch_ms, underlying in stamped:
-        prev = latest.get(underlying)
-        if prev is None or epoch_ms > prev[0]:
-            latest[underlying] = (epoch_ms, path)
-
-    chosen = [p for _ms, p in latest.values()]
-    tables = [_read_file(p, dataset) for p in sorted(chosen)]
+    by_underlying, unstamped = files_by_underlying(dataset, dt, root, asof_ns)
+    if unstamped:
+        raise AsOfError(
+            f"cannot as-of {unstamped[0].name}: filename is not "
+            "{job}-{underlying}-{epoch_ms}.parquet"
+        )
+    if not by_underlying:
+        raise AsOfError(f"no {dataset} file in {part} at or before asof_ns={asof_ns}")
+    tables = [_read_file(p, dataset) for p in sorted(by_underlying.values())]
     return pa.concat_tables(tables)

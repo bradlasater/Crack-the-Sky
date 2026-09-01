@@ -37,8 +37,9 @@ scheduled at all.
    Massive dashboard → S3 Access Keys). Placeholder S3 creds exit code 3.
    Set `HEALTHCHECKS_PING_KEY` too (see Monitoring below) — without it, a job
    that dies dies silently.
-4. **Smoke test:** `venv/bin/python -m ingest.smoke` — 6 live checks,
-   prints a PASS/FAIL/SKIP table.
+4. **Smoke test:** `venv/bin/python -m ingest.entitlements` — probes every
+   documented entitlement and validates payload shapes, prints a
+   PASS/FAIL/SKIP table.
 5. **Install the schedule:** cron does not expand `~`/`$HOME`, so first
    rewrite the placeholder user path, then install:
    ```
@@ -87,10 +88,13 @@ JSONL lands under the raw-only `raw/option_minute_bars_ws`), `option_day_bars`,
 `splits`. Timestamps are stored exactly as delivered (ns/ms epoch ints, UTC) —
 never converted.
 
-Three datasets are currently **write-only** — captured for future use, read by
-nothing yet: `forwards` (per-expiry put-call-parity SPX forward, derived from
-live-only snapshots so it cannot be backfilled), `contracts_expired` (Saturday
-`contracts_sync --expired`), and `underlying_day_bars` (`grouped_daily`).
+Two datasets are **write-only by design** — captured deliberately, read by
+nothing yet: `contracts_expired` (Saturday `contracts_sync --expired`; the
+survivorship-bias-free record of what was tradable on a past date, kept for
+future backtests) and `underlying_day_bars` (`grouped_daily`; an independent
+SPY daily-close cross-check, redundant with `underlying_minute_bars` and
+rebuildable from one grouped-daily REST call). `forwards` is no longer in
+this list: `pricing` reads it for the SPX forward chain.
 
 Clean files are named `{job}-{underlying}-{epoch_ms}.parquet`. Readers that
 want "the current chain" use `latest_contracts()` / `latest_snapshots()`, which
@@ -206,8 +210,8 @@ scripts tests). Ruff lints `ingest` and `tests`; the syntax check
   and a syntax check. This is the PR gate: branch protection on `main`
   requires it and routes all changes through a PR.
 - **Self-hosted runner on the ingest box** (`.github/workflows/box.yml`) —
-  the box has the credentials and the real data tree. It runs the live smoke
-  test, the entitlement probe, a crontab-drift check (`crontab -l` vs
+  the box has the credentials and the real data tree. It runs the live
+  entitlement probes, a crontab-drift check (`crontab -l` vs
   `deploy/crontab`), and `coverage_audit` — on every push and PR, and on a
   **daily schedule**, which is what turns the coverage audit into an alarm.
   (The runner holds only read-only market-data credentials; see the accepted-

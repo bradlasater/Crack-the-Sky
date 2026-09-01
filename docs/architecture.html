@@ -467,7 +467,7 @@
         <td class="job">grouped_daily<br><span class="tag rest">rest</span></td>
         <td class="when">08:10 · default date = T-1</td>
         <td>Tue–Sat</td>
-        <td>Whole-market grouped daily bars in one REST call. Clean <code>underlying_day_bars</code> (currently write-only).</td>
+        <td>Whole-market grouped daily bars in one REST call. Clean <code>underlying_day_bars</code> — write-only by design: an independent SPY daily-close cross-check, redundant with <code>underlying_minute_bars</code> and rebuildable from one grouped-daily REST call if ever needed.</td>
       </tr>
       <tr>
         <td class="job">flatfile_pull<br><span class="tag s3">s3</span></td>
@@ -497,7 +497,7 @@
         <td class="job">contracts_sync --expired<br><span class="tag rest">rest</span></td>
         <td class="when">09:00</td>
         <td>Saturday</td>
-        <td>Expired-contract pass into <code>contracts_expired</code> (currently write-only).</td>
+        <td>Expired-contract pass into <code>contracts_expired</code> — write-only by design: the survivorship-bias-free record of what was tradable on a past date, kept for future backtests.</td>
       </tr>
       <tr>
         <td class="job">prune_raw.sh --apply</td>
@@ -515,9 +515,9 @@
     </thead>
     <tbody>
       <tr>
-        <td class="job">python -m ingest.smoke</td>
+        <td class="job">python -m ingest.entitlements</td>
         <td class="when">after bootstrap or credential change</td>
-        <td>Six live checks (REST + S3 head-bucket). Expect 6/6 with real S3 keys.</td>
+        <td>Probes every documented entitlement (REST + S3) and validates payload shapes on entitled endpoints. Expect all PASS with real S3 keys (SKIP when creds are placeholders).</td>
       </tr>
       <tr>
         <td class="job">bash scripts/backfill.sh FROM TO</td>

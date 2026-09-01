@@ -47,11 +47,13 @@ LOG=/data/massive/logs/cron.log
 0-30 16 * * 1-5  cd $REPO && flock -n /tmp/massive-snapshot_sweep.lock $PY -m ingest.jobs.snapshot_sweep >> $LOG 2>&1
 35 16 * * 1-5    cd $REPO && flock -n /tmp/massive-snapshot_sweep.lock $PY -m ingest.jobs.snapshot_sweep --eod >> $LOG 2>&1
 
-# --- math vs vendor (canary): after the 16:35 EOD snapshot has written today's
-# snapshots + forwards. Own IV/Greeks vs vendor, after unit alignment.
+# --- identity canary: after the 16:35 EOD snapshot has written today's
+# snapshots + forwards. Own IV/Greeks from the as-of chain; pass/fail is
+# ATM identities (reprice vs BSM(σ), European put-call Γ/vega/PCP).
+# Vendor diffs are diagnostic when present; null vendor IV is not a FAIL.
 # Bounded SPY CRR (--spy-atm-pct 0.05; --max-rows 400 caps CRR rows only).
-# Exits non-zero on drift / no data, which pings Healthchecks /fail and mails
-# if MAILTO is set.
+# Exits non-zero on identity/data failure, which pings Healthchecks /fail
+# and mails if MAILTO is set.
 00 17 * * 1-5    cd $REPO && flock -n /tmp/massive-drift_check.lock $PY -m pricing.drift_check >> $LOG 2>&1
 
 # --- websocket minute bars (same-day tape) --------------------------------

@@ -165,13 +165,20 @@ failure that looks like success.
 One-time setup:
 
 ```
-# 1. Create the checks, with schedules matching deploy/crontab.
-#    Needs the MANAGEMENT key (Settings -> API Access), not the ping key.
-venv/bin/python scripts/setup_healthchecks.py --api-key hcak_xxx --dry-run
-venv/bin/python scripts/setup_healthchecks.py --api-key hcak_xxx
+# 1. Put BOTH keys in .env. They are different strings from different pages,
+#    and swapping them fails silently -- a wrong ping key just 404s.
+#    HEALTHCHECKS_PING_KEY=...   (Settings -> Ping Key)      read by every job
+#    HEALTHCHECKS_API_KEY=...    (Settings -> API Access)    read by step 2 only
+#    Don't identify them by prefix; Healthchecks has issued management keys as
+#    both hcak_... and hcw_..., so go by which page you copied it from.
 
-# 2. Put the PING key (Settings -> Ping Key) in .env:
-#    HEALTHCHECKS_PING_KEY=...
+# 2. Create the checks, with schedules matching deploy/crontab. Reads
+#    HEALTHCHECKS_API_KEY from .env. --api-key still overrides, but avoid it:
+#    a key on the command line is copied into logs you don't control. Running
+#    this over Tailscale SSH put the full key in the systemd journal, because
+#    tailscaled logs the remote command line verbatim.
+venv/bin/python scripts/setup_healthchecks.py --dry-run
+venv/bin/python scripts/setup_healthchecks.py
 
 # 3. Add a notification channel in the Healthchecks UI, or nothing reaches you.
 ```

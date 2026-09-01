@@ -8,10 +8,21 @@ cron expression it is actually scheduled on means Healthchecks alerts on a
 
 Needs a **management API key** (Healthchecks project -> Settings -> API Access
 -> "API key (full access)"), which is different from the ping key the jobs use.
+Healthchecks has issued these under more than one prefix (``hcak_``, ``hcw_``),
+so do not identify a key by its prefix -- the management key is whichever one
+the API Access page gives you, and the ping key is the one on the Ping Key page.
 Self-hosted instances pass ``--api-base https://<host>/api/v3``; note the ping
 root is separate and lives in ``HEALTHCHECKS_BASE`` (``https://<host>/ping``).
 
-    python scripts/setup_healthchecks.py --api-key hcak_xxx [--dry-run]
+    python scripts/setup_healthchecks.py [--dry-run]
+
+With no ``--api-key``, the key is read from ``HEALTHCHECKS_API_KEY`` in the
+environment or in ``.env``, so the one-time setup does not need the secret
+retyped every time. Prefer this over ``--api-key``: a key on the command line
+is not merely in shell history, it is copied verbatim into logs you do not
+control. A run of this script over Tailscale SSH put the full key into the
+systemd journal, because ``tailscaled`` logs the whole remote command line.
+Anything that can read the journal can then read the key.
 
 Idempotent: re-running updates existing checks in place (matched by slug).
 """
@@ -20,11 +31,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 DEFAULT_API_BASE = "https://healthchecks.io/api/v3"
+API_KEY_ENV = "HEALTHCHECKS_API_KEY"
 
 # job -> (cron schedule, grace_minutes, description)
 #
@@ -50,6 +64,32 @@ JOBS: dict[str, tuple[str, int, str]] = {
 
 SLUG_PREFIX = "massive-"
 TZ = "America/New_York"
+
+
+def api_key_from_env(env_path: Path | None = None) -> str | None:
+    """Management key from the process environment, else from ``.env``.
+
+    Deliberately a tiny local parser rather than ``ingest.common.config``:
+    ``scripts/`` is not a package and nothing in it imports ``ingest``, and
+    ``Settings.load`` would also demand unrelated variables like
+    ``MASSIVE_API_KEY`` that this script has no use for.
+    """
+    key = os.environ.get(API_KEY_ENV)
+    if key and key.strip():
+        return key.strip()
+    path = env_path if env_path is not None else Path(__file__).resolve().parents[1] / ".env"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, _, value = line.partition("=")
+        if name.strip() == API_KEY_ENV:
+            return value.strip().strip('"').strip("'") or None
+    return None
 
 
 def slug_for(job: str) -> str:
@@ -83,7 +123,10 @@ def _request(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="setup_healthchecks.py")
-    parser.add_argument("--api-key", required=True, help="management API key (hcak_...)")
+    parser.add_argument(
+        "--api-key",
+        help=f"management API key; defaults to {API_KEY_ENV} in the environment or .env",
+    )
     parser.add_argument("--dry-run", action="store_true", help="print, do not write")
     parser.add_argument(
         "--api-base", default=DEFAULT_API_BASE,
@@ -92,7 +135,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    existing_body = _request("GET", "/checks/", args.api_key, api_base=args.api_base)
+    api_key = args.api_key or api_key_from_env()
+    if not api_key:
+        parser.error(
+            "no management API key. Pass --api-key, or set "
+            f"{API_KEY_ENV} in the environment or in .env "
+            "(Healthchecks project -> Settings -> API Access -> full access). "
+            "This is NOT the ping key the jobs ping with."
+        )
+
+    existing_body = _request("GET", "/checks/", api_key, api_base=args.api_base)
     existing = {
         c.get("slug"): c
         for c in (existing_body or {}).get("checks", [])  # type: ignore[union-attr]
@@ -114,7 +166,7 @@ def main(argv: list[str] | None = None) -> int:
         action = "update" if slug in existing else "create"
         print(f"  {action:<6} {slug:<26} {schedule:<20} grace={grace}m")
         if not args.dry_run:
-            _request("POST", "/checks/", args.api_key, payload, api_base=args.api_base)
+            _request("POST", "/checks/", api_key, payload, api_base=args.api_base)
 
     if args.dry_run:
         print("\n(dry run - nothing written)")

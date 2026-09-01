@@ -113,6 +113,64 @@ def write_clean(
     return path
 
 
+def write_clean_table(
+    dataset: str,
+    dt: date | str,
+    table: Any,
+    job: str,
+    data_root: str | os.PathLike[str] | None = None,
+) -> Path:
+    """Write an already-schema-matching pyarrow Table; returns the path.
+
+    ``write_clean`` projects a list of dicts, which means materialising every
+    row in Python. Callers that already filtered columnar (flatfile_pull) skip
+    that entirely.
+    """
+    import pyarrow.parquet as pq
+
+    schema = schemas.SCHEMAS[dataset]
+    if not table.schema.equals(schema):
+        raise ValueError(
+            f"table schema does not match SCHEMAS[{dataset!r}]:\n"
+            f"  got:      {table.schema}\n  expected: {schema}"
+        )
+    day = dt.isoformat() if isinstance(dt, date) else str(dt)
+    out_dir = _data_root(data_root) / "clean" / dataset / f"dt={day}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{job}-{_epoch_ms()}.parquet"
+    pq.write_table(table, path)
+    return path
+
+
+def quarantine_prior(
+    dataset: str,
+    dt: date | str,
+    job: str,
+    data_root: str | os.PathLike[str] | None = None,
+) -> list[Path]:
+    """Move this job's earlier output for a partition aside; returns the paths.
+
+    Re-filtering a partition writes a NEW timestamped file, so the previous
+    one would remain and be double-counted by a whole-partition read. Moving
+    rather than deleting keeps the old output recoverable under
+    ``_quarantine/`` -- the raw payload is still on disk either way, but a
+    rename is free and a delete is not reversible.
+    """
+    day = dt.isoformat() if isinstance(dt, date) else str(dt)
+    root = _data_root(data_root)
+    part = root / "clean" / dataset / f"dt={day}"
+    if not part.is_dir():
+        return []
+    dest = root / "_quarantine" / "refilter" / dataset / f"dt={day}"
+    moved: list[Path] = []
+    for path in sorted(part.glob(f"{job}-*.parquet")):
+        dest.mkdir(parents=True, exist_ok=True)
+        target = dest / path.name
+        path.replace(target)
+        moved.append(target)
+    return moved
+
+
 def meta_path(name: str, data_root: str | os.PathLike[str] | None = None) -> Path:
     """Return ``{DATA_ROOT}/_meta/{name}``, creating the _meta directory."""
     base = _data_root(data_root) / "_meta"

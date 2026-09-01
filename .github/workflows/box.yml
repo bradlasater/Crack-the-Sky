@@ -1,0 +1,78 @@
+name: box
+
+# Live checks that need what GitHub-hosted runners cannot have: the API key,
+# the S3 credentials and the real /data/massive tree. Runs on a self-hosted
+# Actions runner on the ingest box (free on private repos -- minutes billing
+# applies only to GitHub-hosted runners). Replaces Buildkite. Pure offline
+# correctness lives in ci.yml and is not duplicated beyond the same fast gate.
+#
+# The daily schedule is the point -- it is what turns coverage_audit into an
+# alarm. Times are UTC; 22:17 UTC lands mid-afternoon ET, after the day's
+# capture (incl. the 16:35 EOD sweep) has settled. coverage_audit checks T-1.
+#
+# Runner setup (once, on the box):
+#   Repo -> Settings -> Actions -> Runners -> New self-hosted runner (Linux),
+#   then install it as a service (sudo ./svc.sh install && sudo ./svc.sh start).
+#   The service needs the credentials -- point it at the repo .env:
+#     sudo systemctl edit actions.runner.<org>-<repo>.<name>.service
+#     [Service]
+#     EnvironmentFile=/home/brad-lasater/data_ingest_infra/.env
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  schedule:
+    - cron: "17 22 * * *" # daily, after the 16:35 ET EOD sweep
+  workflow_dispatch:
+
+concurrency:
+  group: box-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  live:
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Credentials present
+        # Fail fast with a clear message instead of six confusing 401s.
+        run: |
+          : "${MASSIVE_API_KEY:?runner env missing MASSIVE_API_KEY -- set EnvironmentFile on the runner service}"
+          : "${MASSIVE_S3_ACCESS_KEY_ID:?runner env missing MASSIVE_S3_ACCESS_KEY_ID}"
+          : "${MASSIVE_S3_SECRET_ACCESS_KEY:?runner env missing MASSIVE_S3_SECRET_ACCESS_KEY}"
+
+      - name: Bootstrap venv
+        run: |
+          test -x venv/bin/python || python3 -m venv venv
+          venv/bin/pip install --quiet --upgrade pip
+          venv/bin/pip install --quiet -r requirements-dev.txt
+
+      - name: Offline gate
+        run: |
+          venv/bin/ruff check ingest tests
+          venv/bin/python -m compileall -q ingest
+          venv/bin/python -m pytest tests/
+
+      - name: Live entitlement smoke
+        # 6 live checks against the REST API and the flat-file bucket. Fails
+        # if a plan change or vendor migration silently revokes something.
+        run: venv/bin/python -m ingest.smoke
+
+      - name: Entitlement probe
+        # Asserts the documented entitlement map still holds, so a downgrade
+        # shows up as a red build rather than months of quiet 403s.
+        run: venv/bin/python -m ingest.entitlements
+
+      - name: Crontab drift
+        # The installed crontab must match the repo (modulo the $HOME rewrite).
+        run: |
+          sed "s|/home/brad-lasater|$HOME|g" deploy/crontab > /tmp/expected.crontab
+          diff <(crontab -l) /tmp/expected.crontab
+
+      - name: Coverage audit (T-1)
+        # The gate that matters on the daily scheduled run: did yesterday's
+        # session actually land everything it should have? A gap here is
+        # exactly the thing this workflow exists to make loud.
+        run: venv/bin/python -m ingest.jobs.coverage_audit

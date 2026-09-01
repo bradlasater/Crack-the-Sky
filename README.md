@@ -199,17 +199,21 @@ Pytest covers all four packages (`ingest`, `marketdata`, `pricing`, plus the
 scripts tests). Ruff lints `ingest` and `tests`; the syntax check
 (`compileall`) covers `ingest` only — matching both CI pipelines.
 
-**CI runs in two places, deliberately:**
+**CI runs in two GitHub Actions workflows, deliberately:**
 
-- **GitHub Actions** (`.github/workflows/ci.yml`) — every push and PR. No API
+- **GitHub-hosted** (`.github/workflows/ci.yml`) — every push and PR. No API
   key and no `/data/massive`, so it runs only the offline fixture tests, lint
-  and a syntax check. This is the PR gate.
-- **Buildkite** (`.buildkite/pipeline.yml`, pipeline
-  `bradlasater/data-ingest-infra`) — a self-hosted agent on the ingest box,
-  which has the credentials and the real data tree. It runs the live smoke
+  and a syntax check. This is the PR gate: branch protection on `main`
+  requires it and routes all changes through a PR.
+- **Self-hosted runner on the ingest box** (`.github/workflows/box.yml`) —
+  the box has the credentials and the real data tree. It runs the live smoke
   test, the entitlement probe, a crontab-drift check (`crontab -l` vs
-  `deploy/crontab`), and `coverage_audit`. Add a **daily scheduled build** —
-  that is what turns the coverage audit into an alarm.
+  `deploy/crontab`), and `coverage_audit` — on pushes/PRs and on a **daily
+  schedule**, which is what turns the coverage audit into an alarm.
+  Self-hosted runners are free, including on private repos. One-time setup:
+  repo → Settings → Actions → Runners → New self-hosted runner, install as a
+  service, and add `EnvironmentFile=<repo>/.env` to the service so the checks
+  see `MASSIVE_API_KEY` and the S3 creds.
 
 ## Retention
 

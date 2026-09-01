@@ -87,7 +87,7 @@ def test_snapshots_pass_at_full_cadence(tmp_path: Path) -> None:
     part.mkdir(parents=True)
     expected = audit.expected_sweeps(RUN_DATE, tmp_path)
     base = 1788000000000
-    for root in ("SPY", "I:SPX"):
+    for root in ("SPY", "I:SPX", "VIX"):
         for i in range(expected):
             (part / f"snapshot_sweep-{root}-{base + i * 60_000}.parquet").touch()
     checks = audit.check_snapshots(settings, RUN_DATE)
@@ -101,7 +101,7 @@ def test_snapshots_warn_on_a_hole(tmp_path: Path) -> None:
     part.mkdir(parents=True)
     expected = audit.expected_sweeps(RUN_DATE, tmp_path)
     base = 1788000000000
-    for root in ("SPY", "I:SPX"):
+    for root in ("SPY", "I:SPX", "VIX"):
         for i in range(expected):
             offset = i * 60_000 + (600_000 if i > expected // 2 else 0)
             (part / f"snapshot_sweep-{root}-{base + offset}.parquet").touch()
@@ -175,6 +175,7 @@ def test_underlying_coverage_passes_when_clean(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     records = [_trade(t) for t in (
         "O:SPY260918C00770000", "O:SPX260918C08000000", "O:SPXW260918P07600000",
+        "O:VIX260916C00020000", "O:VIXW260902P00016000",
     )]
     landing.write_clean("option_trades", RUN_DATE, records,
                         job="flatfile_pull", data_root=tmp_path)

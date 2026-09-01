@@ -39,9 +39,11 @@ JOBS: dict[str, tuple[str, int, str]] = {
     "ws_minute_bars":   ("25 9 * * 1-5",    600, "Delayed options websocket capture (long-running)"),
     "trades_watchlist": ("*/5 10-15 * * 1-5", 20, "Same-day option trades for the liquid watchlist"),
     "underlying_bars":  ("5 8 * * 2-6",     90,  "SPY minute bars, T-1 only"),
-    "grouped_daily":    ("10 8 * * 2-6",    90,  "Whole-market daily bars (SPY cross-check)"),
+    "grouped_daily":    ("10 8 * * 2-6",    90,  "Whole-market daily bars (SPY + VIX proxies)"),
+    "rates_sync":       ("20 8 * * 2-6",    90,  "Treasury curve - the discount rate every IV inversion uses"),
     "flatfile_pull":    ("5 11 * * 2-6",    120, "T-1 S3 flat files - the authoritative record"),
     "reconcile":        ("30 11 * * 2-6",   120, "Rewrite minute bars from the flat file"),
+    "ibkr_executions":  ("30 18 * * 1-5",   120, "Broker fills via IBKR Flex (no gateway)"),
     "coverage_audit":   ("30 12 * * 2-6",   180, "Did yesterday actually land? Fails loudly if not"),
     "drift_check":      ("0 17 * * 1-5",    60,  "Own IV/Greeks identity canary (vendor diffs diagnostic). After EOD snapshot."),
 }

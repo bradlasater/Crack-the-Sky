@@ -107,7 +107,11 @@ def test_settlement_times_are_per_root() -> None:
     assert settlement_time_et("SPY") == (16, 0)
     assert settlement_time_et("SPXW") == (16, 0)
     assert settlement_time_et("SPX") == (9, 30)      # AM settled
-    assert set(SETTLEMENT_ET) == {"SPY", "SPX", "SPXW"}
+    # VIX options settle to the SOQ at the Wednesday OPEN -- both series are
+    # AM settled, unlike the SPX/SPXW split.
+    assert settlement_time_et("VIX") == (9, 30)
+    assert settlement_time_et("VIXW") == (9, 30)
+    assert set(SETTLEMENT_ET) == {"SPY", "SPX", "SPXW", "VIX", "VIXW"}
 
 
 def test_expiry_instant_is_settlement_not_utc_midnight() -> None:
@@ -151,3 +155,52 @@ def test_year_fraction_is_longer_than_the_utc_midnight_convention() -> None:
     )
     assert correct > midnight
     assert (correct - midnight) * 365 * 24 == pytest.approx(20.0, abs=0.01)  # ~20 hours
+
+
+# ---------------------------------------------------------------------------
+# The curve reaches the actual chain path, not just the per-quote helpers
+# ---------------------------------------------------------------------------
+
+def test_untraded_contract_without_a_timestamp_is_skipped_not_fatal() -> None:
+    """VIX carries no underlying, so an unprinted contract has no stamp at all.
+
+    Measured 2026-09-01: 421 of 1,520 VIX rows, and zero for SPY or SPX. One
+    unquoted wing must not abort the whole chain and take down the canary.
+    """
+    from dataclasses import replace
+
+    q = _quote("O:VIXW260902C00010500", underlying_price=None,
+               asof=dt.datetime(2026, 9, 1, 12, 0, tzinfo=ET))
+    stampless = replace(q, asof_ns=None)
+    assert stampless.asof_ns is None
+    with pytest.raises(ValueError, match="asof_ns"):
+        price_quote(stampless, r=0.04, sigma=0.2,
+                    forward=_forward(dt.date(2026, 9, 2), 15.26))
+
+
+def test_resolve_r_uses_the_curve_when_r_is_none(tmp_path, monkeypatch) -> None:
+    """r=None must resolve per contract rather than fall back to a constant."""
+    from ingest.common import landing
+    from pricing.from_market import resolve_r
+
+    landing.write_clean(
+        "treasury_yields", dt.date(2026, 9, 1),
+        [{"date": "2026-08-28", "yield_1_month": 3.84, "yield_3_month": 3.90,
+          "yield_1_year": 4.15}],
+        job="rates_sync", data_root=tmp_path,
+    )
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path))
+    q = _quote("O:SPY260918C00770000", underlying_price=767.38,
+               asof=dt.datetime(2026, 9, 1, 12, 0, tzinfo=ET))
+    assert resolve_r(q, None, 30 / 365) == pytest.approx(0.0384)
+    assert resolve_r(q, 0.05, 30 / 365) == 0.05, "explicit r still wins"
+
+
+def test_resolve_r_fails_loudly_without_a_curve(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path))
+    q = _quote("O:SPY260918C00770000", underlying_price=767.38,
+               asof=dt.datetime(2026, 9, 1, 12, 0, tzinfo=ET))
+    from pricing.from_market import resolve_r
+
+    with pytest.raises(ValueError, match="rates_sync|Treasury curve"):
+        resolve_r(q, None, 30 / 365)

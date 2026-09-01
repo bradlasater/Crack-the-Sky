@@ -28,7 +28,11 @@ from ingest.jobs import parse_underlyings, run_date_from_args, strip_flag
 JOB = "grouped_daily"
 DATASET = "underlying_day_bars"
 GROUPED_PATH = "/v2/aggs/grouped/locale/us/market/stocks"
-TICKERS = ["SPY"]
+# One REST call returns the whole market, so widening this list is free.
+# VIXY/UVXY/VXX are an independent sanity check on the VIX parity curve in
+# clean/forwards -- they are ETF/ETN proxies, not the index, and will drift
+# from it by roll cost; that drift is the signal, not an error.
+TICKERS = ["SPY", "VIXY", "UVXY", "VXX"]
 
 
 def _bar_record(bar: dict[str, Any]) -> dict[str, Any]:

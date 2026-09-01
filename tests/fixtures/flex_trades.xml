@@ -1,0 +1,26 @@
+<FlexQueryResponse queryName="Executions" type="AF">
+<FlexStatements count="1">
+<FlexStatement accountId="U27766163" fromDate="20260828" toDate="20260828">
+<Trades>
+<Trade accountId="U27766163" tradeID="7712345" ibExecID="0000e123.68b1a2c3.01.01"
+ ibOrderID="998877" symbol="SPXW 260918P7600" underlyingSymbol="SPXW"
+ assetCategory="OPT" putCall="P" strike="7600" expiry="20260918" multiplier="100"
+ buySell="BUY" quantity="2" tradePrice="41.5" tradeMoney="8300"
+ proceeds="-8300" ibCommission="-1.84" fifoPnlRealized="0" currency="USD"
+ tradeDate="20260828" dateTime="20260828;103015" orderTime="20260828;103012"
+ openCloseIndicator="O" exchange="CBOE" notes="" />
+<Trade accountId="U27766163" tradeID="7712346" ibExecID="0000e123.68b1a2c4.01.01"
+ ibOrderID="998878" symbol="SPY 260918C770" underlyingSymbol="SPY"
+ assetCategory="OPT" putCall="C" strike="770" expiry="18SEP26" multiplier="100"
+ buySell="SELL" quantity="-5" tradePrice="6.87" tradeMoney="-3435"
+ proceeds="3435" ibCommission="-3.25" fifoPnlRealized="112.5" currency="USD"
+ tradeDate="20260828" dateTime="20260828;144501" orderTime="20260828;144455"
+ openCloseIndicator="C" exchange="AMEX" notes="" />
+<Trade accountId="U99999999" tradeID="7712347" ibExecID="0000e123.68b1a2c5.01.01"
+ symbol="AAPL" underlyingSymbol="AAPL" assetCategory="STK"
+ buySell="BUY" quantity="100" tradePrice="212.4" tradeMoney="21240"
+ ibCommission="-1.00" currency="USD" tradeDate="20260828" exchange="NASDAQ" />
+</Trades>
+</FlexStatement>
+</FlexStatements>
+</FlexQueryResponse>

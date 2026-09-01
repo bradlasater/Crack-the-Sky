@@ -55,6 +55,31 @@ def write_raw(
     return path
 
 
+def write_raw_text(
+    dataset: str,
+    dt: date | str,
+    text: str | bytes,
+    job: str,
+    ext: str = "txt",
+    data_root: str | os.PathLike[str] | None = None,
+) -> Path:
+    """Land a vendor payload verbatim; returns the path.
+
+    ``write_raw`` JSON-encodes an iterable of records, which silently turns a
+    string into one JSON line per character. Payloads that are already a
+    document -- Flex XML, for instance -- need to land byte-for-byte, because
+    the raw zone is the record of truth and is never rewritten.
+    """
+    day = dt.isoformat() if isinstance(dt, date) else str(dt)
+    out_dir = _data_root(data_root) / "raw" / dataset / f"dt={day}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{job}-{_epoch_ms()}.{ext.lstrip('.')}"
+    payload = text if isinstance(text, bytes) else text.encode("utf-8")
+    with open(path, "wb") as fh:
+        fh.write(payload)
+    return path
+
+
 def write_clean(
     dataset: str,
     dt: date | str,

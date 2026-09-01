@@ -27,7 +27,6 @@
             <li><a href="ingest.html#ingest-cron">NY cron</a></li>
             <li><a href="ingest.html#ingest-session">Weekday session</a></li>
             <li><a href="ingest.html#ingest-entitlements">Entitlements</a></li>
-            <li><a href="ingest.html#ingest-smoke">Smoke</a></li>
           </ol>
         </li>
         <li><a href="marketdata.html">marketdata</a></li>
@@ -233,7 +232,7 @@
         </tbody>
       </table>
 
-      <p>On-demand: <code>python -m ingest.smoke</code>, <code>python -m ingest.entitlements</code>, <code>scripts/backfill.sh</code>, <code>scripts/repair.sh</code>, <code>python -m pricing.from_market</code>.</p>
+      <p>On-demand: <code>python -m ingest.entitlements</code>, <code>scripts/backfill.sh</code>, <code>scripts/repair.sh</code>, <code>python -m pricing.from_market</code>.</p>
 
       <h3 id="ingest-cron">NY cron</h3>
       <p>
@@ -301,7 +300,19 @@
       <p>
         Probed, not assumed. Re-check with <code>python -m ingest.entitlements</code>
         (exit 1 on drift in either direction: something stopped working, or
-        something newly available that no job captures).
+        something newly available that no job captures). This absorbed the
+        former <code>ingest.smoke</code>, so it is also the post-bootstrap and
+        post-credential-change check.
+      </p>
+      <p>
+        Selected job-critical response bodies are shape-checked, so an
+        endpoint covered by a validator that stops returning required fields
+        counts as drift. The contract probe picks a fresh liquid contract each
+        time rather than naming one, because a fixed ticker returns an
+        entitled-but-empty 200 once it expires — indistinguishable from a
+        revoked entitlement. Missing or placeholder S3 keys
+        <strong>SKIP</strong> (exit 0) rather than FAIL, so a half-configured
+        box reports "not set up yet" instead of a verdict about the plan.
       </p>
       <dl class="notes">
         <dt>Entitled</dt>
@@ -309,14 +320,6 @@
         <dt>Not entitled</dt>
         <dd>Option NBBO (REST and <code>quotes_v1</code>), I:SPX / I:VIX (and other I:* index levels), equity trades/quotes, <code>us_stocks_sip</code>, same-day equity aggs, <code>/v1/indicators/*</code>.</dd>
       </dl>
-
-      <h3 id="ingest-smoke">Smoke</h3>
-      <p>
-        <code>python -m ingest.smoke</code> — six live checks: config, market
-        status, contracts, snapshot flatten, T-1 SPY minute aggs, S3 head-bucket.
-        Placeholder S3 keys <strong>SKIP</strong> (exit 0) rather than FAIL.
-        Run after bootstrap or credential change.
-      </p>
 
       <footer>
         docs/ingest.html — data_ingest_infra handbook.

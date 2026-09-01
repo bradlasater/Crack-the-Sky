@@ -307,6 +307,27 @@ def map_row(dataset: str, row: dict[str, str]) -> dict[str, Any]:
 _KEEP_RE = r"^O:(" + "|".join(OPTION_ROOTS) + r")\d{6}[CP]\d+$"
 
 
+def _cast_int_column(col: Any, type_: Any) -> Any:
+    """Cast a string column to an integer type the way ``_int_or_none`` does.
+
+    A plain pyarrow cast rejects decimal spellings: ``"1.0"`` raises rather
+    than yielding 1, which the row-at-a-time path accepts. The fix must not
+    reintroduce the bug this branch exists to remove, so a trailing all-zero
+    fraction is stripped *textually* -- no float ever touches the digits, and
+    a 19-digit nanosecond epoch still lands exactly. Only a genuinely
+    fractional value falls back to float truncation, matching
+    ``int(float(v))``; those are small magnitudes where float64 is lossless.
+    """
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    stripped = pc.replace_substring_regex(col, r"\.0*$", "")
+    try:
+        return stripped.cast(type_)
+    except pa.ArrowInvalid:
+        return pc.trunc(stripped.cast(pa.float64())).cast(type_)
+
+
 def _filter_table(path: Path, dataset: str) -> tuple[Any, int, int]:
     """Filter a csv.gz to the allowlisted roots with pyarrow.
 
@@ -360,7 +381,12 @@ def _filter_table(path: Path, dataset: str) -> tuple[Any, int, int]:
         col = kept.column(name)
         # "" -> null, matching the row-at-a-time behaviour for every type.
         col = pc.if_else(pc.equal(col, ""), pa.nulls(rows_kept, pa.string()), col)
-        arrays.append(col.cast(field.type) if field.type != pa.string() else col)
+        if field.type == pa.string():
+            arrays.append(col)
+        elif pa.types.is_integer(field.type):
+            arrays.append(_cast_int_column(col, field.type))
+        else:
+            arrays.append(col.cast(field.type))
     return pa.Table.from_arrays(arrays, schema=schema), rows_in, rows_kept
 
 
@@ -413,45 +439,60 @@ def _pull_dataset(s3: Any, settings: Settings, dataset: str, d: date,
     """Pull one dataset for one date; returns the manifest entry or None."""
     bucket = settings.massive_s3_bucket
     key = s3_key(dataset, d)
-    logger.log("flatfile_head", dataset=dataset, key=key)
-    # Only wait for publication when this is the file the vendor is about to
-    # publish (yesterday's). Older dates resolve a 404 immediately.
-    wait_for_publish = d >= previous_trading_day(market_gate.today_et())
-    if not _head_with_retry(s3, bucket, key, logger, wait_for_publish):
-        return None
-
     dest = (Path(settings.data_root) / "raw" / "flatfiles" / dataset
             / f"dt={d.isoformat()}" / f"{d.isoformat()}.csv.gz")
-    if args.dry_run:
-        logger.log("flatfile_dry_run", dataset=dataset, key=key)
-        return None
+
+    # Reuse is decided BEFORE touching S3. A re-filter of bytes already on
+    # disk must not depend on the vendor being reachable, the credentials
+    # being current, or the object still existing -- HEADing first would make
+    # a local, manifest-verified rewrite fail for reasons that have nothing
+    # to do with it.
     reused = None if getattr(args, "force_download", False) else reuse_local(
         dest, Path(settings.data_root), dataset, d
     )
-    if reused is not None:
-        size, md5 = reused
-        logger.log("flatfile_reused", dataset=dataset, path=str(dest),
-                   bytes=size, md5=md5)
-    else:
+
+    if reused is None:
+        logger.log("flatfile_head", dataset=dataset, key=key)
+        # Only wait for publication when this is the file the vendor is about
+        # to publish (yesterday's). Older dates resolve a 404 immediately.
+        wait_for_publish = d >= previous_trading_day(market_gate.today_et())
+        if not _head_with_retry(s3, bucket, key, logger, wait_for_publish):
+            return None
+        if args.dry_run:
+            logger.log("flatfile_dry_run", dataset=dataset, key=key)
+            return None
         size, md5 = _download(s3, bucket, key, dest)
         logger.log("flatfile_downloaded", dataset=dataset, path=str(dest),
                    bytes=size, md5=md5)
         _gzip_test(dest)
         logger.log("flatfile_gzip_ok", dataset=dataset)
+    else:
+        if args.dry_run:
+            logger.log("flatfile_dry_run", dataset=dataset, key=key, reuse=True)
+            return None
+        size, md5 = reused
+        logger.log("flatfile_reused", dataset=dataset, path=str(dest),
+                   bytes=size, md5=md5)
 
     table, rows_in, rows_kept = _filter_table(dest, dataset)
     if args.limit is not None:
         table = table.slice(0, args.limit)
 
     clean = CLEAN_DATASET[dataset]
-    if getattr(args, "replace", False):
-        moved = landing.quarantine_prior(clean, d, JOB, settings.data_root)
-        if moved:
-            logger.log("flatfile_prior_quarantined", dataset=dataset,
-                       files=len(moved), to=str(moved[0].parent))
+    # Snapshot what is already here, write, and only then move the old files
+    # aside. Quarantining first would empty the partition if the write below
+    # failed -- and during a long refilter the likely cause of that failure,
+    # a full disk, is exactly when losing the only copy hurts most.
+    prior = (landing.clean_files(clean, d, JOB, settings.data_root)
+             if getattr(args, "replace", False) else [])
     clean_path = landing.write_clean_table(
         clean, d, table, job=JOB, data_root=settings.data_root
     )
+    if prior:
+        moved = landing.quarantine_prior(clean, d, JOB, settings.data_root, only=prior)
+        if moved:
+            logger.log("flatfile_prior_quarantined", dataset=dataset,
+                       files=len(moved), to=str(moved[0].parent))
     logger.log("flatfile_clean_written", dataset=dataset, path=str(clean_path),
                rows_in=rows_in, rows_kept=rows_kept)
 

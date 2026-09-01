@@ -10,18 +10,23 @@ and so carry 11 trailing zero bits.
 from __future__ import annotations
 
 import gzip
+from datetime import date
 from pathlib import Path
+from typing import Any
 
 import pyarrow as pa
 import pytest
 
 from ingest import schemas
 from ingest.common import landing
+from ingest.common.config import Settings
+from ingest.common.logging_utils import JsonlLogger
 from ingest.jobs.flatfile_pull import (
     CLEAN_DATASET,
     _filter_file,
     _filter_table,
     _int_or_none,
+    _pull_dataset,
     reuse_local,
 )
 
@@ -269,3 +274,148 @@ def test_quarantine_leaves_other_jobs_alone(tmp_path: Path) -> None:
     left = [p.name for p in
             (tmp_path / "clean" / "option_minute_bars" / "dt=2026-08-28").glob("*.parquet")]
     assert len(left) == 1 and left[0].startswith("reconcile-")
+
+
+# ---------------------------------------------------------------------------
+# Review follow-ups (PR #15)
+# ---------------------------------------------------------------------------
+
+# A decimal-formatted integer alongside a real ns epoch: the row path accepts
+# "1.0" via int(float(v)), so the columnar path must too, and it must do it
+# without routing the 19-digit timestamp through a float.
+DECIMAL_TRADES_CSV = (
+    "ticker,conditions,correction,exchange,price,sip_timestamp,size\n"
+    "O:SPY260918C00770000,209,0,312,6.87,1787923996366000000,1.0\n"
+    "O:SPXW260918P07600000,232,0.0,302,41.5,1787924018759000001,2\n"
+)
+
+
+def test_decimal_formatted_integers_agree_across_paths(tmp_path: Path) -> None:
+    """`"1.0"` must not raise in the columnar path where the row path allows it."""
+    p = _write_csv(tmp_path, "decimal.csv.gz", DECIMAL_TRADES_CSV)
+    recs, _, _ = _filter_file(p, "trades_v1", None)
+    table, _, _ = _filter_table(p, "trades_v1")
+
+    schema = schemas.SCHEMAS[CLEAN_DATASET["trades_v1"]]
+    expected = pa.Table.from_pylist(
+        [{f.name: r.get(f.name) for f in schema} for r in recs], schema=schema
+    )
+    assert expected.equals(table)
+    assert table.column("size").to_pylist() == [1, 2]
+    assert table.column("correction").to_pylist() == [0, 0]
+
+
+def test_decimal_strip_does_not_round_the_timestamp(tmp_path: Path) -> None:
+    """The `.0` strip is textual; the 61-bit epoch must survive it exactly."""
+    p = _write_csv(tmp_path, "decimal.csv.gz", DECIMAL_TRADES_CSV)
+    table, _, _ = _filter_table(p, "trades_v1")
+    assert table.column("sip_timestamp_ns").to_pylist() == [
+        1787923996366000000, 1787924018759000001
+    ]
+
+
+class _ExplodingS3:
+    """Any call means the code reached S3 when it should not have."""
+
+    def head_object(self, **kw: object) -> None:
+        raise AssertionError("S3 was contacted during a local refilter")
+
+    def get_object(self, **kw: object) -> None:
+        raise AssertionError("S3 was contacted during a local refilter")
+
+
+def _reusable_day(tmp_path: Path, d: date) -> None:
+    """Land a raw csv.gz plus a manifest entry whose md5 matches it."""
+    import hashlib
+
+    dest = (tmp_path / "raw" / "flatfiles" / "trades_v1"
+            / f"dt={d.isoformat()}" / f"{d.isoformat()}.csv.gz")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(dest, "wt", newline="", encoding="utf-8") as fh:
+        fh.write(TRADES_CSV)
+    _manifest(tmp_path, "trades_v1", d.isoformat(),
+              hashlib.md5(dest.read_bytes()).hexdigest())
+
+
+def _args(**over: object) -> Any:
+    from types import SimpleNamespace
+
+    base: dict[str, Any] = {"dry_run": False, "limit": None,
+                            "replace": True, "force_download": False}
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+def _settings_for(tmp_path: Path) -> Settings:
+    return Settings(massive_api_key="k", data_root=tmp_path,
+                    log_root=tmp_path / "logs")
+
+
+def test_refilter_does_not_need_s3(tmp_path: Path) -> None:
+    """A manifest-verified local file must re-filter with S3 unreachable.
+
+    HEADing first made a purely local rewrite fail whenever credentials had
+    expired or the vendor had aged the object out -- reasons that have
+    nothing to do with bytes already on disk.
+    """
+    from datetime import date
+
+    d = date(2026, 8, 28)
+    _reusable_day(tmp_path, d)
+    entry = _pull_dataset(_ExplodingS3(), _settings_for(tmp_path), "trades_v1",
+                          d, JsonlLogger(path=None, echo=False), _args())
+    assert entry is not None and entry["rows_kept"] == 5
+    part = tmp_path / "clean" / CLEAN_DATASET["trades_v1"] / f"dt={d.isoformat()}"
+    assert len(list(part.glob("*.parquet"))) == 1
+
+
+def test_prior_output_survives_a_failed_write(tmp_path: Path, monkeypatch) -> None:
+    """Quarantining before the write would empty the partition when it fails.
+
+    A refilter that dies on a full disk must leave the existing parquet where
+    it is, not in _quarantine with nothing written to replace it.
+    """
+    from datetime import date
+
+    d = date(2026, 8, 28)
+    clean = CLEAN_DATASET["trades_v1"]
+    _reusable_day(tmp_path, d)
+
+    # Output from an earlier pass, which the failed write must not cost us.
+    rows = [{f.name: None for f in schemas.SCHEMAS[clean]}]
+    landing.write_clean(clean, d, rows, job="flatfile_pull", data_root=tmp_path)
+    part = tmp_path / "clean" / clean / f"dt={d.isoformat()}"
+    before = {p.name for p in part.glob("*.parquet")}
+    assert len(before) == 1
+
+    def _no_space(*a: object, **k: object) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(landing, "write_clean_table", _no_space)
+    with pytest.raises(OSError):
+        _pull_dataset(_ExplodingS3(), _settings_for(tmp_path), "trades_v1", d,
+                      JsonlLogger(path=None, echo=False), _args())
+
+    assert {p.name for p in part.glob("*.parquet")} == before
+    assert not (tmp_path / "_quarantine").exists()
+
+
+def test_quarantine_only_moves_the_named_files(tmp_path: Path) -> None:
+    """`only` must spare the file just written, and move exactly the rest."""
+    from datetime import date
+
+    rows = [{f.name: None for f in schemas.SCHEMAS["option_day_bars"]}]
+    old = landing.write_clean("option_day_bars", date(2026, 8, 28), rows,
+                              job="flatfile_pull", data_root=tmp_path)
+    prior = landing.clean_files("option_day_bars", date(2026, 8, 28),
+                                "flatfile_pull", tmp_path)
+    new = landing.write_clean("option_day_bars", date(2026, 8, 28), rows,
+                              job="flatfile_pull", data_root=tmp_path)
+
+    moved = landing.quarantine_prior("option_day_bars", date(2026, 8, 28),
+                                     "flatfile_pull", tmp_path, only=prior)
+    assert [m.name for m in moved] == [old.name]
+    left = [p.name for p in
+            (tmp_path / "clean" / "option_day_bars" / "dt=2026-08-28").glob("*.parquet")]
+    assert left == [new.name]
+    assert all(m.is_file() for m in moved)

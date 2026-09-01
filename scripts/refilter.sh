@@ -33,6 +33,7 @@ while [[ ! "$d" > "$END" ]]; do dates+=("$d"); d="$(date -I -d "$d + 1 day")"; d
 mapfile -t dates < <(printf '%s\n' "${dates[@]}" | sort -r)
 
 total=${#dates[@]}; i=0; done_n=0; skip_n=0
+failed=()
 echo "[refilter] $total dates, newest first, ${MIN_FREE_GB}GB floor, $(free_gb)GB free"
 for d in "${dates[@]}"; do
     i=$((i+1))
@@ -44,12 +45,24 @@ for d in "${dates[@]}"; do
     if ! ls "$DATA_ROOT"/raw/flatfiles/trades_v1/dt="$d"/*.csv.gz >/dev/null 2>&1; then
         skip_n=$((skip_n+1)); continue
     fi
-    if "$PY" -m ingest.jobs.flatfile_pull --date "$d" --replace --force >/dev/null 2>&1; then
+    rc=0
+    "$PY" -m ingest.jobs.flatfile_pull --date "$d" --replace --force >/dev/null 2>&1 || rc=$?
+    if [ "$rc" -eq 0 ]; then
         done_n=$((done_n+1))
         [ $((done_n % 25)) -eq 0 ] && \
             echo "[refilter] ($i/$total) $d  done=$done_n skipped=$skip_n  [${avail}GB free]"
     else
-        echo "[refilter] $d FAILED (exit $?) — continuing" >&2
+        failed+=("$d")
+        echo "[refilter] $d FAILED (exit $rc) — continuing" >&2
     fi
 done
+
+# A partial history rewrite must not look like a successful one. Later dates
+# still run after a failure, but the exit status carries the failures out to
+# whatever invoked this -- an operator who missed stderr, or cron.
+if [ ${#failed[@]} -gt 0 ]; then
+    echo "[refilter] INCOMPLETE: $done_n refiltered, $skip_n skipped, ${#failed[@]} FAILED" >&2
+    printf '[refilter]   failed: %s\n' "${failed[@]}" >&2
+    exit 1
+fi
 echo "[refilter] complete: $done_n refiltered, $skip_n skipped (no raw file)"

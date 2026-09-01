@@ -163,11 +163,26 @@ def write_clean_table(
     return path
 
 
+def clean_files(
+    dataset: str,
+    dt: date | str,
+    job: str,
+    data_root: str | os.PathLike[str] | None = None,
+) -> list[Path]:
+    """This job's existing clean output for one partition."""
+    day = dt.isoformat() if isinstance(dt, date) else str(dt)
+    part = _data_root(data_root) / "clean" / dataset / f"dt={day}"
+    if not part.is_dir():
+        return []
+    return sorted(part.glob(f"{job}-*.parquet"))
+
+
 def quarantine_prior(
     dataset: str,
     dt: date | str,
     job: str,
     data_root: str | os.PathLike[str] | None = None,
+    only: list[Path] | None = None,
 ) -> list[Path]:
     """Move this job's earlier output for a partition aside; returns the paths.
 
@@ -176,15 +191,22 @@ def quarantine_prior(
     rather than deleting keeps the old output recoverable under
     ``_quarantine/`` -- the raw payload is still on disk either way, but a
     rename is free and a delete is not reversible.
+
+    ``only`` restricts the move to an explicit list of paths. That is how a
+    caller quarantines what existed *before* a write it has already confirmed
+    succeeded, without sweeping away the file it just wrote. Quarantining
+    first and writing second would leave the partition with no data at all if
+    the write failed -- during a long refilter, disk exhaustion does exactly
+    that, and the loop would move on to the next date none the wiser.
     """
     day = dt.isoformat() if isinstance(dt, date) else str(dt)
     root = _data_root(data_root)
-    part = root / "clean" / dataset / f"dt={day}"
-    if not part.is_dir():
-        return []
+    sources = only if only is not None else clean_files(dataset, day, job, data_root)
     dest = root / "_quarantine" / "refilter" / dataset / f"dt={day}"
     moved: list[Path] = []
-    for path in sorted(part.glob(f"{job}-*.parquet")):
+    for path in sources:
+        if not path.is_file():
+            continue
         dest.mkdir(parents=True, exist_ok=True)
         target = dest / path.name
         path.replace(target)

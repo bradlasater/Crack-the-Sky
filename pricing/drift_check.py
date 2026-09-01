@@ -392,8 +392,9 @@ def _hc_target(file_vals: Mapping[str, str] | None = None) -> tuple[str | None, 
     )
     if key:
         return f"{base}/{key}/{healthcheck_slug(JOB)}", True
-    url = _get("HEALTHCHECKS_PING_URL", None, file_vals)
-    return (url or None), False
+    # No shared-URL fallback: HEALTHCHECKS_PING_URL is rejected repo-wide
+    # (see Settings.load), so monitoring is simply off without a ping key.
+    return None, False
 
 
 def _webhook_body(url: str, payload: dict[str, Any]) -> dict[str, Any]:

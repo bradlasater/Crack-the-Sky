@@ -7,6 +7,10 @@ forward. They never read vendor greeks or vendor implied volatility.
 :func:`greeks_asof` is the warehouse consumer: as-of snapshot → own IV → own
 Greeks. Vendor ``greeks_*`` / ``implied_volatility`` are copied onto the
 result as diagnostics and signed diffs (own − vendor). They are not inputs.
+Vendor theta is per calendar day and vega per 1% vol, so ``diff_theta`` and
+``diff_vega`` are computed against the unit-aligned values (×365, ×100 —
+the same conversions ``pricing.drift_check`` compares with); the raw vendor
+columns are also carried unchanged.
 
 Two things here are load-bearing on this data feed:
 
@@ -63,7 +67,12 @@ from marketdata.types import (
 )
 from marketdata.validate import narrow_roots, validate_table
 from pricing.bsm import CallPut, resolve_q
-from pricing.conventions import DEFAULT_CONVENTIONS, GreeksCatalog, GreeksConventions
+from pricing.conventions import (
+    CALENDAR_DAYS_PER_YEAR,
+    DEFAULT_CONVENTIONS,
+    GreeksCatalog,
+    GreeksConventions,
+)
 from pricing.engine import AmericanCRR, Engine, EuropeanBSM
 from pricing.iv import implied_vol as invert_iv
 
@@ -82,6 +91,11 @@ _ENGINES: dict[str, Engine] = {
 # CRR bump-and-revalue at 401 steps is the single-quote default; a full SPY
 # chain at that depth is not a reasonable CLI. 51 steps stays American.
 CHAIN_CRR_STEPS = 51
+
+# Vendor snapshot units differ from ours: theta is per calendar day, vega per
+# 1% vol. Same conversions as pricing.drift_check (kept here to avoid a cycle).
+_VENDOR_THETA_TO_YEAR = float(CALENDAR_DAYS_PER_YEAR)
+_VENDOR_VEGA_TO_PER_1 = 100.0
 
 Uninvertible = Literal["raise", "skip"]
 
@@ -517,6 +531,18 @@ def greeks_asof(
             continue
 
         vendor = _vendor_diagnostics(qte)
+        # diff_theta/diff_vega are against the unit-aligned vendor values;
+        # the raw vendor columns are carried unchanged above.
+        vendor_theta_year = (
+            None
+            if vendor["vendor_theta"] is None
+            else vendor["vendor_theta"] * _VENDOR_THETA_TO_YEAR
+        )
+        vendor_vega_per_1 = (
+            None
+            if vendor["vendor_vega"] is None
+            else vendor["vendor_vega"] * _VENDOR_VEGA_TO_PER_1
+        )
         rows.append(
             {
                 "ticker": qte.contract.ticker,
@@ -549,8 +575,8 @@ def greeks_asof(
                 "diff_iv": _signed_diff(float(own_iv), vendor["vendor_iv"]),
                 "diff_delta": _signed_diff(own_delta, vendor["vendor_delta"]),
                 "diff_gamma": _signed_diff(own_gamma, vendor["vendor_gamma"]),
-                "diff_theta": _signed_diff(own_theta, vendor["vendor_theta"]),
-                "diff_vega": _signed_diff(own_vega, vendor["vendor_vega"]),
+                "diff_theta": _signed_diff(own_theta, vendor_theta_year),
+                "diff_vega": _signed_diff(own_vega, vendor_vega_per_1),
             }
         )
         if eng.name == "american_crr":

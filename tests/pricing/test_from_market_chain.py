@@ -295,8 +295,8 @@ def test_vendor_diffs_populate_when_vendor_cols_exist(tmp_path: Path) -> None:
     assert row["diff_iv"] == pytest.approx(row["own_iv"] - 0.22)
     assert row["diff_delta"] == pytest.approx(row["own_delta"] - 0.60)
     assert row["diff_gamma"] == pytest.approx(row["own_gamma"] - 0.001)
-    assert row["diff_theta"] == pytest.approx(row["own_theta"] - (-1.5))
-    assert row["diff_vega"] == pytest.approx(row["own_vega"] - 2.0)
+    assert row["diff_theta"] == pytest.approx(row["own_theta"] - (-1.5) * 365.0)
+    assert row["diff_vega"] == pytest.approx(row["own_vega"] - 2.0 * 100.0)
 
 
 def test_vendor_diffs_null_when_vendor_cols_null(tmp_path: Path) -> None:

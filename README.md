@@ -1,10 +1,10 @@
-# data_ingest_infra
+# Crack the Sky
 
 Massive.com (ex-Polygon.io) "Options Developer" ingestion for SPY/SPX vol data.
 Sweeps the full option chain every minute, captures delayed option minute bars
 over websocket, polls trades on a liquid watchlist, and reconciles daily against
 S3 flat files (the flat file always wins). Target host: Ubuntu 24.04 headless,
-repo at `~/data_ingest_infra`. Python 3.11+; deps: `requests`, `websockets`,
+repo at `~/crack-the-sky`. Python 3.11+; deps: `requests`, `websockets`,
 `boto3`, `pyarrow`, `numpy`, `scipy` (no pandas).
 
 Two sibling packages sit at repo root alongside `ingest/`: `marketdata/` (typed,
@@ -31,8 +31,8 @@ scheduled at all.
 ## Quickstart (5 steps, headless box)
 
 1. **Transfer the repo** to the box, e.g.
-   `rsync -av --exclude venv --exclude .git data_ingest_infra/ box:~/data_ingest_infra/`
-2. **Bootstrap:** `cd ~/data_ingest_infra && bash scripts/bootstrap.sh`
+   `rsync -av --exclude venv --exclude .git Crack-the-Sky/ box:~/crack-the-sky/`
+2. **Bootstrap:** `cd ~/crack-the-sky && bash scripts/bootstrap.sh`
    (creates `venv/`, installs deps, seeds `.env` from `.env.example`)
 3. **Edit `.env`:** set `MASSIVE_API_KEY` and the flat-file S3 creds
    (`MASSIVE_S3_ACCESS_KEY_ID` / `MASSIVE_S3_SECRET_ACCESS_KEY` from the

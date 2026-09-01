@@ -1,4 +1,4 @@
-# massive data_ingest_infra crontab — install with:  crontab deploy/crontab
+# massive crack-the-sky crontab — install with:  crontab deploy/crontab
 #
 # IMPORTANT: cron does NOT expand '~' or '$HOME' inside command strings, and
 # does NOT expand variables in values. Before installing, replace the literal
@@ -23,9 +23,9 @@
 TZ=America/New_York
 MAILTO=""
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-REPO=/home/brad-lasater/data_ingest_infra
+REPO=/home/brad-lasater/crack-the-sky
 DATA_ROOT=/data/massive
-PY=/home/brad-lasater/data_ingest_infra/venv/bin/python
+PY=/home/brad-lasater/crack-the-sky/venv/bin/python
 LOG=/data/massive/logs/cron.log
 
 # m h dom mon dow  command

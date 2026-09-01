@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>data_ingest_infra — headless box operations</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0e1114;
+      --bg-2: #161b20;
+      --bg-3: #1c2328;
+      --ink: #e8e4d9;
+      --body: #d4cfc3;
+      --muted: #9a9386;
+      --line: #2a3238;
+      --copper: #d08c44;
+      --ok: #8aaa78;
+      --warn: #c9a35a;
+      --bad: #c97a7a;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { background: var(--bg); }
+    body {
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      font-size: 16px;
+      line-height: 1.6;
+      background: var(--bg);
+      color: var(--body);
+      max-width: 780px;
+      margin: 0 auto;
+      padding: 48px 28px 96px;
+    }
+    h1 {
+      color: var(--ink);
+      font-size: 1.7rem;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+    h2 {
+      color: var(--copper);
+      font-size: 1.05rem;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      margin: 40px 0 12px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--line);
+    }
+    p { margin-bottom: 12px; }
+    ul { margin: 0 0 12px 22px; }
+    li { margin-bottom: 6px; }
+    code {
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 0.88em;
+      color: var(--ink);
+      background: var(--bg-2);
+      padding: 1px 5px;
+      border-radius: 3px;
+    }
+    pre {
+      background: var(--bg-2);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 14px 16px;
+      overflow-x: auto;
+      margin: 12px 0 16px;
+    }
+    pre code { background: none; padding: 0; font-size: 0.85rem; line-height: 1.5; }
+    table { width: 100%; border-collapse: collapse; margin: 12px 0 16px; font-size: 0.92rem; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-weight: 500; }
+    td code { white-space: nowrap; }
+    .sub { color: var(--muted); font-size: 0.95rem; margin-bottom: 8px; }
+    .tag {
+      display: inline-block;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.72rem;
+      padding: 1px 7px;
+      border-radius: 3px;
+      margin-right: 6px;
+      vertical-align: 1px;
+    }
+    .tag.ok { background: rgba(138,170,120,0.15); color: var(--ok); }
+    .tag.warn { background: rgba(201,163,90,0.15); color: var(--warn); }
+    .tag.gone { background: rgba(201,122,122,0.12); color: var(--bad); }
+  </style>
+</head>
+<body>
+
+<h1>Headless box — operations outside the repo</h1>
+<p class="sub">Companion to <code>docs/architecture.html</code>. The repo declares what the system
+should be; this page records the machine state it cannot declare — secrets, the installed
+schedule, services, and the external accounts — and how each piece was put in place.
+Host: <code>brad-headless-server</code>, user <code>brad-lasater</code>, no passwordless sudo
+(by design; everything below runs as the user).</p>
+
+<h2>Layout the repo assumes</h2>
+<table>
+  <tr><th>Path</th><th>What it is</th></tr>
+  <tr><td><code>~/data_ingest_infra</code></td><td>Repo checkout. <strong>Tracks <code>main</code></strong> — cron and the runner execute whatever is checked out, so the box is pulled after merges, never left on a feature branch.</td></tr>
+  <tr><td><code>~/data_ingest_infra/venv</code></td><td>Python environment, built once by <code>scripts/bootstrap.sh</code>.</td></tr>
+  <tr><td><code>~/data_ingest_infra/.env</code></td><td>All credentials (below). Never committed; seeded from <code>.env.example</code>.</td></tr>
+  <tr><td><code>/data/massive</code></td><td><code>DATA_ROOT</code>: <code>raw/</code>, <code>clean/</code>, <code>logs/</code>, <code>_meta/</code>.</td></tr>
+  <tr><td><code>~/actions-runner</code></td><td>GitHub Actions self-hosted runner install.</td></tr>
+</table>
+
+<h2>Secrets (<code>.env</code>)</h2>
+<table>
+  <tr><th>Variable</th><th>Source</th></tr>
+  <tr><td><code>MASSIVE_API_KEY</code></td><td>Massive.com dashboard.</td></tr>
+  <tr><td><code>MASSIVE_S3_ACCESS_KEY_ID</code> / <code>MASSIVE_S3_SECRET_ACCESS_KEY</code></td><td>Massive dashboard → S3 Access Keys. Read-only market-data scope.</td></tr>
+  <tr><td><code>WS_DELAYED_URL</code></td><td>Delayed-options websocket host.</td></tr>
+  <tr><td><code>HEALTHCHECKS_PING_KEY</code></td><td>Healthchecks project → Settings → Ping Key. Jobs ping with it; checks auto-create on first ping.</td></tr>
+  <tr><td><code>IBKR_FLEX_TOKEN</code></td><td>IBKR Account Management → Performance &amp; Reports → Flex Queries → Flex Web Service. Expires ~1 year from generation — calendar the renewal.</td></tr>
+  <tr><td><code>IBKR_FLEX_QUERY_ID</code> <span class="tag ok">set 2026-09-01</span></td><td>Numeric id of the Activity Flex Query <em>“Trades Last Business Day”</em> (period: Last Business Day, format: XML, Trades section fields). Read-only reporting; no gateway, no trading permission.</td></tr>
+  <tr><td><code>IBKR_ACCOUNT_ID</code></td><td>IBKR account id the Flex query reports on.</td></tr>
+</table>
+<p>The Healthchecks <em>management</em> API key (<code>hcw_…</code>) is deliberately <strong>not</strong>
+stored anywhere on the box or in the repo; it is needed only when re-running
+<code>scripts/setup_healthchecks.py --api-key …</code>.</p>
+
+<h2>Installed schedule</h2>
+<p><span class="tag ok">active</span> The box crontab is installed directly from the repo
+(<code>crontab deploy/crontab</code> — the placeholder path already matches the box user, no
+<code>sed</code> rewrite needed) and is byte-identical to <code>deploy/crontab</code> on
+<code>main</code>. The <code>box.yml</code> “Crontab drift” step fails the build if these
+diverge; that alarm fired on 2026-09-01 when PRs #10/#11 added <code>rates_sync</code> and
+<code>ibkr_executions</code> before the crontab was re-installed. Fix is always the same:
+pull <code>main</code>, re-install the crontab.</p>
+
+<h2>GitHub Actions self-hosted runner</h2>
+<p><span class="tag ok">active</span> Installed 2026-09-01 to replace Buildkite. Registered to the
+repo as <code>ingest-box</code> (labels <code>self-hosted, linux, x64</code> — what
+<code>.github/workflows/box.yml</code> targets). Runs as a user-level systemd unit, no sudo:</p>
+<pre><code>~/.config/systemd/user/actions-runner.service
+  ExecStart = ~/actions-runner/run.sh        # foreground mode; runsvc.sh needs sudo
+  EnvironmentFile = ~/data_ingest_infra/.env # so jobs see the credentials
+  Restart = always
+loginctl enable-linger brad-lasater          # survives logout/reboot</code></pre>
+<p>Verify from anywhere: <code>gh api repos/{owner}/{repo}/actions/runners</code> should show
+<code>ingest-box</code> online. Accepted risk (documented in the workflow header): pushed code runs
+next to the market-data credentials and <code>/data/massive</code> — fine for a private,
+single-owner repo with 2FA; the keys are read-only and no brokerage access is reachable.</p>
+
+<h2>Healthchecks.io</h2>
+<p><span class="tag ok">active</span> Fifteen checks, one per cron job, named
+<code>massive-&lt;job&gt;</code>. Jobs ping via the ping key in <code>.env</code>; schedules and grace
+periods were aligned to the crontab with <code>scripts/setup_healthchecks.py</code> on
+2026-09-01 (without that step, auto-created checks get a default daily schedule and
+false-alarm over weekends on the weekday-only jobs). A notification channel
+(email/Slack) must exist in the Healthchecks UI or alerts go nowhere.</p>
+
+<h2>IBKR Flex Web Service</h2>
+<p><span class="tag ok">active</span> Verified live 2026-09-01: token + query id authenticate, the
+statement generates, the period guard refuses a mislabeled date, and a no-fills day exits
+cleanly. The query’s saved period (“Last Business Day”) decides the statement’s contents —
+the 18:30 ET cron passes no <code>--date</code> and the job checks the statement period
+matches. If the token is regenerated (~yearly), only <code>.env</code> changes.</p>
+
+<h2>Removed: Buildkite</h2>
+<p><span class="tag gone">gone</span> Repo webhook deleted 2026-09-01; no
+<code>buildkite-agent</code> unit or process exists on the box. The only remaining artifact is
+the subscription itself — cancelled (or cancelled separately) in the Buildkite UI, which is
+where billing stops. Replacement: the self-hosted runner above plus a GitHub ruleset on
+<code>main</code> (PR required; <code>test (3.11)</code> / <code>test (3.12)</code> checks required).</p>
+
+<h2>Bring-up calendar</h2>
+<ul>
+  <li><strong>2026-08-31</strong> — first capture day; partial (sweeps began 17:25 ET), so coverage_audit and the box workflow correctly read red for it.</li>
+  <li><strong>2026-09-01</strong> — first full session at minute cadence (SPY + I:SPX + VIX); runner installed; crontab aligned; IBKR Flex wired; Healthchecks schedules set; first real <code>drift_check</code> canary at 17:00 ET.</li>
+</ul>
+
+<h2>Verify-it-works cheat sheet</h2>
+<pre><code># runner online?
+gh api repos/{owner}/{repo}/actions/runners --jq '.runners[] | {name,status}'
+
+# schedule matches the repo?
+crontab -l | diff - deploy/crontab
+
+# entitlements + payload shapes, live?
+venv/bin/python -m ingest.entitlements
+
+# box services
+systemctl --user status actions-runner</code></pre>
+
+</body>
+</html>

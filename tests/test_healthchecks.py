@@ -206,6 +206,89 @@ def test_eod_dayaggs_is_deliberately_unmonitored() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Setup script credential resolution (management API key)
+# ---------------------------------------------------------------------------
+
+def test_environment_wins_over_env_file(tmp_path, monkeypatch) -> None:
+    mod = _setup_module()
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"{mod.API_KEY_ENV}=from-file\n")
+    monkeypatch.setenv(mod.API_KEY_ENV, "from-environment")
+    assert mod.api_key_from_env(env_file) == "from-environment"
+
+
+def test_blank_environment_value_falls_back_to_env_file(tmp_path, monkeypatch) -> None:
+    mod = _setup_module()
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"{mod.API_KEY_ENV}=from-file\n")
+    monkeypatch.setenv(mod.API_KEY_ENV, "   ")
+    assert mod.api_key_from_env(env_file) == "from-file"
+
+
+def test_default_env_file_is_at_the_repo_root(tmp_path, monkeypatch) -> None:
+    """With no explicit path, the key is read from <repo root>/.env."""
+    mod = _setup_module()
+    fake_script = tmp_path / "scripts" / "setup_healthchecks.py"
+    fake_script.parent.mkdir()
+    fake_script.touch()
+    (tmp_path / ".env").write_text(f"{mod.API_KEY_ENV}=root-key\n")
+    monkeypatch.setattr(mod, "__file__", str(fake_script))
+    monkeypatch.delenv(mod.API_KEY_ENV, raising=False)
+    assert mod.api_key_from_env() == "root-key"
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ('HEALTHCHECKS_API_KEY="quoted"', "quoted"),
+        ("HEALTHCHECKS_API_KEY='single'", "single"),
+        ("HEALTHCHECKS_API_KEY=  padded  ", "padded"),
+        ("HEALTHCHECKS_API_KEY=", None),
+        ('HEALTHCHECKS_API_KEY=""', None),
+    ],
+)
+def test_env_file_values_are_unquoted_and_stripped(
+    line: str, expected: str | None, tmp_path, monkeypatch
+) -> None:
+    mod = _setup_module()
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"# a comment\n\nOTHER=1\n{line}\n")
+    monkeypatch.delenv(mod.API_KEY_ENV, raising=False)
+    assert mod.api_key_from_env(env_file) == expected
+
+
+def test_missing_env_file_yields_no_key(tmp_path, monkeypatch) -> None:
+    mod = _setup_module()
+    monkeypatch.delenv(mod.API_KEY_ENV, raising=False)
+    assert mod.api_key_from_env(tmp_path / "does-not-exist.env") is None
+
+
+def test_cli_api_key_overrides_environment(monkeypatch) -> None:
+    mod = _setup_module()
+    monkeypatch.setenv(mod.API_KEY_ENV, "env-key")
+    seen: list[str] = []
+
+    def fake_request(method, path, api_key, payload=None, api_base=mod.DEFAULT_API_BASE):
+        seen.append(api_key)
+        return {"checks": []}
+
+    monkeypatch.setattr(mod, "_request", fake_request)
+    assert mod.main(["--api-key", "cli-key", "--dry-run"]) == 0
+    assert seen and all(k == "cli-key" for k in seen)
+
+
+def test_missing_key_exits_with_usage_error(monkeypatch, capsys) -> None:
+    """No key anywhere must fail loudly, not fall through to the API."""
+    mod = _setup_module()
+    monkeypatch.delenv(mod.API_KEY_ENV, raising=False)
+    monkeypatch.setattr(mod, "api_key_from_env", lambda env_path=None: None)
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main(["--dry-run"])
+    assert excinfo.value.code == 2
+    assert "no management API key" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
 # Terminal pings: a run that starts must always finish the check
 # ---------------------------------------------------------------------------
 

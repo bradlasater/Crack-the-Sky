@@ -68,6 +68,7 @@
           <tr><td class="job">DATA_ROOT</td><td>Warehouse root. Default <code>/data/massive</code>.</td></tr>
           <tr><td class="job">LOG_ROOT</td><td>Logs. Default <code>DATA_ROOT/logs</code> (not the warehouse root). <code>Settings.load</code> in <code>ingest/common/config.py</code>.</td></tr>
           <tr><td class="job">HEALTHCHECKS_PING_KEY</td><td>Per-job checks. Without it, a dead job is silent.</td></tr>
+          <tr><td class="job">HEALTHCHECKS_API_KEY</td><td>Management key used only by <code>scripts/setup_healthchecks.py</code> to create/update the checks. Not read at run time, and not the ping key.</td></tr>
           <tr><td class="job">HEALTHCHECKS_BASE</td><td>Ping root (hosted <code>https://hc-ping.com</code>; self-host <code>https://&lt;host&gt;/ping</code>).</td></tr>
           <tr><td class="job">DRIFT_CHECK_R</td><td>Scalar r for the 17:00 canary (default 0.04).</td></tr>
           <tr><td class="job">DRIFT_ALERT_WEBHOOK</td><td>Optional FAIL POST. Healthchecks + exit 1 remain the alert.</td></tr>

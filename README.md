@@ -208,11 +208,11 @@ scripts tests). Ruff lints `ingest` and `tests`; the syntax check
 - **Self-hosted runner on the ingest box** (`.github/workflows/box.yml`) —
   the box has the credentials and the real data tree. It runs the live smoke
   test, the entitlement probe, a crontab-drift check (`crontab -l` vs
-  `deploy/crontab`), and `coverage_audit` — on pushes to `main` and on a
+  `deploy/crontab`), and `coverage_audit` — on every push and PR, and on a
   **daily schedule**, which is what turns the coverage audit into an alarm.
-  It deliberately does not run on PRs or branches: the runner's environment
-  holds live credentials, so only reviewed-and-merged code may execute there.
-  Self-hosted runners are free, including on private repos. One-time setup:
+  (The runner holds only read-only market-data credentials; see the accepted-
+  risk note in the workflow header.) Self-hosted runners are free, including
+  on private repos. One-time setup:
   repo → Settings → Actions → Runners → New self-hosted runner, install as a
   service, and add `EnvironmentFile=<repo>/.env` to the service so the checks
   see `MASSIVE_API_KEY` and the S3 creds.

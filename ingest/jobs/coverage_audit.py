@@ -36,10 +36,14 @@ from ingest.common import landing, market_gate
 from ingest.common.cli import run_job
 from ingest.common.config import Settings
 from ingest.common.logging_utils import JsonlLogger
-from ingest.jobs import OPTION_ROOTS, _clean_root, ticker_root, underlying_root
+from ingest.jobs import OPTION_ROOTS, ticker_root, underlying_root
 
 JOB = "coverage_audit"
 COVERAGE_NAME = "coverage.json"
+
+
+def _clean_root(settings: Settings, dataset: str) -> Path:
+    return Path(settings.data_root) / "clean" / dataset
 
 # Sweep cadence the crontab installs (one per minute during the session).
 SWEEP_INTERVAL_S = 60
@@ -285,7 +289,7 @@ def run_checks(settings: Settings, d: date, logger: JsonlLogger) -> list[Check]:
 
 
 def _render(d: date, checks: list[Check]) -> str:
-    """PASS/FAIL table, in the style of ``ingest.smoke``."""
+    """PASS/FAIL table, in the style of ``ingest.entitlements``."""
     width = max(len(c.name) for c in checks) if checks else 10
     lines = [f"coverage_audit -- {d.isoformat()}", "-" * (width + 60)]
     for c in checks:

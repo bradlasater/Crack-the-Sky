@@ -10,13 +10,12 @@ name: box
 # alarm. Times are UTC; 22:17 UTC lands mid-afternoon ET, after the day's
 # capture (incl. the 16:35 EOD sweep) has settled. coverage_audit checks T-1.
 #
-# Runner setup (once, on the box):
-#   Repo -> Settings -> Actions -> Runners -> New self-hosted runner (Linux),
-#   then install it as a service (sudo ./svc.sh install && sudo ./svc.sh start).
-#   The service needs the credentials -- point it at the repo .env:
-#     sudo systemctl edit actions.runner.<org>-<repo>.<name>.service
-#     [Service]
-#     EnvironmentFile=/home/brad-lasater/data_ingest_infra/.env
+# Runner setup (once, on the box): ~/actions-runner holds the runner,
+# configured against this repo and started by the user-level systemd unit
+# ~/.config/systemd/user/actions-runner.service (ExecStart=run.sh; no sudo
+# needed, linger enabled). The unit sets
+#   EnvironmentFile=%h/data_ingest_infra/.env
+# so the job sees the credentials.
 
 on:
   # Runs on every push and PR. Accepted risk (documented, solo repo): the
@@ -62,14 +61,10 @@ jobs:
           venv/bin/python -m compileall -q ingest
           venv/bin/python -m pytest tests/
 
-      - name: Live entitlement smoke
-        # 6 live checks against the REST API and the flat-file bucket. Fails
-        # if a plan change or vendor migration silently revokes something.
-        run: venv/bin/python -m ingest.smoke
-
-      - name: Entitlement probe
-        # Asserts the documented entitlement map still holds, so a downgrade
-        # shows up as a red build rather than months of quiet 403s.
+      - name: Live entitlement probes
+        # Asserts the documented entitlement map still holds and that entitled
+        # endpoints return parseable payloads, so a downgrade or vendor
+        # migration shows up as a red build rather than months of quiet 403s.
         run: venv/bin/python -m ingest.entitlements
 
       - name: Crontab drift

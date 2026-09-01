@@ -22,7 +22,6 @@ from ingest.jobs import (
     forward_from_parity,
     keep_ticker,
     latest_contracts,
-    read_partition,
     reference_price,
     ticker_root,
     underlying_root,
@@ -279,11 +278,61 @@ def test_latest_contracts_includes_unrecognised_filenames(tmp_path: Path) -> Non
     assert len(latest_contracts(settings, RUN_DATE)) == 1
 
 
-def test_read_partition_missing_pyarrow_is_explicit(tmp_path: Path, monkeypatch) -> None:
-    """reconcile (and other readers) must not surface a bare ModuleNotFoundError."""
-    monkeypatch.setattr(schemas, "pa", None)
-    with pytest.raises(ImportError, match="pyarrow is required to read clean partitions"):
-        read_partition(_settings(tmp_path), "option_minute_bars", RUN_DATE)
+# ---------------------------------------------------------------------------
+# The as-of datasets must stay readable through latest_clean_records
+# ---------------------------------------------------------------------------
+
+def test_latest_clean_records_reads_asof_datasets(tmp_path: Path) -> None:
+    """contracts_sync._previous_tickers depends on this.
+
+    read_partition is fail-loud for multi-write datasets, but this accessor is
+    the "current state" reader: on a fresh run the SPY pass writes the first
+    file, so the SPX pass would otherwise hit its own partition and raise.
+    """
+    from ingest.jobs import latest_clean_records
+
+    settings = _settings(tmp_path)
+    exp = RUN_DATE + timedelta(days=14)
+    landing.write_clean("contracts", RUN_DATE,
+                        [_contract("SPY", "SPY", exp, "call", 770.0)],
+                        job="contracts_sync-SPY", data_root=tmp_path)
+    # Second underlying lands into the same partition, as the real job does.
+    landing.write_clean("contracts", RUN_DATE,
+                        [_contract("SPXW", "SPX", exp, "put", 7600.0)],
+                        job="contracts_sync-I:SPX", data_root=tmp_path)
+
+    rows = latest_clean_records(settings, "contracts", RUN_DATE)
+    assert {r["underlying_ticker"] for r in rows} == {"SPY", "SPX"}
+
+
+def test_latest_clean_records_deduplicates_repeat_asof_writes(tmp_path: Path) -> None:
+    """contracts_sync runs three times a day; the universe must not multiply."""
+    import time as _time
+
+    from ingest.jobs import latest_clean_records
+
+    settings = _settings(tmp_path)
+    exp = RUN_DATE + timedelta(days=14)
+    for _ in range(3):
+        landing.write_clean("contracts", RUN_DATE,
+                            [_contract("SPY", "SPY", exp, "call", 770.0)],
+                            job="contracts_sync-SPY", data_root=tmp_path)
+        _time.sleep(0.002)
+    assert len(latest_clean_records(settings, "contracts", RUN_DATE)) == 1
+
+
+def test_latest_clean_records_still_whole_partition_for_normal_datasets(
+    tmp_path: Path,
+) -> None:
+    from ingest.jobs import latest_clean_records
+
+    settings = _settings(tmp_path)
+    rows = [{"ticker": "SPY", "start_ms": i, "open": 1.0, "high": 1.0,
+             "low": 1.0, "close": 1.0, "volume": 1.0, "vwap": 1.0,
+             "transactions": 1} for i in range(3)]
+    landing.write_clean("underlying_minute_bars", RUN_DATE, rows,
+                        job="underlying_bars", data_root=tmp_path)
+    assert len(latest_clean_records(settings, "underlying_minute_bars", RUN_DATE)) == 3
 
 
 # ---------------------------------------------------------------------------

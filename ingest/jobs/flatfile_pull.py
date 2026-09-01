@@ -33,14 +33,13 @@ from datetime import time as dtime
 from pathlib import Path
 from typing import Any
 
-import boto3
-from botocore.config import Config
 from botocore.exceptions import ClientError, EndpointConnectionError, NoCredentialsError
 
 from ingest.common import landing, market_gate
 from ingest.common.cli import run_job
 from ingest.common.config import Settings
 from ingest.common.logging_utils import JsonlLogger
+from ingest.common.s3 import s3_client
 from ingest.jobs import OPTION_ROOTS, keep_ticker  # noqa: F401  (shared root filter)
 
 JOB = "flatfile_pull"
@@ -76,17 +75,10 @@ def s3_key(dataset: str, d: date) -> str:
 
 
 def _s3_client(settings: Settings) -> Any:
-    """Build a boto3 S3 client pointed at the Massive flat-files endpoint."""
+    """Shared S3 client, after the creds precheck that exits 3 when unset."""
     if not settings.massive_s3_access_key_id or not settings.massive_s3_secret_access_key:
         _creds_fail("MASSIVE_S3_ACCESS_KEY_ID / MASSIVE_S3_SECRET_ACCESS_KEY are unset")
-    return boto3.client(
-        "s3",
-        endpoint_url=settings.massive_s3_endpoint,
-        aws_access_key_id=settings.massive_s3_access_key_id,
-        aws_secret_access_key=settings.massive_s3_secret_access_key,
-        config=Config(signature_version="s3v4"),
-        region_name="us-east-1",
-    )
+    return s3_client(settings)
 
 
 def _creds_fail(detail: str) -> None:

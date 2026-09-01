@@ -24,9 +24,12 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
+import pyarrow.parquet as pq
+
 from ingest.common import market_gate
 from ingest.common.config import Settings
 from ingest.common.logging_utils import JsonlLogger
+from marketdata import catalog
 
 # Watchlist parameters: expiration 7-45 days out, strike within +/-15% of
 # that underlying's own reference price, and some sign of life (traded today
@@ -83,26 +86,12 @@ def parse_underlyings(raw: str | None, default: list[str]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Clean-partition readers
+# Clean-partition readers (thin adapters over marketdata.catalog)
 # ---------------------------------------------------------------------------
-
-def _clean_root(settings: Settings, dataset: str) -> Path:
-    return Path(settings.data_root) / "clean" / dataset
-
 
 def partition_dates(settings: Settings, dataset: str) -> list[date]:
     """All ``dt=YYYY-MM-DD`` partition dates present for a clean dataset."""
-    root = _clean_root(settings, dataset)
-    out: list[date] = []
-    if not root.is_dir():
-        return out
-    for child in root.iterdir():
-        if child.is_dir() and child.name.startswith("dt="):
-            try:
-                out.append(date.fromisoformat(child.name[3:]))
-            except ValueError:
-                continue
-    return sorted(out)
+    return catalog.list_partitions(dataset, settings.data_root)
 
 
 def latest_partition(
@@ -116,31 +105,36 @@ def latest_partition(
 def read_partition(settings: Settings, dataset: str, dt: date) -> list[dict[str, Any]]:
     """Read every parquet file of one clean partition into a list of dicts.
 
-    Requires pyarrow; raises ImportError with a clear message otherwise.
+    Schema-validated by ``catalog.read_partition``; returns [] when the
+    partition does not exist (a missing partition is not an error for the
+    jobs that poll for landed data). Raises ``CatalogError`` for datasets
+    written many times a day -- those double-count on a whole-partition read.
     """
-    from ingest import schemas
-
-    if schemas.pa is None:
-        raise ImportError(
-            "pyarrow is required to read clean partitions; "
-            "install it (pip install -r requirements.txt)"
-        )
-    import pyarrow.parquet as pq
-
-    part_dir = _clean_root(settings, dataset) / f"dt={dt.isoformat()}"
-    records: list[dict[str, Any]] = []
-    for path in sorted(part_dir.glob("*.parquet")):
-        records.extend(pq.read_table(path).to_pylist())
-    return records
+    if dt not in partition_dates(settings, dataset):
+        return []
+    return catalog.read_partition(dataset, dt, settings.data_root).to_pylist()
 
 
 def latest_clean_records(
     settings: Settings, dataset: str, on_or_before: date
 ) -> list[dict[str, Any]]:
-    """Records of the most recent clean partition at or before ``on_or_before``."""
+    """Records of the most recent clean partition at or before ``on_or_before``.
+
+    Datasets written many times a day are read as-of (latest file per
+    underlying) rather than whole-partition. ``read_partition`` stays
+    fail-loud for them, but this helper is the "give me the current state"
+    accessor and must keep working: ``contracts_sync._previous_tickers`` calls
+    it for ``contracts``, and on a fresh run the SPY pass writes the first
+    file, so the SPX pass would otherwise hit its own partition and raise.
+    """
     dt = latest_partition(settings, dataset, on_or_before)
     if dt is None:
         return []
+    if dataset in catalog.ASOF_DATASETS:
+        try:
+            return catalog.read_asof(dataset, dt, data_root=settings.data_root).to_pylist()
+        except catalog.AsOfError:
+            return []
     return read_partition(settings, dataset, dt)
 
 
@@ -174,32 +168,23 @@ def _latest_files_by_underlying(
     whole-partition read returns each contract twice, and at a 1-minute
     snapshot cadence a partition holds hundreds of sweeps of the same chain.
     """
-    part = _clean_root(settings, dataset) / f"dt={dt.isoformat()}"
-    newest: dict[str, tuple[int, Path]] = {}
-    other: list[Path] = []
-    for path in sorted(part.glob("*.parquet")):
-        parts = path.stem.rsplit("-", 2)
-        stamp: int | None = None
-        if len(parts) == 3:
-            try:
-                stamp = int(parts[2])
-            except ValueError:
-                stamp = None
-        if stamp is None:
-            other.append(path)
-            continue
-        root = underlying_root(parts[1])
-        if root not in newest or stamp > newest[root][0]:
-            newest[root] = (stamp, path)
-    return {root: path for root, (_stamp, path) in newest.items()}, other
+    try:
+        files, other = catalog.files_by_underlying(dataset, dt, settings.data_root)
+    except catalog.CatalogError:
+        return {}, []
+    by_root = {
+        underlying_root(u): path for u, path in files.items() if u is not None
+    }
+    # Files with no underlying in their name keep the historical behaviour:
+    # read in full rather than selected per root.
+    other = other + [path for u, path in files.items() if u is None]
+    return by_root, other
 
 
 def latest_snapshots(
     settings: Settings, on_or_before: date
 ) -> dict[str, list[dict[str, Any]]]:
     """Most recent snapshot sweep per underlying root, at or before a date."""
-    import pyarrow.parquet as pq
-
     for dt in reversed(partition_dates(settings, "option_snapshots")):
         if dt > on_or_before:
             continue
@@ -223,8 +208,6 @@ def latest_contracts(settings: Settings, on_or_before: date) -> list[dict[str, A
     every parquet in the partition and so returns each contract once per
     ``contracts_sync`` run that day.
     """
-    import pyarrow.parquet as pq
-
     for dt in reversed(partition_dates(settings, "contracts")):
         if dt > on_or_before:
             continue

@@ -10,6 +10,7 @@ from marketdata.catalog import (
     AsOfError,
     CatalogError,
     SchemaError,
+    files_by_underlying,
     list_partitions,
     read_asof,
     read_partition,
@@ -130,3 +131,38 @@ def test_read_partition_bars(tmp_path) -> None:
 def test_unknown_dataset() -> None:
     with pytest.raises(CatalogError, match="unknown dataset"):
         list_partitions("not_a_dataset")
+
+
+def test_files_by_underlying_picks_newest_per_root(tmp_path) -> None:
+    for name in (
+        "snapshot_sweep-SPY-1000.parquet",
+        "snapshot_sweep-SPY-2000.parquet",
+        "snapshot_sweep-I:SPX-1500.parquet",
+    ):
+        write_records(
+            partition_path(tmp_path, "option_snapshots", DT, name),
+            "option_snapshots",
+            [snapshot_row("O:SPY260831C00420000")],
+        )
+    by_underlying, unstamped = files_by_underlying("option_snapshots", DT, data_root=tmp_path)
+    assert {u: p.name for u, p in by_underlying.items()} == {
+        "SPY": "snapshot_sweep-SPY-2000.parquet",
+        "I:SPX": "snapshot_sweep-I:SPX-1500.parquet",
+    }
+    assert unstamped == []
+
+
+def test_files_by_underlying_buckets_unstamped_and_filters_asof(tmp_path) -> None:
+    for name in ("snapshot_sweep-SPY-1000.parquet", "snapshot_sweep-SPY-2000.parquet"):
+        write_records(
+            partition_path(tmp_path, "option_snapshots", DT, name),
+            "option_snapshots",
+            [snapshot_row("O:SPY260831C00420000")],
+        )
+    foreign = partition_path(tmp_path, "option_snapshots", DT, "hand_written.parquet")
+    foreign.touch()
+    by_underlying, unstamped = files_by_underlying(
+        "option_snapshots", DT, data_root=tmp_path, asof_ns=1500 * 1_000_000
+    )
+    assert [p.name for p in by_underlying.values()] == ["snapshot_sweep-SPY-1000.parquet"]
+    assert [p.name for p in unstamped] == ["hand_written.parquet"]

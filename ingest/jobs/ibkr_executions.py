@@ -274,7 +274,7 @@ def check_parsed(records: list[dict[str, Any]]) -> None:
             "query's selected fields in Account Management."
         )
 
-    options = [r for r in records if (r["asset_class"] or "").upper() in ("OPT", "FOP")]
+    options = [r for r in records if (r["asset_class"] or "").upper() == "OPT"]
     if options and not any(r["opra_ticker"] for r in options):
         raise FlexError(
             f"parsed {len(options)} option rows but rebuilt no OPRA ticker -- "

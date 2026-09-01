@@ -164,7 +164,8 @@ def test_forward_from_parity_recovers_spot(landed: Settings) -> None:
     for f in forwards:
         # Options priced at intrinsic => K + C - P == spot exactly.
         assert f["forward"] == pytest.approx(SPX_SPOT, abs=1e-6)
-        assert f["method"] == "parity"
+        # No curve passed, so this is the r=0 approximation and says so.
+        assert f["method"] == "parity-r0"
         assert f["pairs"] > 0
 
 
@@ -332,3 +333,61 @@ def test_latest_clean_records_still_whole_partition_for_normal_datasets(
     landing.write_clean("underlying_minute_bars", RUN_DATE, rows,
                         job="underlying_bars", data_root=tmp_path)
     assert len(latest_clean_records(settings, "underlying_minute_bars", RUN_DATE)) == 3
+
+
+# ---------------------------------------------------------------------------
+# The parity forward is only the forward once the spread is undiscounted
+# ---------------------------------------------------------------------------
+
+def test_parity_forward_is_exact_when_the_rate_is_supplied() -> None:
+    """C - P = e^{-rT}(F - K), so F = K + e^{rT}(C - P).
+
+    The synthetic premiums here are discounted, so the r=0 form is measurably
+    wrong and the discounted form is exact. The earlier test used undiscounted
+    intrinsics and so could only ever exercise r=0.
+    """
+    import math
+
+    from ingest.jobs import forward_from_parity
+
+    F, r = 7691.0, 0.0384
+    asof, exp = date(2026, 9, 1), "2026-10-01"
+    T = (date.fromisoformat(exp) - asof).days / 365.0
+    rows = []
+    for K in (7600.0, 7650.0, 7690.0, 7700.0, 7750.0):
+        spread = math.exp(-r * T) * (F - K)
+        for kind, px in (("call", 50.0 + spread / 2), ("put", 50.0 - spread / 2)):
+            rows.append({
+                "details_expiration_date": exp, "details_strike_price": K,
+                "details_contract_type": kind, "day_close": px,
+                "underlying_ticker": "I:SPX", "day_last_updated_ns": 1,
+            })
+
+    exact = forward_from_parity(rows, rate_for_expiry=lambda _d: r, asof_date=asof)[0]
+    assert exact["forward"] == pytest.approx(F, abs=1e-9)
+    assert exact["method"] == "parity"
+
+    approx = forward_from_parity(rows)[0]
+    assert approx["method"] == "parity-r0"
+    assert approx["forward"] != pytest.approx(F, abs=1e-6)
+    # Small, because K is near F at the min-|C-P| strike -- but not the forward.
+    assert abs(approx["forward"] - F) < 0.01
+
+
+def test_zero_rate_makes_both_forms_agree() -> None:
+    from ingest.jobs import forward_from_parity
+
+    exp = "2026-10-01"
+    rows = []
+    for K in (7690.0, 7700.0):
+        spread = 7691.0 - K
+        for kind, px in (("call", 50.0 + spread / 2), ("put", 50.0 - spread / 2)):
+            rows.append({
+                "details_expiration_date": exp, "details_strike_price": K,
+                "details_contract_type": kind, "day_close": px,
+                "underlying_ticker": "I:SPX", "day_last_updated_ns": 1,
+            })
+    a = forward_from_parity(rows)[0]["forward"]
+    b = forward_from_parity(rows, rate_for_expiry=lambda _d: 0.0,
+                            asof_date=date(2026, 9, 1))[0]["forward"]
+    assert a == pytest.approx(b)

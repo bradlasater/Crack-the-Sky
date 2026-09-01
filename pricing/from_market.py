@@ -18,6 +18,12 @@ Two things here are load-bearing on this data feed:
   for AM-settled SPX (:data:`marketdata.opra.SETTLEMENT_ET`). Using the expiry
   *date* at UTC midnight is 20:00 ET the day before, understating T at every
   tenor and biasing inverted IV by ~108bp at 7 DTE.
+* **The discount rate comes from the landed Treasury curve** when the caller
+  passes ``r=None``, interpolated to the contract's own maturity
+  (:mod:`pricing.rates`). A flat 4% against a real 3.84% short end is a small
+  but one-directional error in every inverted IV -- 2.7bp at 7 DTE rising to
+  6.9bp at 45 DTE. Passing an explicit ``r`` still wins, so a canary can pin a
+  rate deliberately.
 * **SPX has no spot.** The index level is not entitled on this tier and the
   snapshot carries ``underlying_price = null`` for the whole SPX chain (~68% of
   the universe; SPXW alone is ~98% of SPX trade volume). Pass the per-expiry
@@ -75,6 +81,7 @@ from pricing.conventions import (
 )
 from pricing.engine import AmericanCRR, Engine, EuropeanBSM
 from pricing.iv import implied_vol as invert_iv
+from pricing.rates import RateCurveError, rate_for
 
 ET = ZoneInfo("America/New_York")
 
@@ -118,6 +125,7 @@ class ChainCounts:
     n_expired: int = 0
     n_no_price: int = 0
     n_uninvertible: int = 0
+    n_no_asof: int = 0
     n_otm: int = 0
 
 
@@ -157,25 +165,63 @@ def year_fraction(contract: Contract, asof_ns: int, *, days: int = 365) -> float
     return t
 
 
+def require_asof(quote: Quote) -> int:
+    """The quote's as-of stamp, or a clear error.
+
+    Checked before the year fraction is computed: an untraded contract has
+    ``asof_ns=None`` and passing that into date arithmetic raises an opaque
+    TypeError instead of naming the problem.
+    """
+    if quote.asof_ns is None:
+        raise ValueError(
+            f"{quote.contract.ticker or quote.contract.root}: quote has no "
+            "asof_ns (an untraded contract with no underlying stamp)"
+        )
+    return int(quote.asof_ns)
+
+
+def resolve_r(quote: Quote, r: float | None, T: float) -> float:
+    """Explicit ``r`` if given, else the curve for this quote's date and T.
+
+    Fails loudly when the curve is unavailable: a silently substituted default
+    rate is invisible in the output and quietly wrong in every downstream IV.
+    """
+    if r is not None:
+        return float(r)
+    if quote.asof_ns is None:
+        raise ValueError("cannot resolve r: quote has no asof_ns")
+    asof = datetime.fromtimestamp(quote.asof_ns / 1e9, tz=UTC).astimezone(ET).date()
+    try:
+        return rate_for(asof, T)
+    except RateCurveError as exc:
+        raise ValueError(
+            f"no Treasury curve at or before {asof} to price "
+            f"{quote.contract.ticker or quote.contract.root}; run "
+            "`python -m ingest.jobs.rates_sync` or pass r= explicitly"
+        ) from exc
+
+
 def price_quote(
     quote: Quote,
     *,
-    r: float,
+    r: float | None = None,
     sigma: float,
     q: float | None = None,
     forward: Forward | None = None,
     engine: Engine | None = None,
 ) -> float:
     """Price using quote.underlying_price and contract fields — not vendor IV."""
-    S, T, cp, F = _spot_t_cp(quote, forward, r)
+    T = year_fraction(quote.contract, require_asof(quote))
+    rate = resolve_r(quote, r, T)
+    S, T, cp, F = _spot_t_cp(quote, forward, rate)
     eng = engine or engine_for(quote.contract)
-    return float(eng.price(S, quote.contract.strike, T, r, sigma, cp, q=q, F=F))
+    return float(eng.price(S, quote.contract.strike, T, rate, sigma, cp, q=q, F=F))
 
 
 def greeks_quote(
     quote: Quote,
     *,
-    r: float,
+    r: float | None = None,
     sigma: float,
     q: float | None = None,
     forward: Forward | None = None,
@@ -183,15 +229,19 @@ def greeks_quote(
     conventions: GreeksConventions = DEFAULT_CONVENTIONS,
 ) -> GreeksCatalog:
     """Greeks from market spot and our σ. Vendor greeks on the quote are ignored."""
-    S, T, cp, F = _spot_t_cp(quote, forward, r)
+    T = year_fraction(quote.contract, require_asof(quote))
+    rate = resolve_r(quote, r, T)
+    S, T, cp, F = _spot_t_cp(quote, forward, rate)
     eng = engine or engine_for(quote.contract)
-    return eng.greeks(S, quote.contract.strike, T, r, sigma, cp, q=q, F=F, conventions=conventions)
+    return eng.greeks(
+        S, quote.contract.strike, T, rate, sigma, cp, q=q, F=F, conventions=conventions
+    )
 
 
 def implied_vol_quote(
     quote: Quote,
     *,
-    r: float,
+    r: float | None = None,
     q: float | None = None,
     forward: Forward | None = None,
 ) -> float:
@@ -199,8 +249,10 @@ def implied_vol_quote(
     px = quote.market_price
     if px is None:
         raise ValueError("quote has no last or day_close to invert")
-    S, T, cp, F = _spot_t_cp(quote, forward, r)
-    return invert_iv(px, S, quote.contract.strike, T, r, cp, q=q, F=F)
+    T = year_fraction(quote.contract, require_asof(quote))
+    rate = resolve_r(quote, r, T)
+    S, T, cp, F = _spot_t_cp(quote, forward, rate)
+    return invert_iv(px, S, quote.contract.strike, T, rate, cp, q=q, F=F)
 
 
 def _spot_t_cp(
@@ -395,7 +447,7 @@ def greeks_asof(
     dt: date,
     asof_ns: int | None = None,
     *,
-    r: float,
+    r: float | None = None,
     data_root: str | os.PathLike[str] | None = None,
     roots: tuple[str, ...] = ALLOWED_ROOTS,
     crr_steps: int = CHAIN_CRR_STEPS,
@@ -420,7 +472,9 @@ def greeks_asof(
     ``max_rows`` (if set) caps **American CRR** rows only; remaining American
     names are European-priced so an SPX-first file concat cannot starve SPY.
     """
-    if not math.isfinite(r):
+    # r=None means "resolve per contract from the Treasury curve"; only an
+    # explicitly supplied rate has to be finite.
+    if r is not None and not math.isfinite(r):
         raise ChainError(f"non-finite r: {r!r}")
     allow = narrow_roots(roots)
     if uninvertible not in ("raise", "skip"):
@@ -448,6 +502,7 @@ def greeks_asof(
     rows: list[dict[str, Any]] = []
     n_expired = 0
     n_no_price = 0
+    n_no_asof = 0
     n_skipped = 0
     n_otm = 0
     n_crr = 0
@@ -460,7 +515,14 @@ def greeks_asof(
             )
         priced_asof = asof_ns if asof_ns is not None else quote.asof_ns
         if priced_asof is None:
-            raise ChainError(f"{quote.contract.ticker}: no asof_ns")
+            # Untraded VIX contracts carry no timestamp at all: the vendor
+            # supplies no underlying for VIX, so underlying_last_updated_ns is
+            # null, and a contract that never printed has no trade or day
+            # stamp either (421 of 1,520 VIX rows on 2026-09-01; zero for SPY
+            # and SPX). Count it as a skip rather than aborting the chain --
+            # one unquoted wing should not take down the nightly canary.
+            n_no_asof += 1
+            continue
         qte = replace(quote, asof_ns=int(priced_asof))
 
         try:
@@ -500,7 +562,12 @@ def greeks_asof(
                 and n_crr >= max_rows
             ):
                 eng = EuropeanBSM()
-            own_iv = implied_vol_quote(qte, r=r, forward=fwd)
+            # Resolve the rate once per quote: passing r=None separately to
+            # each helper would look up the curve three times and, worse, let
+            # the q_out reconstruction below use a different rate than the IV
+            # it is reconciling against.
+            rate = resolve_r(qte, r, year_fraction(qte.contract, qte.asof_ns))
+            own_iv = implied_vol_quote(qte, r=rate, forward=fwd)
             if not math.isfinite(own_iv):
                 raise ValueError(f"{qte.contract.ticker}: inverted IV is not finite")
             if own_iv <= 0:
@@ -509,9 +576,10 @@ def greeks_asof(
                     "engines require sigma > 0 (price at the intrinsic bound)"
                 )
             catalog = greeks_quote(
-                qte, r=r, sigma=own_iv, forward=fwd, engine=eng, conventions=conventions
+                qte, r=rate, sigma=own_iv, forward=fwd, engine=eng,
+                conventions=conventions,
             )
-            S, T, _cp, F_passed = _spot_t_cp(qte, fwd, r)
+            S, T, _cp, F_passed = _spot_t_cp(qte, fwd, rate)
             q_out = (
                 float(resolve_q(S, T, r, F=F_passed))
                 if F_passed is not None
@@ -555,7 +623,10 @@ def greeks_asof(
                 "greeks_engine": eng.name,
                 "asof_ns": int(qte.asof_ns),
                 "T": float(T),
-                "r": float(r),
+                # The rate actually used for THIS contract. With r=None it is
+                # the curve interpolated to this maturity, so a single scalar
+                # would misreport every row but one.
+                "r": float(rate),
                 "q": float(q_out),
                 "F": float(fwd.forward),
                 "S": float(S),
@@ -587,6 +658,7 @@ def greeks_asof(
         counts.n_priced = len(rows)
         counts.n_expired = n_expired
         counts.n_no_price = n_no_price
+        counts.n_no_asof = n_no_asof
         counts.n_uninvertible = n_skipped
         counts.n_otm = n_otm
 

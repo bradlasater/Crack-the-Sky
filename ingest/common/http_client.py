@@ -17,6 +17,7 @@ concurrent GETs, and the bucket serialises admission.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Iterator
 from typing import Any
@@ -27,12 +28,38 @@ import requests
 from ingest.common.config import Settings
 from ingest.common.ratelimit import TokenBucket, default_bucket
 
+
+def redact(url: str) -> str:
+    """Strip the apiKey from a URL before it reaches a log or an exception.
+
+    Auth is a query parameter on every request, so any message that echoes the
+    URL -- a retry warning, an exhausted-retry HTTPError, a 403 entitlement
+    message -- writes the live credential into the run log. Observed: a 429 on
+    /fed/v1 put the key into two files under logs/.
+    """
+    return _APIKEY_RE.sub(r"\1***", url)
+
+
 MAX_TRIES = 6
 BACKOFF_BASE_S = 1.0
 TIMEOUT_S = 30
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+_APIKEY_RE = re.compile(r"(apiKey=)[^&\s]*", re.IGNORECASE)
 
 log = logging.getLogger(__name__)
+
+
+class MassiveHTTPError(requests.HTTPError):
+    """HTTP failure with the status preserved and the apiKey stripped.
+
+    Callers need the status to tell a quota (429) from a permanent 4xx: the
+    rates backfill treats an exhausted 429 as a resumable stopping point and
+    must not extend that leniency to a broken endpoint.
+    """
+
+    def __init__(self, status_code: int, url: str) -> None:
+        self.status_code = status_code
+        super().__init__(f"HTTP {status_code} for {redact(url)}")
 
 
 class MassiveClient:
@@ -85,21 +112,27 @@ class MassiveClient:
             try:
                 resp = self.session.get(url, timeout=TIMEOUT_S)
             except requests.RequestException as exc:  # network-level failure
-                last_exc = exc
-                self._sleep(attempt, f"network error: {exc}")
+                # str(exc) can embed the prepared URL, and therefore the
+                # apiKey; redact before it reaches a log or is re-raised.
+                detail = redact(f"{type(exc).__name__}: {exc}")
+                last_exc = requests.RequestException(detail)
+                self._sleep(attempt, f"network error: {detail}")
                 continue
             if resp.status_code == 403:
                 raise PermissionError(self._entitlement_message(url, resp))
             if resp.status_code in RETRYABLE_STATUS:
-                last_exc = requests.HTTPError(f"HTTP {resp.status_code} for {url}")
+                last_exc = MassiveHTTPError(resp.status_code, url)
                 self._sleep(attempt, f"HTTP {resp.status_code}")
                 continue
-            resp.raise_for_status()
+            if resp.status_code >= 400:
+                # The stdlib helper builds its message from the prepared URL,
+                # which carries the apiKey. Raise our own instead.
+                raise MassiveHTTPError(resp.status_code, url)
             return resp.json()  # type: ignore[no-any-return]
         assert last_exc is not None
         raise last_exc
 
-    def _sleep(self, attempt: int, why: str) -> None:
+    def _sleep(self, attempt: int, why: str) -> None:  # noqa: D401
         """Exponential backoff before retry ``attempt`` (base 1s, x2)."""
         delay = BACKOFF_BASE_S * (2 ** (attempt - 1))
         log.warning("retry %d/%d in %.1fs (%s)", attempt, MAX_TRIES, delay, why)
@@ -114,7 +147,7 @@ class MassiveClient:
         except ValueError:
             status, detail = "?", resp.text[:200]
         return (
-            f"403 NOT_AUTHORIZED from {url} (status={status} {detail}). "
+            f"403 NOT_AUTHORIZED from {redact(url)} (status={status} {detail}). "
             "Your Massive.com plan tier is not entitled to this endpoint "
             "(e.g. quotes / indices / equity trades are above the current tier)."
         )

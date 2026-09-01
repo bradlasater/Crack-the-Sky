@@ -52,7 +52,7 @@ SWEEP_MIN_RATIO = 0.95
 # Largest tolerated hole between consecutive sweeps.
 MAX_SWEEP_GAP_S = 180
 # Underlying roots we expect on every trading day.
-EXPECTED_ROOTS = ("SPY", "SPX")
+EXPECTED_ROOTS = ("SPY", "SPX", "VIX")
 # Flat-file datasets flatfile_pull is responsible for.
 FLATFILE_DATASETS = ("trades_v1", "minute_aggs_v1", "day_aggs_v1")
 

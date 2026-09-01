@@ -85,6 +85,11 @@ PROBES: list[tuple[str, str, str, Validator | None]] = [
     ("reference/contracts",   "/v3/reference/options/contracts?underlying_ticker=SPY&limit=1", ENTITLED, _v_contracts),
     ("snapshot/options SPY",  "/v3/snapshot/options/SPY?limit=1", ENTITLED, _v_snapshot),
     ("snapshot/options SPX",  "/v3/snapshot/options/I:SPX?limit=1", ENTITLED, None),
+    # VIX options are entitled even though the VIX index is not; the chain is
+    # what the VX term structure is recovered from via put-call parity.
+    ("snapshot/options VIX",  "/v3/snapshot/options/VIX?limit=1", ENTITLED, None),
+    ("fed/treasury-yields",   "/fed/v1/treasury-yields?limit=1", ENTITLED, None),
+    ("fed/inflation",         "/fed/v1/inflation?limit=1", ENTITLED, None),
     # {contract} is resolved at run time -- see _resolve_probe_contract. A
     # fixed ticker turns into a permanent CI failure the day it expires,
     # because the aggregate request then returns an empty (but entitled) 200.

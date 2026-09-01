@@ -30,12 +30,10 @@ import json
 import sys
 from typing import Any
 
-import requests
-
 from ingest.common import landing
 from ingest.common.cli import run_job
 from ingest.common.config import Settings
-from ingest.common.http_client import MassiveClient
+from ingest.common.http_client import MassiveClient, MassiveHTTPError
 from ingest.common.logging_utils import JsonlLogger
 from ingest.common.ratelimit import TokenBucket
 from ingest.jobs import run_date_from_args, strip_flag
@@ -78,10 +76,15 @@ def _load_cursor(settings: Settings) -> dict[str, str]:
     """``{dataset: oldest_date_landed}`` (empty when absent/corrupt)."""
     path = landing.meta_path(CURSOR_NAME, data_root=settings.data_root)
     try:
-        return {str(k): str(v) for k, v in
-                json.loads(path.read_text(encoding="utf-8")).items()}
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
+    if not isinstance(data, dict):
+        # `[]` or `null` parse fine and then blow up on .items(). The cursor is
+        # read on every run, including incremental, so a malformed file would
+        # break the daily job as well as the backfill.
+        return {}
+    return {str(k): str(v) for k, v in data.items()}
 
 
 def _save_cursor(settings: Settings, cursor: dict[str, str]) -> None:
@@ -130,9 +133,13 @@ def _fetch(
             rows.append(item)
             if limit is not None and len(rows) >= limit:
                 break
-    except requests.HTTPError:
-        # Retries exhausted against the /fed quota. Everything already yielded
-        # is good; stop here and let the cursor resume the rest.
+    except MassiveHTTPError as exc:
+        # Only an exhausted quota is a resumable stopping point. A permanent
+        # 400/404 -- or exhausted 5xx -- means the endpoint is broken, and
+        # labelling that "partial" would bank it as progress and exit 0,
+        # hiding the breakage as ordinary rate limiting.
+        if exc.status_code != 429:
+            raise
         complete = False
     return (rows[:limit] if limit is not None else rows), complete
 

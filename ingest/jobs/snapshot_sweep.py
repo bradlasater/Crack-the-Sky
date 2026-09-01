@@ -35,6 +35,7 @@ from ingest.common.cli import run_job
 from ingest.common.config import Settings
 from ingest.common.http_client import MassiveClient
 from ingest.common.logging_utils import JsonlLogger
+from ingest.common.rates import RateCurveError, load_curve
 from ingest.jobs import forward_from_parity, parse_underlyings, run_date_from_args, strip_flag
 
 JOB = "snapshot_sweep"
@@ -79,7 +80,19 @@ def _sweep_underlying(
         client.get = orig_get  # type: ignore[method-assign]
 
     records = [schemas.flatten_snapshot(r) for r in raw_results]
-    forwards = forward_from_parity(records)
+
+    # Parity gives C - P = e^{-rT}(F - K), so the spread must be undiscounted
+    # to get the forward. Without a curve the r=0 approximation is used and
+    # the rows say so via method="parity-r0" -- the sweep must never fail
+    # because the rates warehouse is behind.
+    rate_fn = None
+    try:
+        curve = load_curve(run_date, data_root=settings.data_root)
+        rate_fn = lambda _expiry: curve.at(max((_expiry - run_date).days, 1) / 365.0)  # noqa: E731
+    except RateCurveError as exc:
+        with log_lock:
+            logger.log("forward_rate_unavailable", underlying=underlying, reason=str(exc))
+    forwards = forward_from_parity(records, rate_for_expiry=rate_fn, asof_date=run_date)
     label = f"{JOB}-eod" if eod else JOB
 
     if args.dry_run:

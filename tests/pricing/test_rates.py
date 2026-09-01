@@ -116,3 +116,39 @@ def test_date_before_all_data_fails_loudly(tmp_path: Path) -> None:
     _land(tmp_path, CURVE_2026_08_28)
     with pytest.raises(RateCurveError, match="at or before"):
         load_curve("1999-01-01", tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# dt= is the ingestion run date, not the curve date
+# ---------------------------------------------------------------------------
+
+def test_older_partition_can_hold_the_newer_curve(tmp_path: Path) -> None:
+    """A resumed --full walk writes old history into a *new* partition.
+
+    Stopping at the first partition containing any match would then return a
+    decades-stale curve for a current quote.
+    """
+    # Older run date, recent curve.
+    landing.write_clean("treasury_yields", date(2026, 9, 1), [CURVE_2026_08_28],
+                        job="rates_sync", data_root=tmp_path)
+    # Newer run date, ancient history (what a resumed backfill produces).
+    landing.write_clean(
+        "treasury_yields", date(2026, 9, 2),
+        [{**CURVE_2026_08_28, "date": "1962-01-02", "yield_1_month": 2.5}],
+        job="rates_sync", data_root=tmp_path,
+    )
+    curve = load_curve("2026-08-31", tmp_path)
+    assert curve.date == "2026-08-28", "must not return the 1962 row"
+    assert curve.at(1 / 12) == pytest.approx(0.0384)
+
+
+def test_scans_every_partition_for_the_global_best(tmp_path: Path) -> None:
+    for run_dt, curve_dt in ((date(2026, 9, 1), "2026-08-20"),
+                             (date(2026, 9, 2), "2026-08-28"),
+                             (date(2026, 9, 3), "1999-01-04")):
+        landing.write_clean("treasury_yields", run_dt,
+                            [{**CURVE_2026_08_28, "date": curve_dt}],
+                            job="rates_sync", data_root=tmp_path)
+    assert load_curve("2026-09-30", tmp_path).date == "2026-08-28"
+    assert load_curve("2026-08-25", tmp_path).date == "2026-08-20"
+    assert load_curve("2000-01-01", tmp_path).date == "1999-01-04"

@@ -125,6 +125,7 @@ class ChainCounts:
     n_expired: int = 0
     n_no_price: int = 0
     n_uninvertible: int = 0
+    n_no_asof: int = 0
     n_otm: int = 0
 
 
@@ -164,6 +165,21 @@ def year_fraction(contract: Contract, asof_ns: int, *, days: int = 365) -> float
     return t
 
 
+def require_asof(quote: Quote) -> int:
+    """The quote's as-of stamp, or a clear error.
+
+    Checked before the year fraction is computed: an untraded contract has
+    ``asof_ns=None`` and passing that into date arithmetic raises an opaque
+    TypeError instead of naming the problem.
+    """
+    if quote.asof_ns is None:
+        raise ValueError(
+            f"{quote.contract.ticker or quote.contract.root}: quote has no "
+            "asof_ns (an untraded contract with no underlying stamp)"
+        )
+    return int(quote.asof_ns)
+
+
 def resolve_r(quote: Quote, r: float | None, T: float) -> float:
     """Explicit ``r`` if given, else the curve for this quote's date and T.
 
@@ -195,7 +211,7 @@ def price_quote(
     engine: Engine | None = None,
 ) -> float:
     """Price using quote.underlying_price and contract fields — not vendor IV."""
-    T = year_fraction(quote.contract, quote.asof_ns)
+    T = year_fraction(quote.contract, require_asof(quote))
     rate = resolve_r(quote, r, T)
     S, T, cp, F = _spot_t_cp(quote, forward, rate)
     eng = engine or engine_for(quote.contract)
@@ -213,7 +229,7 @@ def greeks_quote(
     conventions: GreeksConventions = DEFAULT_CONVENTIONS,
 ) -> GreeksCatalog:
     """Greeks from market spot and our σ. Vendor greeks on the quote are ignored."""
-    T = year_fraction(quote.contract, quote.asof_ns)
+    T = year_fraction(quote.contract, require_asof(quote))
     rate = resolve_r(quote, r, T)
     S, T, cp, F = _spot_t_cp(quote, forward, rate)
     eng = engine or engine_for(quote.contract)
@@ -233,7 +249,7 @@ def implied_vol_quote(
     px = quote.market_price
     if px is None:
         raise ValueError("quote has no last or day_close to invert")
-    T = year_fraction(quote.contract, quote.asof_ns)
+    T = year_fraction(quote.contract, require_asof(quote))
     rate = resolve_r(quote, r, T)
     S, T, cp, F = _spot_t_cp(quote, forward, rate)
     return invert_iv(px, S, quote.contract.strike, T, rate, cp, q=q, F=F)
@@ -431,7 +447,7 @@ def greeks_asof(
     dt: date,
     asof_ns: int | None = None,
     *,
-    r: float,
+    r: float | None = None,
     data_root: str | os.PathLike[str] | None = None,
     roots: tuple[str, ...] = ALLOWED_ROOTS,
     crr_steps: int = CHAIN_CRR_STEPS,
@@ -456,7 +472,9 @@ def greeks_asof(
     ``max_rows`` (if set) caps **American CRR** rows only; remaining American
     names are European-priced so an SPX-first file concat cannot starve SPY.
     """
-    if not math.isfinite(r):
+    # r=None means "resolve per contract from the Treasury curve"; only an
+    # explicitly supplied rate has to be finite.
+    if r is not None and not math.isfinite(r):
         raise ChainError(f"non-finite r: {r!r}")
     allow = narrow_roots(roots)
     if uninvertible not in ("raise", "skip"):
@@ -484,6 +502,7 @@ def greeks_asof(
     rows: list[dict[str, Any]] = []
     n_expired = 0
     n_no_price = 0
+    n_no_asof = 0
     n_skipped = 0
     n_otm = 0
     n_crr = 0
@@ -496,7 +515,14 @@ def greeks_asof(
             )
         priced_asof = asof_ns if asof_ns is not None else quote.asof_ns
         if priced_asof is None:
-            raise ChainError(f"{quote.contract.ticker}: no asof_ns")
+            # Untraded VIX contracts carry no timestamp at all: the vendor
+            # supplies no underlying for VIX, so underlying_last_updated_ns is
+            # null, and a contract that never printed has no trade or day
+            # stamp either (421 of 1,520 VIX rows on 2026-09-01; zero for SPY
+            # and SPX). Count it as a skip rather than aborting the chain --
+            # one unquoted wing should not take down the nightly canary.
+            n_no_asof += 1
+            continue
         qte = replace(quote, asof_ns=int(priced_asof))
 
         try:
@@ -536,7 +562,12 @@ def greeks_asof(
                 and n_crr >= max_rows
             ):
                 eng = EuropeanBSM()
-            own_iv = implied_vol_quote(qte, r=r, forward=fwd)
+            # Resolve the rate once per quote: passing r=None separately to
+            # each helper would look up the curve three times and, worse, let
+            # the q_out reconstruction below use a different rate than the IV
+            # it is reconciling against.
+            rate = resolve_r(qte, r, year_fraction(qte.contract, qte.asof_ns))
+            own_iv = implied_vol_quote(qte, r=rate, forward=fwd)
             if not math.isfinite(own_iv):
                 raise ValueError(f"{qte.contract.ticker}: inverted IV is not finite")
             if own_iv <= 0:
@@ -545,9 +576,10 @@ def greeks_asof(
                     "engines require sigma > 0 (price at the intrinsic bound)"
                 )
             catalog = greeks_quote(
-                qte, r=r, sigma=own_iv, forward=fwd, engine=eng, conventions=conventions
+                qte, r=rate, sigma=own_iv, forward=fwd, engine=eng,
+                conventions=conventions,
             )
-            S, T, _cp, F_passed = _spot_t_cp(qte, fwd, r)
+            S, T, _cp, F_passed = _spot_t_cp(qte, fwd, rate)
             q_out = (
                 float(resolve_q(S, T, r, F=F_passed))
                 if F_passed is not None
@@ -591,7 +623,10 @@ def greeks_asof(
                 "greeks_engine": eng.name,
                 "asof_ns": int(qte.asof_ns),
                 "T": float(T),
-                "r": float(r),
+                # The rate actually used for THIS contract. With r=None it is
+                # the curve interpolated to this maturity, so a single scalar
+                # would misreport every row but one.
+                "r": float(rate),
                 "q": float(q_out),
                 "F": float(fwd.forward),
                 "S": float(S),
@@ -623,6 +658,7 @@ def greeks_asof(
         counts.n_priced = len(rows)
         counts.n_expired = n_expired
         counts.n_no_price = n_no_price
+        counts.n_no_asof = n_no_asof
         counts.n_uninvertible = n_skipped
         counts.n_otm = n_otm
 

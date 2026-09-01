@@ -30,7 +30,10 @@ Cron bounds
 SPY CRR is limited with ``--spy-atm-pct`` (default 5%) and ``--max-rows``
 (default 400, CRR rows only — not a global chain cap). Combined with
 ``--atm-pct``, only the ATM slice is inverted.
-``--r`` defaults to ``DRIFT_CHECK_R`` (else 0.04); there is no rates warehouse.
+``--r`` defaults to ``DRIFT_CHECK_R``; with neither set, the rate comes from
+the landed Treasury curve (:mod:`ingest.common.rates`), interpolated to each
+contract's own maturity. ``DEFAULT_R`` remains only as the fallback for a box
+where ``rates_sync`` has never run.
 
 Run: ``python -m pricing.drift_check [--date YYYY-MM-DD]``
 """
@@ -134,7 +137,7 @@ class DriftReport:
     date: str
     asof_ns: int | None
     cutoff_et: str
-    r: float
+    r: float | None
     status: str
     failures: list[str] = field(default_factory=list)
     counts: dict[str, Any] = field(default_factory=dict)
@@ -318,7 +321,7 @@ def evaluate_drift(
     dt: date,
     asof_ns: int | None,
     cutoff_et: str = DEFAULT_CUTOFF_ET,
-    r: float,
+    r: float | None,
     spy_atm_pct: float | None = None,
     max_rows: int | None = None,
 ) -> DriftReport:
@@ -579,10 +582,18 @@ def _get(name: str, default: str | None = None, file_vals: Mapping[str, str] | N
     return default
 
 
-def default_r(file_vals: Mapping[str, str] | None = None) -> float:
+def default_r(file_vals: Mapping[str, str] | None = None) -> float | None:
+    """Explicit DRIFT_CHECK_R, else None so the Treasury curve is used.
+
+    Returning None rather than DEFAULT_R is the point: the curve is the whole
+    reason the rates warehouse exists, and a constant here would keep the
+    scheduled canary pricing at 4% no matter what the short end is doing.
+    DEFAULT_R survives only as the documented fallback when no curve has been
+    landed yet.
+    """
     raw = _get("DRIFT_CHECK_R", None, file_vals)
     if raw is None or raw == "":
-        return DEFAULT_R
+        return None
     try:
         value = float(raw)
     except ValueError as exc:
@@ -631,7 +642,7 @@ def _post_webhook(url: str, payload: dict[str, Any]) -> None:
 def run_drift(
     dt: date,
     *,
-    r: float,
+    r: float | None,
     data_root: str | os.PathLike[str] | None,
     asof_ns: int | None = None,
     cutoff_et: str = DEFAULT_CUTOFF_ET,
@@ -722,7 +733,8 @@ def main(argv: list[str] | None = None) -> int:
         "--r",
         type=float,
         default=None,
-        help=f"continuous risk-free rate (default DRIFT_CHECK_R or {DEFAULT_R})",
+        help="continuous risk-free rate; default DRIFT_CHECK_R, else the "
+             "landed Treasury curve interpolated to each contract's maturity",
     )
     parser.add_argument("--roots", default=",".join(ALLOWED_ROOTS))
     parser.add_argument(

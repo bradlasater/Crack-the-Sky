@@ -49,6 +49,19 @@ _APIKEY_RE = re.compile(r"(apiKey=)[^&\s]*", re.IGNORECASE)
 log = logging.getLogger(__name__)
 
 
+class MassiveHTTPError(requests.HTTPError):
+    """HTTP failure with the status preserved and the apiKey stripped.
+
+    Callers need the status to tell a quota (429) from a permanent 4xx: the
+    rates backfill treats an exhausted 429 as a resumable stopping point and
+    must not extend that leniency to a broken endpoint.
+    """
+
+    def __init__(self, status_code: int, url: str) -> None:
+        self.status_code = status_code
+        super().__init__(f"HTTP {status_code} for {redact(url)}")
+
+
 class MassiveClient:
     """Thin wrapper around ``requests.Session`` with auth, retries, pagination."""
 
@@ -99,16 +112,22 @@ class MassiveClient:
             try:
                 resp = self.session.get(url, timeout=TIMEOUT_S)
             except requests.RequestException as exc:  # network-level failure
-                last_exc = exc
-                self._sleep(attempt, f"network error: {exc}")
+                # str(exc) can embed the prepared URL, and therefore the
+                # apiKey; redact before it reaches a log or is re-raised.
+                detail = redact(f"{type(exc).__name__}: {exc}")
+                last_exc = requests.RequestException(detail)
+                self._sleep(attempt, f"network error: {detail}")
                 continue
             if resp.status_code == 403:
                 raise PermissionError(self._entitlement_message(url, resp))
             if resp.status_code in RETRYABLE_STATUS:
-                last_exc = requests.HTTPError(f"HTTP {resp.status_code} for {redact(url)}")
+                last_exc = MassiveHTTPError(resp.status_code, url)
                 self._sleep(attempt, f"HTTP {resp.status_code}")
                 continue
-            resp.raise_for_status()
+            if resp.status_code >= 400:
+                # The stdlib helper builds its message from the prepared URL,
+                # which carries the apiKey. Raise our own instead.
+                raise MassiveHTTPError(resp.status_code, url)
             return resp.json()  # type: ignore[no-any-return]
         assert last_exc is not None
         raise last_exc

@@ -17,7 +17,9 @@ the option chain we already snapshot -- see :func:`forward_from_parity`.
 from __future__ import annotations
 
 import argparse
+import math
 import re
+from collections.abc import Callable
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -243,6 +245,8 @@ def latest_contracts(settings: Settings, on_or_before: date) -> list[dict[str, A
 
 def forward_from_parity(
     snapshot_records: list[dict[str, Any]],
+    rate_for_expiry: Callable[[date], float] | None = None,
+    asof_date: date | None = None,
 ) -> list[dict[str, Any]]:
     """Per-expiry forward price recovered from put-call parity.
 
@@ -290,16 +294,26 @@ def forward_from_parity(
         if not pairs:
             continue
         strike, call, put = min(pairs, key=lambda t: abs(t[1] - t[2]))
+        discount = 1.0
+        if rate_for_expiry is not None:
+            try:
+                expiry_date = date.fromisoformat(str(exp)[:10])
+            except ValueError:
+                expiry_date = None
+            if expiry_date is not None:
+                years = max((expiry_date - (asof_date or expiry_date)).days, 0) / 365.0
+                if years > 0:
+                    discount = math.exp(rate_for_expiry(expiry_date) * years)
         out.append({
             "underlying_ticker": underlying,
             "expiration_date": exp,
             "atm_strike": strike,
-            "forward": strike + call - put,
+            "forward": strike + discount * (call - put),
             "call_price": call,
             "put_price": put,
             "pairs": len(pairs),
             "asof_ns": asof or None,
-            "method": "parity",
+            "method": "parity" if rate_for_expiry is not None else "parity-r0",
         })
     return out
 

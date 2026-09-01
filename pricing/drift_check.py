@@ -5,9 +5,12 @@ invert own IV and compute own Greeks from the as-of snapshot
 (:mod:`pricing.from_market`). Pass/fail is identity / self-consistency on
 ATM names (``|K/F − 1| ≤ atm_pct``, default 5%):
 
-* inverted σ reprices the input: ``market_price`` vs ``BSM(σ_own)``
+* stored engine price reprices the input: ``market_price`` vs ``own_price``
+  (CRR for American rows — an independent check; BSM for European rows)
 * European put–call pairs: ``Γ_call ≈ Γ_put``, ``vega_call ≈ vega_put``,
-  and put–call parity on the quotes vs ``S e^{-qT} − K e^{-rT}``
+  and put–call parity on day-close quotes vs ``S e^{-qT} − K e^{-rT}``
+  (PCP is skipped when either leg carries a last-trade price, which may
+  come from a different moment in the session than its pair)
 
 Far-OTM ticks are not the trigger. The job FAILs when the median reprice
 error exceeds its band, or when more than ``fail_frac`` of ATM names fail
@@ -59,7 +62,6 @@ from marketdata.catalog import CatalogError, SchemaError
 from marketdata.opra import ALLOWED_ROOTS
 from marketdata.validate import narrow_roots
 from pricing.bsm import greeks as bsm_greeks
-from pricing.bsm import price as bsm_price
 from pricing.conventions import CALENDAR_DAYS_PER_YEAR
 from pricing.from_market import (
     CHAIN_CRR_STEPS,
@@ -266,27 +268,6 @@ def atm_pairs(
     ]
 
 
-def bsm_reprice(row: Mapping[str, Any]) -> float | None:
-    """European BSM price at own IV. None when the row cannot be repriced."""
-    spot = _opt(row.get("S"))
-    strike = _opt(row.get("strike"))
-    tte = _opt(row.get("T"))
-    rate = _opt(row.get("r"))
-    sigma = _opt(row.get("own_iv"))
-    cp = _cp_side(row)
-    if None in (spot, strike, tte, rate, sigma, cp):
-        return None
-    if spot <= 0 or strike <= 0 or tte <= 0 or sigma <= 0:
-        return None
-    q = _opt(row.get("q"))
-    if q is None:
-        q = 0.0
-    try:
-        return float(bsm_price(spot, strike, tte, rate, sigma, cp, q=q))
-    except ValueError:
-        return None
-
-
 def _bsm_gamma_vega(
     row: Mapping[str, Any], sigma: float
 ) -> tuple[float, float] | None:
@@ -388,19 +369,24 @@ def evaluate_drift(
         ):
             beyond_by_identity["vega_pair"] += 1
             hit = True
-        call_px = _opt(call.get("market_price"))
-        put_px = _opt(put.get("market_price"))
-        rhs = _pcp_rhs(call)
-        if (
-            call_px is not None
-            and put_px is not None
-            and rhs is not None
-            and beyond_band(
-                call_px - put_px, rhs, thresholds.pcp_abs, thresholds.pcp_rel
-            )
-        ):
-            beyond_by_identity["pcp"] += 1
-            hit = True
+        # PCP requires contemporaneous prices; skip when either leg uses a
+        # last-trade price that may be from a different moment in the session.
+        call_src = call.get("price_source")
+        put_src = put.get("price_source")
+        if call_src == "close" and put_src == "close":
+            call_px = _opt(call.get("market_price"))
+            put_px = _opt(put.get("market_price"))
+            rhs = _pcp_rhs(call)
+            if (
+                call_px is not None
+                and put_px is not None
+                and rhs is not None
+                and beyond_band(
+                    call_px - put_px, rhs, thresholds.pcp_abs, thresholds.pcp_rel
+                )
+            ):
+                beyond_by_identity["pcp"] += 1
+                hit = True
         if hit:
             pair_failed.add(id(call))
             pair_failed.add(id(put))
@@ -409,7 +395,10 @@ def evaluate_drift(
     n_identity_beyond = 0
     for rec in atm:
         hit = id(rec) in pair_failed
-        model = bsm_reprice(rec)
+        # Use the stored engine output (CRR for American rows, BSM for European)
+        # rather than re-inverting via BSM, so American/CRR rows are validated
+        # through their actual code path.
+        model = _opt(rec.get("own_price"))
         mkt = _opt(rec.get("market_price"))
         if model is None or mkt is None:
             beyond_by_identity["reprice"] += 1
@@ -435,7 +424,7 @@ def evaluate_drift(
         and median_reprice > thresholds.reprice_median_abs
     ):
         failures.append(
-            f"median |price − BSM(σ)|={median_reprice:.4f} exceeds "
+            f"median |price − own_price|={median_reprice:.4f} exceeds "
             f"{thresholds.reprice_median_abs}"
         )
     if frac_identity is not None and frac_identity > thresholds.fail_frac:
@@ -521,7 +510,7 @@ def evaluate_drift(
                 "gamma": "spot (no conversion)",
             },
             "identities": {
-                "reprice": "market_price vs BSM(σ_own)",
+                "reprice": "market_price vs own_price (CRR for American, BSM for European)",
                 "pairs": "european Γ_call≈Γ_put, vega_call≈vega_put, PCP",
             },
         },
@@ -556,7 +545,7 @@ def _render(report: DriftReport) -> str:
         f"drift_check -- {report.date}  asof_ns={report.asof_ns}  "
         f"cutoff_et={report.cutoff_et} ET",
         "-" * 72,
-        f"{report.status:<5} identities median_|price−BSM|={report.median_abs_reprice}  "
+        f"{report.status:<5} identities median_|price−own_price|={report.median_abs_reprice}  "
         f"frac_identity={report.frac_identity_beyond}  "
         f"atm={report.counts.get('atm_compared')}  "
         f"pairs={report.counts.get('atm_pairs')}",

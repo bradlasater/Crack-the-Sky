@@ -131,11 +131,13 @@ def _consistent_euro_row(
         "exercise_style": "european",
         "greeks_engine": "european_bsm",
         "own_iv": sig,
+        "own_price": mkt,
         "own_delta": float(g["delta"]),
         "own_gamma": float(g["gamma"]),
         "own_vega": float(g["vega"]),
         "own_theta": float(g["theta"]),
         "market_price": poison_market if poison_market is not None else mkt,
+        "price_source": "close",
         "vendor_iv": None,
         "vendor_delta": None,
         "vendor_gamma": None,
@@ -239,7 +241,7 @@ def test_identities_broken_poisoned_price_exit_1(
     )
     assert payload["status"] == "FAIL"
     assert payload["vendor_compare_skipped"] is True
-    assert any("BSM" in f or "identit" in f for f in payload["failures"])
+    assert any("own_price" in f or "identit" in f for f in payload["failures"])
 
 
 def test_identities_broken_poisoned_gamma() -> None:

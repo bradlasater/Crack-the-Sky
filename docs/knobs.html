@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>data_ingest_infra — documented knobs</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="site.css">
+</head>
+<body id="top">
+  <a class="skip" href="#main">Skip to content</a>
+  <div class="shell">
+    <nav class="toc" aria-label="Handbook index">
+      <div class="toc-kicker">data_ingest_infra</div>
+      <div class="toc-title">System handbook</div>
+      <ol>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="repo-layout.html">Repo layout</a></li>
+        <li><a href="data-flow.html">Data flow</a></li>
+        <li>
+          <a href="ingest.html">Ingest</a>
+          <ol class="sub">
+            <li><a href="ingest.html#ingest-constraints">Massive / Polygon constraints</a></li>
+            <li><a href="ingest.html#ingest-jobs">Jobs that exist</a></li>
+            <li><a href="ingest.html#ingest-cron">NY cron</a></li>
+            <li><a href="ingest.html#ingest-session">Weekday session</a></li>
+            <li><a href="ingest.html#ingest-entitlements">Entitlements</a></li>
+          </ol>
+        </li>
+        <li><a href="marketdata.html">marketdata</a></li>
+        <li><a href="pricing.html">pricing</a></li>
+        <li><a href="warehouse-math.html">Warehouse → math</a></li>
+        <li><a href="canary.html">Daily canary</a></li>
+        <li><a href="conventions.html">Desk conventions</a></li>
+        <li><a href="not-built.html">Not built</a></li>
+        <li><a href="formula-stubs.html">Formula stubs</a></li>
+        <li><a href="knobs.html" class="active">Documented knobs</a></li>
+        <li class="toc-sep"></li>
+        <li><a href="box-operations.html">Box operations (off-repo)</a></li>
+      </ol>
+    </nav>
+
+    <main id="main">
+      <header class="doc">
+        <div>
+          <div class="kicker">data_ingest_infra</div>
+          <h1>Documented knobs</h1>
+        </div>
+        <div class="meta"><a href="index.html">← overview</a></div>
+      </header>
+
+      <p>
+        From <code>.env.example</code> (no secrets). Process environment overrides
+        the file. Do not commit <code>.env</code>. Where each value actually lives
+        on the box: <a href="box-operations.html">box operations</a>.
+      </p>
+      <table>
+        <thead>
+          <tr><th>Name</th><th>Role</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="job">MASSIVE_API_KEY</td><td>Required. Query-param auth.</td></tr>
+          <tr><td class="job">MASSIVE_API_BASE</td><td>Default <code>https://api.polygon.io</code>.</td></tr>
+          <tr><td class="job">WS_DELAYED_URL</td><td>Default <code>wss://delayed.massive.com/options</code>.</td></tr>
+          <tr><td class="job">MASSIVE_S3_*</td><td>Flat-file endpoint, bucket, access keys (placeholder exits 3 on pull).</td></tr>
+          <tr><td class="job">DATA_ROOT</td><td>Warehouse root. Default <code>/data/massive</code>.</td></tr>
+          <tr><td class="job">LOG_ROOT</td><td>Logs. Default <code>DATA_ROOT/logs</code> (not the warehouse root). <code>Settings.load</code> in <code>ingest/common/config.py</code>.</td></tr>
+          <tr><td class="job">HEALTHCHECKS_PING_KEY</td><td>Per-job checks. Without it, a dead job is silent.</td></tr>
+          <tr><td class="job">HEALTHCHECKS_API_KEY</td><td>Management key used only by <code>scripts/setup_healthchecks.py</code> to create/update the checks. Not read at run time, and not the ping key.</td></tr>
+          <tr><td class="job">HEALTHCHECKS_BASE</td><td>Ping root (hosted <code>https://hc-ping.com</code>; self-host <code>https://&lt;host&gt;/ping</code>).</td></tr>
+          <tr><td class="job">DRIFT_CHECK_R</td><td>Scalar r for the 17:00 canary (default 0.04).</td></tr>
+          <tr><td class="job">DRIFT_ALERT_WEBHOOK</td><td>Optional FAIL POST. Healthchecks + exit 1 remain the alert.</td></tr>
+        </tbody>
+      </table>
+      <p>
+        Also in code, not in <code>.env.example</code>:
+        <code>MASSIVE_MAX_RPS</code> / <code>MASSIVE_BURST</code> (40),
+        <code>TRADES_CONCURRENCY</code> (8),
+        <code>RETAIN_DAYS</code> (90),
+        <code>MIN_FREE_GB</code> (100 on backfill),
+        <code>TZ_NAME</code> (America/New_York).
+        Legacy <code>HEALTHCHECKS_PING_URL</code> is rejected.
+      </p>
+
+      <footer>
+        docs/knobs.html — data_ingest_infra handbook.
+        Index: index.html. Do not commit .env.
+      </footer>
+    </main>
+  </div>
+</body>
+</html>

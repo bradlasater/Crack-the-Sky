@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>data_ingest_infra — pricing</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="site.css">
+</head>
+<body id="top">
+  <a class="skip" href="#main">Skip to content</a>
+  <div class="shell">
+    <nav class="toc" aria-label="Handbook index">
+      <div class="toc-kicker">data_ingest_infra</div>
+      <div class="toc-title">System handbook</div>
+      <ol>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="repo-layout.html">Repo layout</a></li>
+        <li><a href="data-flow.html">Data flow</a></li>
+        <li>
+          <a href="ingest.html">Ingest</a>
+          <ol class="sub">
+            <li><a href="ingest.html#ingest-constraints">Massive / Polygon constraints</a></li>
+            <li><a href="ingest.html#ingest-jobs">Jobs that exist</a></li>
+            <li><a href="ingest.html#ingest-cron">NY cron</a></li>
+            <li><a href="ingest.html#ingest-session">Weekday session</a></li>
+            <li><a href="ingest.html#ingest-entitlements">Entitlements</a></li>
+          </ol>
+        </li>
+        <li><a href="marketdata.html">marketdata</a></li>
+        <li><a href="pricing.html" class="active">pricing</a></li>
+        <li><a href="warehouse-math.html">Warehouse → math</a></li>
+        <li><a href="canary.html">Daily canary</a></li>
+        <li><a href="conventions.html">Desk conventions</a></li>
+        <li><a href="not-built.html">Not built</a></li>
+        <li><a href="formula-stubs.html">Formula stubs</a></li>
+        <li><a href="knobs.html">Documented knobs</a></li>
+        <li class="toc-sep"></li>
+        <li><a href="box-operations.html">Box operations (off-repo)</a></li>
+      </ol>
+    </nav>
+
+    <main id="main">
+      <header class="doc">
+        <div>
+          <div class="kicker">data_ingest_infra</div>
+          <h1>pricing</h1>
+        </div>
+        <div class="meta"><a href="index.html">← overview</a></div>
+      </header>
+
+      <p>
+        Calculators. Not a surface, not an interpolator. Pass
+        <code>S, K, T, r, q</code> (or <code>F</code>) and <code>sigma</code>
+        explicitly.
+      </p>
+      <dl class="notes">
+        <dt>GreeksConventions</dt>
+        <dd>
+          Defaults: vega <strong>per 1.00 vol</strong>, theta <strong>per year</strong>
+          of calendar time, spot delta/gamma. Dual (∂/∂K) is always also
+          populated. Tests that read a Greek must name the convention.
+        </dd>
+        <dt>Named catalog</dt>
+        <dd>
+          price; 1st <code>delta, dual_delta, vega, theta, rho, rho_dividend</code>;
+          2nd <code>gamma, dual_gamma, vanna, volga, charm, veta, vera</code>;
+          3rd <code>speed, zomma, color, ultima</code>; elasticity.
+        </dd>
+        <dt>European vs American</dt>
+        <dd>
+          <code>Engine</code> protocol: <code>EuropeanBSM</code> closed-form;
+          <code>AmericanCRR</code> tree with bump-and-revalue Greeks.
+          Style comes from the contract (SPY American, SPX/SPXW European).
+        </dd>
+        <dt>IV invert</dt>
+        <dd>
+          Newton with bounds, Brent fallback. Price outside discounted
+          no-arbitrage bounds → <code>ValueError</code>.
+          <strong>Never returns NaN.</strong> European BSM only — there is no
+          American IV solver.
+        </dd>
+      </dl>
+
+      <footer>
+        docs/pricing.html — data_ingest_infra handbook.
+        Index: index.html. Do not commit .env.
+      </footer>
+    </main>
+  </div>
+</body>
+</html>

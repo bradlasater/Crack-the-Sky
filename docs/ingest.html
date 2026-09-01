@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>data_ingest_infra — ingest</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="site.css">
+</head>
+<body id="top">
+  <a class="skip" href="#main">Skip to content</a>
+  <div class="shell">
+    <nav class="toc" aria-label="Handbook index">
+      <div class="toc-kicker">data_ingest_infra</div>
+      <div class="toc-title">System handbook</div>
+      <ol>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="repo-layout.html">Repo layout</a></li>
+        <li><a href="data-flow.html">Data flow</a></li>
+        <li>
+          <a href="ingest.html" class="active">Ingest</a>
+          <ol class="sub">
+            <li><a href="ingest.html#ingest-constraints">Massive / Polygon constraints</a></li>
+            <li><a href="ingest.html#ingest-jobs">Jobs that exist</a></li>
+            <li><a href="ingest.html#ingest-cron">NY cron</a></li>
+            <li><a href="ingest.html#ingest-session">Weekday session</a></li>
+            <li><a href="ingest.html#ingest-entitlements">Entitlements</a></li>
+          </ol>
+        </li>
+        <li><a href="marketdata.html">marketdata</a></li>
+        <li><a href="pricing.html">pricing</a></li>
+        <li><a href="warehouse-math.html">Warehouse → math</a></li>
+        <li><a href="canary.html">Daily canary</a></li>
+        <li><a href="conventions.html">Desk conventions</a></li>
+        <li><a href="not-built.html">Not built</a></li>
+        <li><a href="formula-stubs.html">Formula stubs</a></li>
+        <li><a href="knobs.html">Documented knobs</a></li>
+        <li class="toc-sep"></li>
+        <li><a href="box-operations.html">Box operations (off-repo)</a></li>
+      </ol>
+    </nav>
+
+    <main id="main">
+      <header class="doc">
+        <div>
+          <div class="kicker">data_ingest_infra</div>
+          <h1>Ingest</h1>
+        </div>
+        <div class="meta"><a href="index.html">← overview</a></div>
+      </header>
+
+      <p>
+        Three pipes into one disk tree. Everything live is 15-minute delayed.
+        Cron is the scheduler; <code>flock</code> prevents overlap. Shared runner
+        is <code>ingest.common.cli.run_job</code> (settings, market gate, JSONL
+        logs, per-job Healthchecks <code>/start</code> and <code>/fail</code>).
+      </p>
+
+      <div class="diagram" aria-label="Ingest architecture">
+        <svg viewBox="0 0 980 420" xmlns="http://www.w3.org/2000/svg" role="img">
+          <title>Massive sources into cron jobs into /data/massive</title>
+          <defs>
+            <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#6a6458"/>
+            </marker>
+          </defs>
+          <rect x="20" y="28" width="200" height="64" fill="#161b20" stroke="#d08c44" stroke-width="1.2"/>
+          <text x="120" y="54" text-anchor="middle" fill="#d08c44" font-family="IBM Plex Mono, monospace" font-size="11">WS delayed</text>
+          <text x="120" y="72" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="11">wss://delayed.massive.com</text>
+          <rect x="20" y="118" width="200" height="64" fill="#161b20" stroke="#7aa3b0" stroke-width="1.2"/>
+          <text x="120" y="144" text-anchor="middle" fill="#7aa3b0" font-family="IBM Plex Mono, monospace" font-size="11">REST</text>
+          <text x="120" y="162" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="11">api.polygon.io</text>
+          <rect x="20" y="208" width="200" height="64" fill="#161b20" stroke="#c47d7d" stroke-width="1.2"/>
+          <text x="120" y="234" text-anchor="middle" fill="#c47d7d" font-family="IBM Plex Mono, monospace" font-size="11">S3 flat files</text>
+          <text x="120" y="252" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="11">files.massive.com / flatfiles</text>
+          <rect x="20" y="318" width="200" height="64" fill="#161b20" stroke="#2a3238"/>
+          <text x="120" y="344" text-anchor="middle" fill="#e8e4d9" font-family="IBM Plex Mono, monospace" font-size="11">cron (flock)</text>
+          <text x="120" y="362" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="11">TZ=America/New_York</text>
+          <rect x="320" y="24" width="280" height="272" fill="#161b20" stroke="#2a3238"/>
+          <text x="460" y="48" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Mono, monospace" font-size="10" letter-spacing="1.5">INGEST JOBS</text>
+          <text x="340" y="78" fill="#d08c44" font-family="IBM Plex Mono, monospace" font-size="12">ws_minute_bars</text>
+          <text x="340" y="104" fill="#7aa3b0" font-family="IBM Plex Mono, monospace" font-size="12">snapshot_sweep</text>
+          <text x="340" y="130" fill="#7aa3b0" font-family="IBM Plex Mono, monospace" font-size="12">trades_watchlist</text>
+          <text x="340" y="156" fill="#7aa3b0" font-family="IBM Plex Mono, monospace" font-size="12">contracts_sync</text>
+          <text x="340" y="182" fill="#7aa3b0" font-family="IBM Plex Mono, monospace" font-size="12">dividends_sync · holidays_sync</text>
+          <text x="340" y="208" fill="#7aa3b0" font-family="IBM Plex Mono, monospace" font-size="12">underlying_bars  (T-1)</text>
+          <text x="340" y="234" fill="#7aa3b0" font-family="IBM Plex Mono, monospace" font-size="12">grouped_daily · coverage_audit</text>
+          <text x="340" y="260" fill="#c47d7d" font-family="IBM Plex Mono, monospace" font-size="12">flatfile_pull → reconcile</text>
+          <text x="340" y="280" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="11">flat file overwrites WS minute bars</text>
+          <rect x="700" y="48" width="260" height="248" fill="#161b20" stroke="#2a3238"/>
+          <text x="830" y="76" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Mono, monospace" font-size="10" letter-spacing="1.5">/data/massive</text>
+          <text x="724" y="112" fill="#e8e4d9" font-family="IBM Plex Mono, monospace" font-size="13">raw/  dt=YYYY-MM-DD</text>
+          <text x="724" y="136" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="11">JSONL · csv.gz  verbatim</text>
+          <text x="724" y="172" fill="#e8e4d9" font-family="IBM Plex Mono, monospace" font-size="13">clean/  parquet</text>
+          <text x="724" y="196" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="11">schema-projected, src=ws|rest|flatfile</text>
+          <text x="724" y="232" fill="#e8e4d9" font-family="IBM Plex Mono, monospace" font-size="13">_meta/</text>
+          <text x="724" y="256" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="11">holidays · manifest · trade cursors · coverage</text>
+          <text x="724" y="280" fill="#e8e4d9" font-family="IBM Plex Mono, monospace" font-size="13">logs/</text>
+          <line x1="220" y1="60" x2="320" y2="78" stroke="#6a6458" stroke-width="1.2" marker-end="url(#arrow)"/>
+          <line x1="220" y1="150" x2="320" y2="156" stroke="#6a6458" stroke-width="1.2" marker-end="url(#arrow)"/>
+          <line x1="220" y1="240" x2="320" y2="260" stroke="#6a6458" stroke-width="1.2" marker-end="url(#arrow)"/>
+          <line x1="120" y1="318" x2="120" y2="272" stroke="#6a6458" stroke-width="1.2" marker-end="url(#arrow)"/>
+          <line x1="600" y1="160" x2="700" y2="160" stroke="#6a6458" stroke-width="1.2" marker-end="url(#arrow)"/>
+        </svg>
+        <div class="legend">
+          <span><i style="background:var(--copper)"></i>websocket</span>
+          <span><i style="background:var(--rest)"></i>REST</span>
+          <span><i style="background:var(--s3)"></i>S3 flat file</span>
+        </div>
+      </div>
+
+      <h3 id="ingest-constraints">Massive / Polygon constraints that affect design</h3>
+      <ul>
+        <li>One delayed-options websocket slot. Wildcards <code>AM.O:SPY*</code> ACK and deliver nothing; subscribe explicit <code>AM.O:&lt;ticker&gt;</code> in chunks of 3,000.</li>
+        <li>No <code>X-RateLimit-*</code> headers; 429s happen under burst. Shared token bucket (<code>MASSIVE_MAX_RPS</code> default 40) plus retries.</li>
+        <li>Auth is <code>?apiKey=</code>; pagination <code>next_url</code> omits the key — the client re-appends it.</li>
+        <li>SPXW weeklies list under <code>underlying_ticker=SPX</code> / snapshot path <code>I:SPX</code>. Querying SPXW as an underlying returns 0 rows.</li>
+        <li>Same-day SPY equity minute aggs 403 → <code>underlying_bars</code> is T-1. Intraday SPY lives on the option snapshot’s <code>underlying_price</code>.</li>
+        <li>I:SPX / I:VIX index levels 403 everywhere. SPX spot is recovered from put-call parity on the chain → <code>clean/forwards</code>.</li>
+        <li>Option NBBO REST and <code>quotes_v1</code> flat file are 403. No bid/ask, no mid. Market price is last trade else day close.</li>
+        <li>Timestamps stored exactly as delivered (ns/ms epoch, UTC). Never converted in ingest.</li>
+      </ul>
+
+      <h3 id="ingest-jobs">Jobs that exist</h3>
+      <p>
+        Scheduled jobs plus one deliberate non-cron tool. Cadence is Eastern
+        time from <code>deploy/crontab</code>.
+      </p>
+      <table>
+        <thead>
+          <tr><th>Job</th><th>Cadence (ET)</th><th>Days</th><th>What it writes</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="job">contracts_sync<br><span class="tag rest">rest</span></td>
+            <td class="when">08:00 and 16:30</td>
+            <td>Mon–Fri</td>
+            <td>Option contract universe for SPY and SPX (SPXW listed under SPX). Raw JSONL + clean <code>contracts</code> parquet.</td>
+          </tr>
+          <tr>
+            <td class="job">dividends_sync<br><span class="tag rest">rest</span></td>
+            <td class="when">08:00</td>
+            <td>Mon–Fri</td>
+            <td>SPY dividends and splits. Clean <code>dividends</code> / <code>splits</code>.</td>
+          </tr>
+          <tr>
+            <td class="job">ws_minute_bars<br><span class="tag ws">ws</span></td>
+            <td class="when">starts 09:25, holds until ~16:35</td>
+            <td>Mon–Fri</td>
+            <td>Delayed option minute bars (AM events). Hourly JSONL under <code>raw/option_minute_bars_ws</code>. Logs <code>ws_stats</code> every 5 min. Zero rows at window end fails the Healthcheck.</td>
+          </tr>
+          <tr>
+            <td class="job">snapshot_sweep<br><span class="tag rest">rest</span></td>
+            <td class="when">every 1 min, 09:30–16:30 · 09:05 pre-open</td>
+            <td>Mon–Fri</td>
+            <td>Full-chain snapshots for SPY and I:SPX, concurrent. Clean <code>option_snapshots</code> (IV/greeks/OI populated on this tier) and <code>clean/forwards</code> (parity). Raw JSONL off unless <code>--raw</code>.</td>
+          </tr>
+          <tr>
+            <td class="job">trades_watchlist<br><span class="tag rest">rest</span></td>
+            <td class="when">every 5 min, 09:30–16:30</td>
+            <td>Mon–Fri</td>
+            <td>Incremental trades, 7–45 DTE / ±15% moneyness, per-underlying reference (SPX is not banded on SPY). Cursor in <code>_meta/trades_cursor.json</code>.</td>
+          </tr>
+          <tr>
+            <td class="job">snapshot_sweep --eod<br><span class="tag rest">rest</span></td>
+            <td class="when">16:35</td>
+            <td>Mon–Fri</td>
+            <td>Same snapshot job, tagged EOD in filenames and logs.</td>
+          </tr>
+          <tr>
+            <td class="job">pricing.drift_check</td>
+            <td class="when">17:00</td>
+            <td>Mon–Fri</td>
+            <td>Identity canary. See <a href="canary.html">Daily canary</a>. Not an ingest job; shares Healthchecks slug pattern <code>massive-drift-check</code>.</td>
+          </tr>
+          <tr>
+            <td class="job">underlying_bars --prev-trading-day<br><span class="tag rest">rest</span></td>
+            <td class="when">08:05</td>
+            <td>Tue–Sat</td>
+            <td>SPY 1-minute equity bars for the previous session only. Clean <code>underlying_minute_bars</code>.</td>
+          </tr>
+          <tr>
+            <td class="job">grouped_daily<br><span class="tag rest">rest</span></td>
+            <td class="when">08:10 · default date = T-1</td>
+            <td>Tue–Sat</td>
+            <td>Whole-market grouped daily; keeps SPY by default. Clean <code>underlying_day_bars</code> <span class="badge writeonly">write-only</span>.</td>
+          </tr>
+          <tr>
+            <td class="job">flatfile_pull<br><span class="tag s3">s3</span></td>
+            <td class="when">11:05 · default date = T-1</td>
+            <td>Tue–Sat</td>
+            <td>OPRA trades / minute aggs / day aggs csv.gz, filtered to roots SPY / SPX / SPXW (not SPYL…). Manifest <code>_meta/flatfile_manifest.json</code>.</td>
+          </tr>
+          <tr>
+            <td class="job">reconcile<br><span class="tag s3">s3</span></td>
+            <td class="when">11:30 · default date = T-1</td>
+            <td>Tue–Sat</td>
+            <td>WS vs flat-file minute bars; rewrites clean <code>option_minute_bars</code> from the flat file. Flat file always wins.</td>
+          </tr>
+          <tr>
+            <td class="job">coverage_audit</td>
+            <td class="when">12:30 · default date = T-1</td>
+            <td>Tue–Sat</td>
+            <td>Reports on the <em>absence</em> of a job: sweep counts vs <code>market_gate</code> schedule, largest gap, manifest, non-empty partitions, WS output, per-root ticker counts. Exit 1 → Healthchecks <code>/fail</code>.</td>
+          </tr>
+          <tr>
+            <td class="job">holidays_sync<br><span class="tag rest">rest</span></td>
+            <td class="when">07:00</td>
+            <td>Sunday</td>
+            <td>Rewrites <code>_meta/holidays.json</code> from <code>/v1/marketstatus/upcoming</code>. Code injects <code>--force</code> so the weekday gate does not skip Sunday.</td>
+          </tr>
+          <tr>
+            <td class="job">contracts_sync --expired<br><span class="tag rest">rest</span></td>
+            <td class="when">09:00</td>
+            <td>Saturday</td>
+            <td>Expired-contract pass into <code>contracts_expired</code> <span class="badge writeonly">write-only</span>.</td>
+          </tr>
+          <tr>
+            <td class="job">prune_raw.sh --apply</td>
+            <td class="when">03:15 on the 1st</td>
+            <td>Monthly</td>
+            <td>Drops raw payloads older than <code>RETAIN_DAYS</code> (90) for rebuildable datasets. Never touches <code>clean/</code>, snapshots, flatfiles, or reference. No Healthcheck (bash, not <code>ingest.jobs</code>).</td>
+          </tr>
+          <tr>
+            <td class="job">eod_dayaggs_rest</td>
+            <td class="when">not scheduled</td>
+            <td>—</td>
+            <td>Manual only. ~42k sequential REST calls for what <code>day_aggs_v1</code> delivers in one file the next morning.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p>On-demand: <code>python -m ingest.entitlements</code>, <code>scripts/backfill.sh</code>, <code>scripts/repair.sh</code>, <code>python -m pricing.from_market</code>.</p>
+
+      <h3 id="ingest-cron">NY cron</h3>
+      <p>
+        Source of truth: <code>deploy/crontab</code>. <code>TZ=America/New_York</code>.
+        Cron does not expand <code>~</code> — rewrite the literal home path before
+        <code>crontab deploy/crontab</code>. <code>MAILTO=""</code> in the checked-in
+        file (set a mailbox on the box if you want cron mail on nonzero exits).
+        What is actually installed on the box, and the drift alarm that keeps it
+        honest: <a href="box-operations.html">box operations</a>.
+      </p>
+      <p>
+        Healthchecks: one check per job, slug <code>massive-&lt;job&gt;</code>
+        (underscores → hyphens). Ping key in <code>.env</code>; a leftover
+        <code>HEALTHCHECKS_PING_URL</code> without a ping key is rejected at
+        <code>Settings.load</code> (exit 2). Setup script
+        <code>scripts/setup_healthchecks.py</code> must match crontab job names
+        (CI asserts that).
+      </p>
+
+      <h3 id="ingest-session">Weekday session, Eastern time</h3>
+      <p>
+        Cash hours 09:30–16:00 ET. Websocket capture 09:25–16:35 ET (20 minutes
+        past the cash close). Bars are wall-clock occupancy, not CPU.
+      </p>
+      <div class="timeline-wrap">
+        <div class="day-label">Mon–Fri &nbsp; 07:00 — 17:00 ET</div>
+        <div class="hours">
+          <span>07</span><span>08</span><span>09</span><span>10</span><span>11</span>
+          <span>12</span><span>13</span><span>14</span><span>15</span><span>16</span>
+        </div>
+        <div class="row">
+          <div class="name">contracts_sync</div>
+          <div class="track">
+            <span class="bar ref" style="left:10%; width:4%"></span>
+            <span class="bar ref" style="left:95%; width:4%"></span>
+          </div>
+        </div>
+        <div class="row">
+          <div class="name">dividends_sync</div>
+          <div class="track"><span class="bar ref" style="left:10%; width:4%"></span></div>
+        </div>
+        <div class="row">
+          <div class="name">ws_minute_bars</div>
+          <div class="track"><span class="bar ws" style="left:24.2%; width:71.7%"></span></div>
+        </div>
+        <div class="row">
+          <div class="name">snapshot_sweep</div>
+          <div class="track"><span class="bar rest" style="left:25%; width:70%"></span></div>
+        </div>
+        <div class="row">
+          <div class="name">trades_watchlist</div>
+          <div class="track"><span class="bar rest" style="left:25.3%; width:68%"></span></div>
+        </div>
+        <div class="row">
+          <div class="name">snapshot --eod</div>
+          <div class="track"><span class="bar rest" style="left:95.8%; width:3%"></span></div>
+        </div>
+        <div class="row">
+          <div class="name">drift_check</div>
+          <div class="track"><span class="bar ref" style="left:97%; width:3%"></span></div>
+        </div>
+      </div>
+
+      <h3 id="ingest-entitlements">Entitlements</h3>
+      <p>
+        Probed, not assumed. Re-check with <code>python -m ingest.entitlements</code>
+        (exit 1 on drift in either direction: something stopped working, or
+        something newly available that no job captures). This absorbed the
+        former <code>ingest.smoke</code>, so it is also the post-bootstrap and
+        post-credential-change check.
+      </p>
+      <p>
+        Selected job-critical response bodies are shape-checked, so an
+        endpoint covered by a validator that stops returning required fields
+        counts as drift. The contract probe picks a fresh liquid contract each
+        time rather than naming one, because a fixed ticker returns an
+        entitled-but-empty 200 once it expires — indistinguishable from a
+        revoked entitlement. Missing or placeholder S3 keys
+        <strong>SKIP</strong> (exit 0) rather than FAIL, so a half-configured
+        box reports "not set up yet" instead of a verdict about the plan.
+      </p>
+      <dl class="notes">
+        <dt>Entitled</dt>
+        <dd>Contracts (incl. expired), full-chain snapshots with greeks/IV/OI, option trades, option aggs, T-1 equity minutes, grouped daily, dividends/splits, market status, delayed options WS, <code>trades_v1</code> / <code>minute_aggs_v1</code> / <code>day_aggs_v1</code>.</dd>
+        <dt>Not entitled</dt>
+        <dd>Option NBBO (REST and <code>quotes_v1</code>), I:SPX / I:VIX (and other I:* index levels), equity trades/quotes, <code>us_stocks_sip</code>, same-day equity aggs, <code>/v1/indicators/*</code>.</dd>
+      </dl>
+
+      <footer>
+        docs/ingest.html — data_ingest_infra handbook.
+        Index: index.html. Do not commit .env.
+      </footer>
+    </main>
+  </div>
+</body>
+</html>

@@ -110,12 +110,13 @@ def _consistent_euro_row(
     *,
     ticker: str,
     cp: str,
-    poison_gamma: float | None = None,
+    poison_t: float | None = None,
     poison_market: float | None = None,
 ) -> dict:
     S, K, T, rate, q, sig = 7700.0, 7700.0, 0.05, 0.04, 0.0, 0.16
     g = raw_greeks(S, K, T, rate, sig, cp, q=q)
     mkt = float(bsm_price(S, K, T, rate, sig, cp, q=q))
+    row_t = poison_t if poison_t is not None else T
     return {
         "ticker": ticker,
         "root": "SPXW",
@@ -124,14 +125,14 @@ def _consistent_euro_row(
         "strike": K,
         "F": K,
         "S": S,
-        "T": T,
+        "T": row_t,
         "r": rate,
         "q": q,
         "exercise_style": "european",
         "greeks_engine": "european_bsm",
         "own_iv": sig,
         "own_delta": float(g["delta"]),
-        "own_gamma": poison_gamma if poison_gamma is not None else float(g["gamma"]),
+        "own_gamma": float(g["gamma"]),
         "own_vega": float(g["vega"]),
         "own_theta": float(g["theta"]),
         "market_price": poison_market if poison_market is not None else mkt,
@@ -242,7 +243,10 @@ def test_identities_broken_poisoned_price_exit_1(
 
 
 def test_identities_broken_poisoned_gamma() -> None:
-    call = _consistent_euro_row(ticker=SPXW, cp="call", poison_gamma=0.9)
+    # Poison T for the call to create a genuine BSM-gamma difference vs the put.
+    # At T≈0 gamma spikes while the put's T=0.05 gamma is much lower; the pair
+    # check must catch the discrepancy now that it recomputes at shared sigma.
+    call = _consistent_euro_row(ticker=SPXW, cp="call", poison_t=0.001)
     put = _consistent_euro_row(ticker=SPXW_PUT, cp="put")
     table = pa.Table.from_pylist([call, put])
     report = evaluate_drift(table, thresholds=LOOSE, dt=DT, asof_ns=ASOF_NS, r=R)

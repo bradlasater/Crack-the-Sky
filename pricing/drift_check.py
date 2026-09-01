@@ -58,6 +58,7 @@ from ingest.common.market_gate import require_trading_day, today_et
 from marketdata.catalog import CatalogError, SchemaError
 from marketdata.opra import ALLOWED_ROOTS
 from marketdata.validate import narrow_roots
+from pricing.bsm import greeks as bsm_greeks
 from pricing.bsm import price as bsm_price
 from pricing.conventions import CALENDAR_DAYS_PER_YEAR
 from pricing.from_market import (
@@ -286,6 +287,34 @@ def bsm_reprice(row: Mapping[str, Any]) -> float | None:
         return None
 
 
+def _bsm_gamma_vega(
+    row: Mapping[str, Any], sigma: float
+) -> tuple[float, float] | None:
+    """BSM gamma and vega at *sigma* for *row*'s market inputs.
+
+    Returns ``None`` when any required input is missing or non-positive.
+    Gamma and vega are independent of the call/put flag, so the same value
+    is returned regardless of which side the row represents.
+    """
+    spot = _opt(row.get("S"))
+    strike = _opt(row.get("strike"))
+    tte = _opt(row.get("T"))
+    rate = _opt(row.get("r"))
+    cp = _cp_side(row)
+    if None in (spot, strike, tte, rate, cp):
+        return None
+    if spot <= 0 or strike <= 0 or tte <= 0 or sigma <= 0:
+        return None
+    q = _opt(row.get("q"))
+    if q is None:
+        q = 0.0
+    try:
+        g = bsm_greeks(spot, strike, tte, rate, sigma, cp, q=q)
+        return float(g.gamma), float(g.vega)
+    except (ValueError, KeyError):
+        return None
+
+
 def _pcp_rhs(row: Mapping[str, Any]) -> float | None:
     """``S e^{-qT} - K e^{-rT}`` (put-call parity right-hand side)."""
     spot = _opt(row.get("S"))
@@ -330,7 +359,15 @@ def evaluate_drift(
             continue
         n_euro_pairs += 1
         hit = False
-        gamma_c, gamma_p = _own(call, "gamma"), _own(put, "gamma")
+        iv_c, iv_p = _own(call, "iv"), _own(put, "iv")
+        if iv_c is not None and iv_p is not None:
+            sigma_shared = (iv_c + iv_p) / 2.0
+            gv_c = _bsm_gamma_vega(call, sigma_shared)
+            gv_p = _bsm_gamma_vega(put, sigma_shared)
+        else:
+            gv_c = gv_p = None
+        gamma_c = gv_c[0] if gv_c is not None else None
+        gamma_p = gv_p[0] if gv_p is not None else None
         if (
             gamma_c is not None
             and gamma_p is not None
@@ -340,7 +377,8 @@ def evaluate_drift(
         ):
             beyond_by_identity["gamma_pair"] += 1
             hit = True
-        vega_c, vega_p = _own(call, "vega"), _own(put, "vega")
+        vega_c = gv_c[1] if gv_c is not None else None
+        vega_p = gv_p[1] if gv_p is not None else None
         if (
             vega_c is not None
             and vega_p is not None

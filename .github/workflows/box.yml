@@ -19,9 +19,13 @@ name: box
 #     EnvironmentFile=/home/brad-lasater/data_ingest_infra/.env
 
 on:
+  # main pushes + schedule + manual only -- never pull_request. This runner is
+  # credentialed (MASSIVE_API_KEY, S3 keys in the service environment, real
+  # /data/massive), so it must only execute code that has already been
+  # reviewed and merged (the ruleset routes everything through a PR with green
+  # ci.yml). PR/branch validation needs no credentials and stays in ci.yml.
   push:
-    branches: ["**"]
-  pull_request:
+    branches: [main]
   schedule:
     - cron: "17 22 * * *" # daily, after the 16:35 ET EOD sweep
   workflow_dispatch:

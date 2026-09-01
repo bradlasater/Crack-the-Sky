@@ -497,6 +497,45 @@
     </tbody>
   </table>
 
+  <h2>Market data + Greeks (sibling packages)</h2>
+  <p>
+    Ingest jobs are unchanged. Two sibling packages sit at repo root:
+    <code>marketdata/</code> (typed parquet I/O) and <code>pricing/</code>
+    (calculators, not a surface). Vendor snapshot <code>greeks_*</code> and
+    <code>implied_volatility</code> are diagnostics only — every Greek we
+    use is computed here.
+  </p>
+  <dl class="notes">
+    <dt>marketdata</dt>
+    <dd>
+      OPRA parse of <code>O:{root}{YYMMDD}{C|P}{strike}</code> with allowlist
+      <code>SPY, SPX, SPXW</code> (rejects SPYL/SPXS/SPYG).
+      <code>Contract</code> carries exercise style (American SPY, European
+      SPX/SPXW) and multiplier 100.
+      Catalog lists <code>clean/{dataset}/dt=*</code> for every
+      <code>SCHEMAS</code> key; extra or missing parquet columns fail.
+      As-of reads take the last snapshot file at or before <code>asof_ns</code>
+      (never the whole partition).
+      <code>python -m marketdata.validate</code> exits nonzero on foreign
+      roots, mixed underlyings in a SPY-only query, required-nulls, or an
+      empty allowlisted root.
+    </dd>
+    <dt>pricing</dt>
+    <dd>
+      Black–Scholes–Merton with continuous <code>r</code>, <code>q</code>
+      (or a forward <code>F = S e^{(r-q)T}</code>).
+      <code>GreeksConventions</code> defaults: vega <strong>per 1.00 vol</strong>,
+      theta <strong>per year</strong> of calendar time, spot delta/gamma
+      (dual is also populated).
+      Catalog: price; 1st <code>delta, dual_delta, vega, theta, rho, rho_dividend</code>;
+      2nd <code>gamma, dual_gamma, vanna, volga/vomma, charm, veta, vera</code>;
+      3rd <code>speed, zomma, color, ultima</code>; elasticity (<code>lambda</code>).
+      IV invert is Newton + Brent, <code>ValueError</code> never NaN.
+      <code>Engine</code> protocol: <code>EuropeanBSM</code> analytic,
+      <code>AmericanCRR</code> bump-and-revalue. No surface, no interpolator.
+    </dd>
+  </dl>
+
   <footer>
     Source of schedule: deploy/crontab. Jobs: ingest/jobs/*.py. Do not commit .env.
   </footer>

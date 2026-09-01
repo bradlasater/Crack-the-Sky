@@ -11,9 +11,10 @@ open interest and the underlying price exist only at the moment they are
 swept. That is why this job runs at the highest cadence and why the other
 REST jobs yield API budget to it.
 
-Chains are swept concurrently: SPY (~55 pages, ~7s) and I:SPX (~115 pages,
-~13s) are independent, so wall time is the slower chain rather than the sum,
-which is what makes a 1-minute schedule fit. Pagination *within* a chain
+Chains are swept concurrently: SPY (~55 pages, ~7s), I:SPX (~115 pages, ~13s)
+and VIX (~7 pages, ~1s) are independent, so wall time is the slowest chain
+rather than the sum, which is what makes a 1-minute schedule fit. VIX is
+almost free next to the other two. Pagination *within* a chain
 stays sequential because ``next_url`` is a chain.
 
 Raw JSONL is off by default (``--raw`` re-enables it): at a 1-minute cadence
@@ -37,7 +38,7 @@ from ingest.common.logging_utils import JsonlLogger
 from ingest.jobs import forward_from_parity, parse_underlyings, run_date_from_args, strip_flag
 
 JOB = "snapshot_sweep"
-DEFAULT_UNDERLYINGS = ["SPY", "I:SPX"]
+DEFAULT_UNDERLYINGS = ["SPY", "I:SPX", "VIX"]
 SNAPSHOT_PATH = "/v3/snapshot/options"
 
 

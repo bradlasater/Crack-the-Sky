@@ -107,7 +107,11 @@ def test_settlement_times_are_per_root() -> None:
     assert settlement_time_et("SPY") == (16, 0)
     assert settlement_time_et("SPXW") == (16, 0)
     assert settlement_time_et("SPX") == (9, 30)      # AM settled
-    assert set(SETTLEMENT_ET) == {"SPY", "SPX", "SPXW"}
+    # VIX options settle to the SOQ at the Wednesday OPEN -- both series are
+    # AM settled, unlike the SPX/SPXW split.
+    assert settlement_time_et("VIX") == (9, 30)
+    assert settlement_time_et("VIXW") == (9, 30)
+    assert set(SETTLEMENT_ET) == {"SPY", "SPX", "SPXW", "VIX", "VIXW"}
 
 
 def test_expiry_instant_is_settlement_not_utc_midnight() -> None:

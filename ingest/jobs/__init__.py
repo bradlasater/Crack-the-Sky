@@ -40,8 +40,9 @@ DAY_MS = 86_400_000
 
 # OPRA symbology is O:{root}{YYMMDD}{C|P}{strike*1000}; the root is delimited
 # by the expiry digits. Anchoring on them is what separates O:SPXW... (an SPX
-# weekly, ~98% of all SPX option trades) from O:SPXL... (a Direxion 3x ETF).
-OPTION_ROOTS = ("SPY", "SPX", "SPXW")
+# weekly, ~98% of all SPX option trades) from O:SPXL... (a Direxion 3x ETF),
+# and O:VIXW... (a VIX weekly) from O:VIXY... (the ProShares VIX ETF).
+OPTION_ROOTS = ("SPY", "SPX", "SPXW", "VIX", "VIXW")
 _OPTION_TICKER_RE = re.compile(r"^O:(" + "|".join(OPTION_ROOTS) + r")\d{6}[CP]\d+$")
 
 
@@ -253,6 +254,14 @@ def forward_from_parity(
     Validated against live data on 2026-08-31: SPX expiries resolved to
     7684-7698 across the term structure, versus 7673.8 for the SPY close x10
     proxy (~0.2% low, consistent with dividend accrual).
+
+    **For VIX this returns the VX future, not a spot VIX, and that is
+    correct.** VIX options are options on the VIX future of their own expiry,
+    so the per-expiry parity forward *is* that future -- which is the object a
+    term-structure model wants. Do not "fix" this by discounting it toward a
+    spot VIX; the two are different quantities and the vendor does not supply
+    the index level on this tier anyway. Measured 2026-09-01, the curve came
+    out in contango: 15.26 / 16.28 / 16.58 / 17.23 / 18.16 / 18.47.
 
     Returns records shaped for the ``forwards`` dataset, sorted by expiry.
     """

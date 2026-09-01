@@ -17,6 +17,7 @@ concurrent GETs, and the bucket serialises admission.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Iterator
 from typing import Any
@@ -27,10 +28,23 @@ import requests
 from ingest.common.config import Settings
 from ingest.common.ratelimit import TokenBucket, default_bucket
 
+
+def redact(url: str) -> str:
+    """Strip the apiKey from a URL before it reaches a log or an exception.
+
+    Auth is a query parameter on every request, so any message that echoes the
+    URL -- a retry warning, an exhausted-retry HTTPError, a 403 entitlement
+    message -- writes the live credential into the run log. Observed: a 429 on
+    /fed/v1 put the key into two files under logs/.
+    """
+    return _APIKEY_RE.sub(r"\1***", url)
+
+
 MAX_TRIES = 6
 BACKOFF_BASE_S = 1.0
 TIMEOUT_S = 30
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+_APIKEY_RE = re.compile(r"(apiKey=)[^&\s]*", re.IGNORECASE)
 
 log = logging.getLogger(__name__)
 
@@ -91,7 +105,7 @@ class MassiveClient:
             if resp.status_code == 403:
                 raise PermissionError(self._entitlement_message(url, resp))
             if resp.status_code in RETRYABLE_STATUS:
-                last_exc = requests.HTTPError(f"HTTP {resp.status_code} for {url}")
+                last_exc = requests.HTTPError(f"HTTP {resp.status_code} for {redact(url)}")
                 self._sleep(attempt, f"HTTP {resp.status_code}")
                 continue
             resp.raise_for_status()
@@ -99,7 +113,7 @@ class MassiveClient:
         assert last_exc is not None
         raise last_exc
 
-    def _sleep(self, attempt: int, why: str) -> None:
+    def _sleep(self, attempt: int, why: str) -> None:  # noqa: D401
         """Exponential backoff before retry ``attempt`` (base 1s, x2)."""
         delay = BACKOFF_BASE_S * (2 ** (attempt - 1))
         log.warning("retry %d/%d in %.1fs (%s)", attempt, MAX_TRIES, delay, why)
@@ -114,7 +128,7 @@ class MassiveClient:
         except ValueError:
             status, detail = "?", resp.text[:200]
         return (
-            f"403 NOT_AUTHORIZED from {url} (status={status} {detail}). "
+            f"403 NOT_AUTHORIZED from {redact(url)} (status={status} {detail}). "
             "Your Massive.com plan tier is not entitled to this endpoint "
             "(e.g. quotes / indices / equity trades are above the current tier)."
         )

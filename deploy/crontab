@@ -70,6 +70,9 @@ LOG=/data/massive/logs/cron.log
 # --- underlying ------------------------------------------------------------
 05 08 * * 2-6    cd $REPO && flock -n /tmp/massive-underlying_bars.lock $PY -m ingest.jobs.underlying_bars --prev-trading-day >> $LOG 2>&1
 10 08 * * 2-6    cd $REPO && flock -n /tmp/massive-grouped_daily.lock $PY -m ingest.jobs.grouped_daily >> $LOG 2>&1
+# Treasury curve: the discount rate every IV inversion uses. 2 requests.
+# History is already walked back to 1962; `--full` resumes if that changes.
+20 08 * * 2-6    cd $REPO && flock -n /tmp/massive-rates_sync.lock $PY -m ingest.jobs.rates_sync >> $LOG 2>&1
 
 # --- T+1 flat files: the authoritative record ------------------------------
 05 11 * * 2-6    cd $REPO && flock -n /tmp/massive-flatfile_pull.lock $PY -m ingest.jobs.flatfile_pull >> $LOG 2>&1

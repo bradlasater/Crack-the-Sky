@@ -30,6 +30,11 @@ PROBES: list[tuple[str, str, str]] = [
     ("reference/contracts",   "/v3/reference/options/contracts?underlying_ticker=SPY&limit=1", ENTITLED),
     ("snapshot/options SPY",  "/v3/snapshot/options/SPY?limit=1", ENTITLED),
     ("snapshot/options SPX",  "/v3/snapshot/options/I:SPX?limit=1", ENTITLED),
+    # VIX options are entitled even though the VIX index is not; the chain is
+    # what the VX term structure is recovered from via put-call parity.
+    ("snapshot/options VIX",  "/v3/snapshot/options/VIX?limit=1", ENTITLED),
+    ("fed/treasury-yields",   "/fed/v1/treasury-yields?limit=1", ENTITLED),
+    ("fed/inflation",         "/fed/v1/inflation?limit=1", ENTITLED),
     ("trades/option",         "/v3/trades/O:SPY260918C00770000?limit=1", ENTITLED),
     ("aggs/option minute T-1", "/v2/aggs/ticker/O:SPY260918C00770000/range/1/minute/{d}/{d}?limit=1", ENTITLED),
     ("aggs/equity minute T-1", "/v2/aggs/ticker/SPY/range/1/minute/{d}/{d}?limit=1", ENTITLED),

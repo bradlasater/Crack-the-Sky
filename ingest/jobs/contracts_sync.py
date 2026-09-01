@@ -33,7 +33,7 @@ from ingest.jobs import (
 JOB = "contracts_sync"
 # SPXW is deliberately NOT in the default: its endpoint returns 0 rows
 # (verified live) because SPXW weeklies are listed under the SPX underlying.
-DEFAULT_UNDERLYINGS = ["SPY", "SPX"]
+DEFAULT_UNDERLYINGS = ["SPY", "SPX", "VIX"]
 CONTRACTS_PATH = "/v3/reference/options/contracts"
 
 

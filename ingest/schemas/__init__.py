@@ -1,4 +1,4 @@
-"""PyArrow schemas and ClickHouse DDL for every landed dataset.
+"""PyArrow schemas for every landed dataset.
 
 Conventions (per SPEC):
   * ticker / contract fields      -> ``pa.string()``
@@ -158,6 +158,34 @@ def _build_schemas() -> dict[str, Any]:
         pa.field("transactions", pa.int64()),
     ]
 
+    # US Treasury par yield curve, from /fed/v1/treasury-yields. History goes
+    # back to 1962-01-02. This is the discount curve every IV inversion needs;
+    # before it existed, r was hardcoded to 0.04 everywhere.
+    treasury_yield_fields = [
+        pa.field("date", pa.string()),
+        pa.field("yield_1_month", pa.float64()),
+        pa.field("yield_3_month", pa.float64()),
+        pa.field("yield_6_month", pa.float64()),
+        pa.field("yield_1_year", pa.float64()),
+        pa.field("yield_2_year", pa.float64()),
+        pa.field("yield_3_year", pa.float64()),
+        pa.field("yield_5_year", pa.float64()),
+        pa.field("yield_7_year", pa.float64()),
+        pa.field("yield_10_year", pa.float64()),
+        pa.field("yield_20_year", pa.float64()),
+        pa.field("yield_30_year", pa.float64()),
+    ]
+
+    # /fed/v1/inflation: CPI and PCE levels (indices, not rates).
+    inflation_fields = [
+        pa.field("date", pa.string()),
+        pa.field("cpi", pa.float64()),
+        pa.field("cpi_core", pa.float64()),
+        pa.field("pce", pa.float64()),
+        pa.field("pce_core", pa.float64()),
+        pa.field("pce_spending", pa.float64()),
+    ]
+
     dividend_fields = [
         pa.field("ticker", pa.string()),
         pa.field("dividend_id", pa.string()),
@@ -206,6 +234,8 @@ def _build_schemas() -> dict[str, Any]:
         "option_trades": pa.schema(trade_fields),
         "underlying_minute_bars": pa.schema(underlying_bar_fields),
         "underlying_day_bars": pa.schema(underlying_day_bar_fields),
+        "treasury_yields": pa.schema(treasury_yield_fields),
+        "inflation": pa.schema(inflation_fields),
         "dividends": pa.schema(dividend_fields),
         "splits": pa.schema(split_fields),
     }

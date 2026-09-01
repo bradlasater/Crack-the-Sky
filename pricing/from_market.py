@@ -18,6 +18,12 @@ Two things here are load-bearing on this data feed:
   for AM-settled SPX (:data:`marketdata.opra.SETTLEMENT_ET`). Using the expiry
   *date* at UTC midnight is 20:00 ET the day before, understating T at every
   tenor and biasing inverted IV by ~108bp at 7 DTE.
+* **The discount rate comes from the landed Treasury curve** when the caller
+  passes ``r=None``, interpolated to the contract's own maturity
+  (:mod:`pricing.rates`). A flat 4% against a real 3.84% short end is a small
+  but one-directional error in every inverted IV -- 2.7bp at 7 DTE rising to
+  6.9bp at 45 DTE. Passing an explicit ``r`` still wins, so a canary can pin a
+  rate deliberately.
 * **SPX has no spot.** The index level is not entitled on this tier and the
   snapshot carries ``underlying_price = null`` for the whole SPX chain (~68% of
   the universe; SPXW alone is ~98% of SPX trade volume). Pass the per-expiry
@@ -75,6 +81,7 @@ from pricing.conventions import (
 )
 from pricing.engine import AmericanCRR, Engine, EuropeanBSM
 from pricing.iv import implied_vol as invert_iv
+from pricing.rates import RateCurveError, rate_for
 
 ET = ZoneInfo("America/New_York")
 
@@ -157,25 +164,48 @@ def year_fraction(contract: Contract, asof_ns: int, *, days: int = 365) -> float
     return t
 
 
+def resolve_r(quote: Quote, r: float | None, T: float) -> float:
+    """Explicit ``r`` if given, else the curve for this quote's date and T.
+
+    Fails loudly when the curve is unavailable: a silently substituted default
+    rate is invisible in the output and quietly wrong in every downstream IV.
+    """
+    if r is not None:
+        return float(r)
+    if quote.asof_ns is None:
+        raise ValueError("cannot resolve r: quote has no asof_ns")
+    asof = datetime.fromtimestamp(quote.asof_ns / 1e9, tz=UTC).astimezone(ET).date()
+    try:
+        return rate_for(asof, T)
+    except RateCurveError as exc:
+        raise ValueError(
+            f"no Treasury curve at or before {asof} to price "
+            f"{quote.contract.ticker or quote.contract.root}; run "
+            "`python -m ingest.jobs.rates_sync` or pass r= explicitly"
+        ) from exc
+
+
 def price_quote(
     quote: Quote,
     *,
-    r: float,
+    r: float | None = None,
     sigma: float,
     q: float | None = None,
     forward: Forward | None = None,
     engine: Engine | None = None,
 ) -> float:
     """Price using quote.underlying_price and contract fields — not vendor IV."""
-    S, T, cp, F = _spot_t_cp(quote, forward, r)
+    T = year_fraction(quote.contract, quote.asof_ns)
+    rate = resolve_r(quote, r, T)
+    S, T, cp, F = _spot_t_cp(quote, forward, rate)
     eng = engine or engine_for(quote.contract)
-    return float(eng.price(S, quote.contract.strike, T, r, sigma, cp, q=q, F=F))
+    return float(eng.price(S, quote.contract.strike, T, rate, sigma, cp, q=q, F=F))
 
 
 def greeks_quote(
     quote: Quote,
     *,
-    r: float,
+    r: float | None = None,
     sigma: float,
     q: float | None = None,
     forward: Forward | None = None,
@@ -183,15 +213,19 @@ def greeks_quote(
     conventions: GreeksConventions = DEFAULT_CONVENTIONS,
 ) -> GreeksCatalog:
     """Greeks from market spot and our σ. Vendor greeks on the quote are ignored."""
-    S, T, cp, F = _spot_t_cp(quote, forward, r)
+    T = year_fraction(quote.contract, quote.asof_ns)
+    rate = resolve_r(quote, r, T)
+    S, T, cp, F = _spot_t_cp(quote, forward, rate)
     eng = engine or engine_for(quote.contract)
-    return eng.greeks(S, quote.contract.strike, T, r, sigma, cp, q=q, F=F, conventions=conventions)
+    return eng.greeks(
+        S, quote.contract.strike, T, rate, sigma, cp, q=q, F=F, conventions=conventions
+    )
 
 
 def implied_vol_quote(
     quote: Quote,
     *,
-    r: float,
+    r: float | None = None,
     q: float | None = None,
     forward: Forward | None = None,
 ) -> float:
@@ -199,8 +233,10 @@ def implied_vol_quote(
     px = quote.market_price
     if px is None:
         raise ValueError("quote has no last or day_close to invert")
-    S, T, cp, F = _spot_t_cp(quote, forward, r)
-    return invert_iv(px, S, quote.contract.strike, T, r, cp, q=q, F=F)
+    T = year_fraction(quote.contract, quote.asof_ns)
+    rate = resolve_r(quote, r, T)
+    S, T, cp, F = _spot_t_cp(quote, forward, rate)
+    return invert_iv(px, S, quote.contract.strike, T, rate, cp, q=q, F=F)
 
 
 def _spot_t_cp(

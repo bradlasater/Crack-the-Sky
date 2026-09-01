@@ -19,8 +19,8 @@ from datetime import date
 
 from marketdata.types import CallPut, Contract, ExerciseStyle
 
-# Longest-first: SPXW must win against SPX.
-ALLOWED_ROOTS: tuple[str, ...] = ("SPY", "SPX", "SPXW")
+# Longest-first: SPXW must win against SPX, VIXW against VIX.
+ALLOWED_ROOTS: tuple[str, ...] = ("SPY", "SPX", "SPXW", "VIX", "VIXW")
 MULTIPLIER: int = 100
 
 # Settlement time of day, ET, per root. Expiry is an instant, not a date: SPX
@@ -32,6 +32,11 @@ SETTLEMENT_ET: dict[str, tuple[int, int]] = {
     "SPY": (16, 0),    # PM settled
     "SPXW": (16, 0),   # PM settled weeklies
     "SPX": (9, 30),    # AM settled monthlies
+    # VIX options settle to the SOQ at the Wednesday OPEN -- both standard and
+    # weekly series are AM settled, unlike the SPX/SPXW split above. Assuming
+    # 16:00 here would reintroduce the ~20h T error on the whole VIX surface.
+    "VIX": (9, 30),
+    "VIXW": (9, 30),
 }
 
 
@@ -48,10 +53,15 @@ _ROOT_META: dict[str, tuple[str, ExerciseStyle]] = {
     "SPY": ("SPY", "american"),
     "SPX": ("SPX", "european"),
     "SPXW": ("SPX", "european"),
+    # VIX options are European options on the VIX FUTURE of that expiry, not
+    # on the index. See forward_from_parity: the per-expiry parity forward is
+    # the VX future, and must not be discounted to a "spot VIX".
+    "VIX": ("VIX", "european"),
+    "VIXW": ("VIX", "european"),
 }
 
 _TICKER_RE = re.compile(
-    r"^O:(?P<root>SPXW|SPY|SPX)"
+    r"^O:(?P<root>SPXW|SPY|SPX|VIXW|VIX)"
     r"(?P<yy>\d{2})(?P<mm>\d{2})(?P<dd>\d{2})"
     r"(?P<cp>[CP])"
     r"(?P<strike>\d+)$"

@@ -26,6 +26,8 @@ DATASETS = [
     "option_trades",
     "underlying_minute_bars",
     "underlying_day_bars",
+    "treasury_yields",
+    "inflation",
     "forwards",
     "dividends",
     "splits",

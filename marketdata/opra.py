@@ -113,14 +113,3 @@ def parse_opra(ticker: str) -> Contract:
         multiplier=MULTIPLIER,
         ticker=ticker,
     )
-
-
-def format_opra(contract: Contract) -> str:
-    """Serialize a :class:`Contract` back to ``O:{root}{YYMMDD}{C|P}{strike}``."""
-    yy = contract.expiry.year % 100
-    cp = "C" if contract.call_put == "call" else "P"
-    strike_int = int(round(contract.strike * 1000.0))
-    return (
-        f"O:{contract.root}{yy:02d}{contract.expiry.month:02d}"
-        f"{contract.expiry.day:02d}{cp}{strike_int:08d}"
-    )

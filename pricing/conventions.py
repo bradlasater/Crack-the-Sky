@@ -90,13 +90,6 @@ class GreeksCatalog:
     ultima: Any
     elasticity: Any
 
-    def as_dict(self) -> dict[str, Any]:
-        """Catalog as a dict; includes ``lambda`` (elasticity) and ``vomma``."""
-        out = {name: getattr(self, name) for name in GREEK_NAMES}
-        out["lambda"] = self.elasticity
-        out["vomma"] = self.volga
-        return out
-
 
 def apply_conventions(
     raw: dict[str, Any],

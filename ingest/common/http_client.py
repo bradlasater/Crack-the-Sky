@@ -125,23 +125,19 @@ class MassiveClient:
         path: str,
         params: dict[str, Any] | None = None,
         limit: int = 1000,
-        max_pages: int | None = None,
     ) -> Iterator[dict[str, Any]]:
         """Yield every item of ``results`` across all pages of a list endpoint.
 
         Follows ``next_url``, re-appending ``apiKey`` each time (the API does
-        not include it). ``limit`` is merged into the first request's params;
-        ``max_pages`` caps the number of pages fetched (None = no cap).
+        not include it). ``limit`` is merged into the first request's params.
         """
         merged: dict[str, Any] | None = dict(params or {})
         merged.setdefault("limit", limit)
         url = self._url(path)
-        page = 0
         while True:
-            page += 1
             body = self.get(url, merged)
             yield from body.get("results") or []
             next_url = body.get("next_url")
-            if not next_url or (max_pages is not None and page >= max_pages):
+            if not next_url:
                 return
             url, merged = next_url, None

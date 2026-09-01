@@ -74,27 +74,6 @@ def _maybe_scalar(x: np.ndarray, like: tuple[np.ndarray, ...]) -> Any:
     return np.asarray(x, dtype=float)
 
 
-def d1_d2(
-    S: ArrayLike,
-    K: ArrayLike,
-    T: ArrayLike,
-    r: ArrayLike,
-    sigma: ArrayLike,
-    *,
-    q: ArrayLike | None = None,
-    F: ArrayLike | None = None,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return ``(d1, d2)`` for BSM."""
-    S, K, T, r, sigma = (_f(S), _f(K), _f(T), _f(r), _f(sigma))
-    qv = resolve_q(S, T, r, q=q, F=F)
-    S, K, T, r, sigma, qv = np.broadcast_arrays(S, K, T, r, sigma, qv)
-    _check(S, K, T, sigma)
-    sqrtT = np.sqrt(T)
-    d1 = (np.log(S / K) + (r - qv + 0.5 * sigma**2) * T) / (sigma * sqrtT)
-    d2 = d1 - sigma * sqrtT
-    return d1, d2
-
-
 def _core(
     S: ArrayLike,
     K: ArrayLike,

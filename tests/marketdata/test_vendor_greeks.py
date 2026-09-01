@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from ingest.schemas import flatten_snapshot
-from marketdata.types import VENDOR_SNAPSHOT_FIELDS, quotes_from_snapshot_table
+from marketdata.types import quotes_from_snapshot_rows
 from pricing.conventions import GreeksConventions
 from pricing.from_market import greeks_quote, price_quote
 from tests.conftest import load_fixture
@@ -25,9 +25,15 @@ SPOT = GreeksConventions(
 
 def test_quotes_carry_vendor_columns() -> None:
     rec = flatten_snapshot(load_fixture("snapshot_options_spy.json")["results"][0])
-    for name in VENDOR_SNAPSHOT_FIELDS:
+    for name in (
+        "greeks_delta",
+        "greeks_gamma",
+        "greeks_theta",
+        "greeks_vega",
+        "implied_volatility",
+    ):
         assert name in rec
-    quotes = quotes_from_snapshot_table(
+    quotes = quotes_from_snapshot_rows(
         [snapshot_row("O:SPY260831C00420000", vendor_iv=0.22, vendor_delta=0.55)]
     )
     q = quotes[0]
@@ -38,7 +44,7 @@ def test_quotes_carry_vendor_columns() -> None:
 def test_poisoned_vendor_iv_does_not_change_price() -> None:
     base = snapshot_row("O:SPY260831C00420000", vendor_iv=0.12, vendor_delta=0.4)
     poison = snapshot_row("O:SPY260831C00420000", vendor_iv=9.99, vendor_delta=-1.0)
-    q0, q1 = quotes_from_snapshot_table([base])[0], quotes_from_snapshot_table([poison])[0]
+    q0, q1 = quotes_from_snapshot_rows([base])[0], quotes_from_snapshot_rows([poison])[0]
     kwargs = {"r": 0.05, "sigma": 0.20, "q": 0.01}
     assert price_quote(q0, **kwargs) == price_quote(q1, **kwargs)
     g0 = greeks_quote(q0, conventions=SPOT, **kwargs)

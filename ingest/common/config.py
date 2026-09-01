@@ -17,7 +17,6 @@ DEFAULT_API_BASE = "https://api.polygon.io"
 DEFAULT_S3_ENDPOINT = "https://files.massive.com"
 DEFAULT_S3_BUCKET = "flatfiles"
 DEFAULT_DATA_ROOT = "/data/massive"
-DEFAULT_TZ = "America/New_York"
 DEFAULT_WS_DELAYED_URL = "wss://delayed.massive.com/options"
 DEFAULT_HEALTHCHECKS_BASE = "https://hc-ping.com"
 
@@ -54,8 +53,6 @@ class Settings:
     massive_s3_bucket: str = DEFAULT_S3_BUCKET
     data_root: Path = field(default=Path(DEFAULT_DATA_ROOT))
     log_root: Path | None = None  # default: {data_root}/logs
-    tz_name: str = DEFAULT_TZ
-    healthchecks_ping_url: str | None = None
     healthchecks_ping_key: str | None = None
     healthchecks_base: str = DEFAULT_HEALTHCHECKS_BASE
     ws_delayed_url: str = DEFAULT_WS_DELAYED_URL
@@ -74,7 +71,8 @@ class Settings:
 
         Raises:
             SystemExit: code 2 when a required variable (``MASSIVE_API_KEY``)
-                is missing.
+                is missing, or when legacy ``HEALTHCHECKS_PING_URL`` is set
+                without ``HEALTHCHECKS_PING_KEY``.
         """
         path = Path(env_path) if env_path is not None else Path(".env")
         file_vals = _parse_env_file(path)
@@ -93,17 +91,30 @@ class Settings:
 
         data_root = Path(get("DATA_ROOT", DEFAULT_DATA_ROOT) or DEFAULT_DATA_ROOT)
         log_root_raw = get("LOG_ROOT")
-        tz_name = get("TZ_NAME", DEFAULT_TZ) or DEFAULT_TZ
         log_root = Path(log_root_raw) if log_root_raw else data_root / "logs"
 
-        # Several helpers (landing._data_root, logging_utils._default_log_root,
-        # market_gate) resolve these from os.environ so their signatures work
-        # bare. Values that came from the .env file are not in the process
-        # environment yet, so export them here -- otherwise a non-default
-        # DATA_ROOT in .env silently splits raw/clean data from the logs.
+        # Several helpers (landing._data_root, logging_utils._default_log_root)
+        # resolve these from os.environ so their signatures work bare. Values
+        # that came from the .env file are not in the process environment yet,
+        # so export them here -- otherwise a non-default DATA_ROOT in .env
+        # silently splits raw/clean data from the logs.
         os.environ.setdefault("DATA_ROOT", str(data_root))
         os.environ.setdefault("LOG_ROOT", str(log_root))
-        os.environ.setdefault("TZ_NAME", tz_name)
+
+        ping_key = get("HEALTHCHECKS_PING_KEY") or None
+        # Shared-URL mode hid dead jobs (one success greened the only check).
+        # Dropping it silently would also hide missed runs, so leftover
+        # HEALTHCHECKS_PING_URL without a ping key fails at load with a
+        # migration path rather than disabling monitoring unnoticed.
+        if get("HEALTHCHECKS_PING_URL") and not ping_key:
+            print(
+                "ERROR: HEALTHCHECKS_PING_URL is no longer supported. "
+                "Set HEALTHCHECKS_PING_KEY instead (Healthchecks project -> "
+                "Settings -> Ping Key) so each job gets its own check. A "
+                "single shared URL hides jobs that stop running.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
 
         return cls(
             massive_api_key=api_key,
@@ -114,9 +125,7 @@ class Settings:
             massive_s3_bucket=get("MASSIVE_S3_BUCKET", DEFAULT_S3_BUCKET) or DEFAULT_S3_BUCKET,
             data_root=data_root,
             log_root=log_root,
-            tz_name=tz_name,
-            healthchecks_ping_url=get("HEALTHCHECKS_PING_URL") or None,
-            healthchecks_ping_key=get("HEALTHCHECKS_PING_KEY") or None,
+            healthchecks_ping_key=ping_key,
             healthchecks_base=(get("HEALTHCHECKS_BASE", DEFAULT_HEALTHCHECKS_BASE)
                                or DEFAULT_HEALTHCHECKS_BASE).rstrip("/"),
             ws_delayed_url=get("WS_DELAYED_URL", DEFAULT_WS_DELAYED_URL) or DEFAULT_WS_DELAYED_URL,

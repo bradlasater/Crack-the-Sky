@@ -29,6 +29,7 @@ from ingest.common import landing, market_gate
 from ingest.common.cli import run_job
 from ingest.common.config import Settings
 from ingest.common.logging_utils import JsonlLogger
+from ingest.jobs import read_partition
 from ingest.jobs.flatfile_pull import previous_trading_day
 from ingest.jobs.ws_minute_bars import DATASET as WS_RAW_DATASET
 from ingest.jobs.ws_minute_bars import parse_events
@@ -60,19 +61,6 @@ def _ws_raw_stats(data_root: Path, d: date) -> dict[str, Any] | None:
     return {"rows": rows, "tickers": len(tickers), "volume": volume}
 
 
-def _read_partition(data_root: Path, d: date) -> list[dict[str, Any]]:
-    """Read every parquet file of the clean option_minute_bars partition."""
-    if landing.schemas.pa is None:  # pragma: no cover - pyarrow-less host
-        raise ImportError("pyarrow is required for reconcile; pip install -r requirements.txt")
-    import pyarrow.parquet as pq
-
-    part_dir = Path(data_root) / "clean" / CLEAN_DATASET / f"dt={d.isoformat()}"
-    records: list[dict[str, Any]] = []
-    for path in sorted(part_dir.glob("*.parquet")):
-        records.extend(pq.read_table(path).to_pylist())
-    return records
-
-
 def _stats(records: list[dict[str, Any]]) -> dict[str, Any]:
     """Count rows / distinct tickers / summed volume for clean records."""
     return {
@@ -86,7 +74,7 @@ def _main(args: Any, settings: Settings, logger: JsonlLogger) -> dict[str, Any]:
     d = date.fromisoformat(args.date)  # always set: main() injects the default
     data_root = Path(settings.data_root)
 
-    partition = _read_partition(data_root, d)
+    partition = read_partition(settings, CLEAN_DATASET, d)
     ff_records = [r for r in partition if r.get("src") == "flatfile"]
     ws_clean = [r for r in partition if r.get("src") == "ws"]
 

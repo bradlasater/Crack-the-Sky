@@ -22,6 +22,7 @@ from ingest.jobs import (
     forward_from_parity,
     keep_ticker,
     latest_contracts,
+    read_partition,
     reference_price,
     ticker_root,
     underlying_root,
@@ -275,3 +276,10 @@ def test_latest_contracts_includes_unrecognised_filenames(tmp_path: Path) -> Non
                         [_contract("SPY", "SPY", exp, "call", 770.0)],
                         job="imported", data_root=tmp_path)
     assert len(latest_contracts(settings, RUN_DATE)) == 1
+
+
+def test_read_partition_missing_pyarrow_is_explicit(tmp_path: Path, monkeypatch) -> None:
+    """reconcile (and other readers) must not surface a bare ModuleNotFoundError."""
+    monkeypatch.setattr(schemas, "pa", None)
+    with pytest.raises(ImportError, match="pyarrow is required to read clean partitions"):
+        read_partition(_settings(tmp_path), "option_minute_bars", RUN_DATE)

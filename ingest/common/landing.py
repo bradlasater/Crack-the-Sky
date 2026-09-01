@@ -2,7 +2,7 @@
 
 Layout under ``DATA_ROOT`` (env var, default ``/data/massive``)::
 
-    raw/{dataset}/dt={YYYY-MM-DD}/{job}-{epoch_ms}.{fmt}[.gz]   (append)
+    raw/{dataset}/dt={YYYY-MM-DD}/{job}-{epoch_ms}.jsonl   (append)
     clean/{dataset}/dt={YYYY-MM-DD}/{job}-{epoch_ms}.parquet
     _meta/{name}
 
@@ -13,7 +13,6 @@ for :func:`write_clean`; raw writers work without it.
 
 from __future__ import annotations
 
-import gzip
 import json
 import os
 import time
@@ -38,35 +37,21 @@ def _epoch_ms() -> int:
 def write_raw(
     dataset: str,
     dt: date | str,
-    records: Iterable[dict[str, Any]] | bytes | str,
+    records: Iterable[dict[str, Any]],
     job: str,
-    fmt: str = "jsonl",
     data_root: str | os.PathLike[str] | None = None,
 ) -> Path:
-    """Append raw payload(s) to the raw landing zone; returns the file path.
+    """Append records as JSON Lines to the raw landing zone; returns the path.
 
-    ``records`` may be an iterable of dicts (written as JSON Lines), a str, or
-    bytes. If ``fmt`` ends with ``.gz`` the file is gzip-compressed. Appends
-    when the file already exists (same epoch-ms or rerun).
+    Appends when the file already exists (same epoch-ms or rerun).
     """
     day = dt.isoformat() if isinstance(dt, date) else str(dt)
     out_dir = _data_root(data_root) / "raw" / dataset / f"dt={day}"
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{job}-{_epoch_ms()}.{fmt}"
-
-    if isinstance(records, bytes):
-        payload = records
-    elif isinstance(records, str):
-        payload = records.encode("utf-8")
-    else:
-        payload = "".join(json.dumps(r, default=str) + "\n" for r in records).encode("utf-8")
-
-    if fmt.endswith(".gz"):
-        with gzip.open(path, "ab") as fh:
-            fh.write(payload)
-    else:
-        with open(path, "ab") as fh:
-            fh.write(payload)
+    path = out_dir / f"{job}-{_epoch_ms()}.jsonl"
+    payload = "".join(json.dumps(r, default=str) + "\n" for r in records).encode("utf-8")
+    with open(path, "ab") as fh:
+        fh.write(payload)
     return path
 
 

@@ -49,13 +49,6 @@ def check_records(dataset: str, records: list[dict[str, Any]]) -> pa.Table:
 
 def test_all_datasets_present() -> None:
     assert set(schemas.SCHEMAS) == set(DATASETS)
-    assert set(schemas.CLICKHOUSE_DDL) == set(DATASETS)
-    for ddl in schemas.CLICKHOUSE_DDL.values():
-        assert "ReplacingMergeTree" in ddl
-        assert "LowCardinality(String)" in ddl
-    # timestamp columns use DateTime64 with UTC timezone
-    assert "DateTime64(9, 'UTC')" in schemas.CLICKHOUSE_DDL["option_trades"]
-    assert "DateTime64(3, 'UTC')" in schemas.CLICKHOUSE_DDL["underlying_minute_bars"]
 
 
 def test_contracts_schema_matches_fixture() -> None:

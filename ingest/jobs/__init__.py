@@ -111,7 +111,17 @@ def latest_partition(
 
 
 def read_partition(settings: Settings, dataset: str, dt: date) -> list[dict[str, Any]]:
-    """Read every parquet file of one clean partition into a list of dicts."""
+    """Read every parquet file of one clean partition into a list of dicts.
+
+    Requires pyarrow; raises ImportError with a clear message otherwise.
+    """
+    from ingest import schemas
+
+    if schemas.pa is None:
+        raise ImportError(
+            "pyarrow is required to read clean partitions; "
+            "install it (pip install -r requirements.txt)"
+        )
     import pyarrow.parquet as pq
 
     part_dir = _clean_root(settings, dataset) / f"dt={dt.isoformat()}"

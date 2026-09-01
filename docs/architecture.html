@@ -849,9 +849,9 @@
           post-credential-change check.
         </p>
         <p>
-          A 200 is not sufficient: response bodies are shape-checked, so an
-          endpoint that answers but stops returning the fields the jobs read
-          counts as drift. Option probe paths resolve a live contract at run
+          Selected job-critical response bodies are shape-checked, so an
+          endpoint covered by a validator that stops returning required fields
+          counts as drift.
           time rather than naming one, because a fixed ticker returns an
           entitled-but-empty 200 once it expires — indistinguishable from a
           revoked entitlement. Missing or placeholder S3 keys

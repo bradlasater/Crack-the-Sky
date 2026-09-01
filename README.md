@@ -194,8 +194,8 @@ venv/bin/python -m compileall ingest    # syntax check
 ```
 
 Pytest covers all four packages (`ingest`, `marketdata`, `pricing`, plus the
-scripts tests); lint and the syntax check deliberately scope to `ingest` and
-`tests`, matching both CI pipelines.
+scripts tests). Ruff lints `ingest` and `tests`; the syntax check
+(`compileall`) covers `ingest` only — matching both CI pipelines.
 
 **CI runs in two places, deliberately:**
 

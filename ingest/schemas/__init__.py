@@ -21,8 +21,8 @@ with no usable market (deep ITM, expiring), not as a tier limitation.
 flat files -- it is gone if it is not captured live.
 
 PyArrow is import-guarded: this module imports cleanly without pyarrow so
-raw-only paths keep working; only :func:`ingest.common.landing.write_clean`
-hard-requires it.
+raw-only paths keep working; :func:`ingest.common.landing.write_clean` and
+:func:`ingest.jobs.read_partition` hard-require it.
 """
 
 from __future__ import annotations

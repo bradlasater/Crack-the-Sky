@@ -164,7 +164,10 @@ grace period per job. Tests assert that its job list matches `deploy/crontab`
 exactly, so adding a cron line without a check fails CI. `eod_dayaggs_rest` is
 deliberately in neither.
 
-Self-hosting instead? Point `HEALTHCHECKS_BASE` at your instance.
+Self-hosting instead? `HEALTHCHECKS_BASE` is the **ping root**, so set it to
+`https://<host>/ping` (hosted `https://hc-ping.com` already is one), and point
+the setup script at your management API with
+`--api-base https://<host>/api/v3`.
 
 ## Development
 

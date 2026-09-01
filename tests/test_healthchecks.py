@@ -8,6 +8,7 @@ this repo actually suffers from — a job that quietly stops running.
 from __future__ import annotations
 
 import dataclasses
+import sys
 from pathlib import Path
 
 import pytest
@@ -187,3 +188,162 @@ def test_no_monitoring_for_unscheduled_jobs() -> None:
 def test_eod_dayaggs_is_deliberately_unmonitored() -> None:
     mod = _setup_module()
     assert "eod_dayaggs_rest" not in mod.JOBS
+
+
+# ---------------------------------------------------------------------------
+# Terminal pings: a run that starts must always finish the check
+# ---------------------------------------------------------------------------
+
+def _suffixes(rec: _Recorder) -> list[str]:
+    """Ping suffixes in order, e.g. ['/start', '/fail']."""
+    out = []
+    for url, _ in rec.calls:
+        tail = url.split("massive-", 1)[-1].split("?", 1)[0]
+        out.append("/" + tail.split("/", 1)[1] if "/" in tail else "")
+    return out
+
+
+def test_holiday_exit_still_sends_a_terminal_ping(tmp_path, monkeypatch, recorder):
+    """A market holiday must not leave the check hung.
+
+    cron fires on weekdays regardless of the market calendar, so
+    require_trading_day() raises SystemExit(0) roughly ten times a year. Without
+    a terminal ping the check sits in 'started' and Healthchecks pages a hung
+    run -- which is how alerting gets muted and stops working.
+    """
+    settings = _settings(tmp_path, healthchecks_ping_key="KEY")
+    monkeypatch.setattr(cli.Settings, "load", classmethod(lambda cls: settings))
+    monkeypatch.setattr(cli.market_gate, "require_trading_day",
+                        lambda *a, **k: sys.exit(0))
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.run_job("contracts_sync", lambda a, s, log: {"rows": 0}, [])
+    assert excinfo.value.code == 0
+    assert _suffixes(recorder) == ["/start", ""], "expected start then success"
+
+
+def test_nonzero_systemexit_pings_fail(tmp_path, monkeypatch, recorder):
+    settings = _settings(tmp_path, healthchecks_ping_key="KEY")
+    monkeypatch.setattr(cli.Settings, "load", classmethod(lambda cls: settings))
+
+    def boom(a, s, log):
+        sys.exit(3)
+
+    with pytest.raises(SystemExit):
+        cli.run_job("contracts_sync", boom, [])
+    assert _suffixes(recorder) == ["/start", "/fail"]
+
+
+def test_success_pings_start_then_success(tmp_path, monkeypatch, recorder):
+    settings = _settings(tmp_path, healthchecks_ping_key="KEY")
+    monkeypatch.setattr(cli.Settings, "load", classmethod(lambda cls: settings))
+    with pytest.raises(SystemExit) as excinfo:
+        cli.run_job("contracts_sync", lambda a, s, log: {"rows": 7}, [])
+    assert excinfo.value.code == 0
+    assert _suffixes(recorder) == ["/start", ""]
+
+
+def test_exception_pings_start_then_fail(tmp_path, monkeypatch, recorder):
+    settings = _settings(tmp_path, healthchecks_ping_key="KEY")
+    monkeypatch.setattr(cli.Settings, "load", classmethod(lambda cls: settings))
+
+    def boom(a, s, log):
+        raise RuntimeError("upstream exploded")
+
+    with pytest.raises(SystemExit):
+        cli.run_job("contracts_sync", boom, [])
+    assert _suffixes(recorder) == ["/start", "/fail"]
+
+
+def test_every_run_job_path_sends_exactly_one_terminal_ping(tmp_path, monkeypatch, recorder):
+    """No path may send two terminal pings, or none."""
+    settings = _settings(tmp_path, healthchecks_ping_key="KEY")
+    monkeypatch.setattr(cli.Settings, "load", classmethod(lambda cls: settings))
+    cases = [
+        lambda a, s, log: {"rows": 1},
+        lambda a, s, log: sys.exit(0),
+        lambda a, s, log: sys.exit(2),
+    ]
+    for fn in cases:
+        recorder.calls.clear()
+        with pytest.raises(SystemExit):
+            cli.run_job("contracts_sync", fn, [])
+        suf = _suffixes(recorder)
+        assert suf[0] == "/start"
+        assert len(suf) == 2, f"expected one terminal ping, got {suf}"
+
+
+# ---------------------------------------------------------------------------
+# Self-hosted routing
+# ---------------------------------------------------------------------------
+
+def test_self_hosted_base_is_the_ping_root(tmp_path) -> None:
+    """Self-hosted Healthchecks serves pings under /ping, not the site root."""
+    settings = _settings(tmp_path, healthchecks_ping_key="KEY",
+                         healthchecks_base="https://hc.example.internal/ping")
+    url, _ = cli.healthcheck_url(settings, "reconcile")
+    assert url == "https://hc.example.internal/ping/KEY/massive-reconcile"
+
+
+def test_setup_script_accepts_a_custom_api_base() -> None:
+    """A self-hosted instance must be able to create its own checks."""
+    mod = _setup_module()
+    parsed = mod.argparse.ArgumentParser  # sanity: argparse is imported
+    assert parsed is not None
+    assert mod.DEFAULT_API_BASE == "https://healthchecks.io/api/v3"
+    import inspect
+    assert "api_base" in inspect.signature(mod._request).parameters
+
+
+def test_keyboard_interrupt_still_settles_the_check(tmp_path, monkeypatch, recorder):
+    """KeyboardInterrupt is a BaseException and skipped both handlers.
+
+    A run interrupted at the console otherwise left the check 'started' until
+    Healthchecks reported a hung run.
+    """
+    settings = _settings(tmp_path, healthchecks_ping_key="KEY")
+    monkeypatch.setattr(cli.Settings, "load", classmethod(lambda cls: settings))
+
+    def interrupted(a, s, log):
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        cli.run_job("contracts_sync", interrupted, [])
+    assert _suffixes(recorder) == ["/start", "/fail"]
+
+
+def test_base_exception_still_settles_the_check(tmp_path, monkeypatch, recorder):
+    settings = _settings(tmp_path, healthchecks_ping_key="KEY")
+    monkeypatch.setattr(cli.Settings, "load", classmethod(lambda cls: settings))
+
+    class Weird(BaseException):
+        pass
+
+    def boom(a, s, log):
+        raise Weird("not an Exception subclass")
+
+    with pytest.raises(SystemExit):
+        cli.run_job("contracts_sync", boom, [])
+    assert _suffixes(recorder) == ["/start", "/fail"]
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    ["ok", "sysexit0", "sysexit2", "exception", "keyboard-interrupt"],
+)
+def test_terminal_ping_matrix(outcome, tmp_path, monkeypatch, recorder):
+    """Every documented exit path sends exactly one terminal ping."""
+    settings = _settings(tmp_path, healthchecks_ping_key="KEY")
+    monkeypatch.setattr(cli.Settings, "load", classmethod(lambda cls: settings))
+    fns = {
+        "ok": lambda a, s, log: {"rows": 1},
+        "sysexit0": lambda a, s, log: sys.exit(0),
+        "sysexit2": lambda a, s, log: sys.exit(2),
+        "exception": lambda a, s, log: (_ for _ in ()).throw(RuntimeError("x")),
+        "keyboard-interrupt": lambda a, s, log: (_ for _ in ()).throw(KeyboardInterrupt()),
+    }
+    with pytest.raises(BaseException):  # noqa: B017 - SystemExit or KeyboardInterrupt
+        cli.run_job("contracts_sync", fns[outcome], [])
+    suf = _suffixes(recorder)
+    assert suf[0] == "/start"
+    assert len(suf) == 2, f"{outcome}: expected one terminal ping, got {suf}"

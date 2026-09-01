@@ -503,6 +503,19 @@ def main(argv: list[str] | None = None) -> int:
     # also be the one job that never reported.
     ping_url, autocreate = healthcheck_url(settings, JOB)
     ping(ping_url, "/start", autocreate)
+    # Every exit path below must send a terminal ping. Several used not to --
+    # the market gate's SystemExit(0), a closed capture window, a missing
+    # contract universe, Ctrl-C, an unexpected exception -- and each of those
+    # left the check "started" until Healthchecks called it a hung run.
+    settled = False
+
+    def settle(ok: bool, message: str) -> None:
+        nonlocal settled
+        if settled:
+            return
+        settled = True
+        ping(ping_url, "" if ok else "/fail", autocreate, body=f"{JOB} {message}")
+
     try:
         logger.log("job_start", job=JOB, date=run_date.isoformat(), force=args.force,
                    duration_minutes=args.duration_minutes,
@@ -511,6 +524,7 @@ def main(argv: list[str] | None = None) -> int:
                                         data_root=settings.data_root)
         deadline = _window(run_date, settings, args.force, args.duration_minutes, logger)
         if deadline is None:
+            settle(True, "capture window already closed for today")
             return 0
         underlyings = parse_underlyings(args.underlying, DEFAULT_UNDERLYINGS)
         try:
@@ -519,6 +533,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         except RuntimeError as exc:
             logger.log("job_error", job=JOB, error=str(exc))
+            settle(False, f"no contract universe: {exc}")
             return 1
         chunks = subscribe_chunks(tickers)
         writer = HourlyJsonlWriter(settings.data_root, run_date, logger)
@@ -536,19 +551,27 @@ def main(argv: list[str] | None = None) -> int:
         # A capture window that ends with zero rows is a failure, not a
         # success: the subscription ACKed and nothing arrived.
         if writer.rows_written == 0:
-            ping(ping_url, "/fail", autocreate,
-                 body=f"{JOB} captured 0 rows in {duration_s}s; stats={stats}")
+            settle(False, f"captured 0 rows in {duration_s}s; stats={stats}")
         else:
-            ping(ping_url, "", autocreate,
-                 body=f"{JOB} ok: rows={writer.rows_written} in {duration_s}s; stats={stats}")
+            settle(True, f"ok: rows={writer.rows_written} in {duration_s}s; stats={stats}")
         return 0
     except _FatalAuth as exc:
         logger.log("job_error", job=JOB, error=str(exc))
-        ping(ping_url, "/fail", autocreate, body=f"{JOB} auth failure: {exc}")
+        settle(False, f"auth failure: {exc}")
         return 1
     except KeyboardInterrupt:
         logger.log("job_interrupted", job=JOB)
+        settle(True, "interrupted by operator")
         return 0
+    except SystemExit as exc:
+        # market_gate.require_trading_day() exits 0 on holidays.
+        code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+        settle(code == 0, f"exited {code} (not a trading day, or nothing to do)")
+        raise
+    except BaseException as exc:  # noqa: BLE001 - must not leave the check hung
+        logger.log("job_error", job=JOB, error=f"{type(exc).__name__}: {exc}")
+        settle(False, f"crashed: {type(exc).__name__}: {exc}")
+        raise
     finally:
         logger.close()
 

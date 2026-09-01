@@ -8,6 +8,8 @@ cron expression it is actually scheduled on means Healthchecks alerts on a
 
 Needs a **management API key** (Healthchecks project -> Settings -> API Access
 -> "API key (full access)"), which is different from the ping key the jobs use.
+Self-hosted instances pass ``--api-base https://<host>/api/v3``; note the ping
+root is separate and lives in ``HEALTHCHECKS_BASE`` (``https://<host>/ping``).
 
     python scripts/setup_healthchecks.py --api-key hcak_xxx [--dry-run]
 
@@ -22,7 +24,7 @@ import sys
 import urllib.error
 import urllib.request
 
-API_BASE = "https://healthchecks.io/api/v3"
+DEFAULT_API_BASE = "https://healthchecks.io/api/v3"
 
 # job -> (cron schedule, grace_minutes, description)
 #
@@ -52,8 +54,11 @@ def slug_for(job: str) -> str:
     return SLUG_PREFIX + job.strip().lower().replace("_", "-")
 
 
-def _request(method: str, path: str, api_key: str, payload: dict | None = None) -> object:
-    url = f"{API_BASE}{path}"
+def _request(
+    method: str, path: str, api_key: str, payload: dict | None = None,
+    api_base: str = DEFAULT_API_BASE,
+) -> object:
+    url = f"{api_base.rstrip('/')}{path}"
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("X-Api-Key", api_key)
@@ -70,16 +75,21 @@ def _request(method: str, path: str, api_key: str, payload: dict | None = None) 
             "(Settings -> API Access), not the ping key."
         ) from exc
     except urllib.error.URLError as exc:
-        raise SystemExit(f"ERROR: cannot reach {API_BASE}: {exc.reason}") from exc
+        raise SystemExit(f"ERROR: cannot reach {api_base}: {exc.reason}") from exc
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="setup_healthchecks.py")
     parser.add_argument("--api-key", required=True, help="management API key (hcak_...)")
     parser.add_argument("--dry-run", action="store_true", help="print, do not write")
+    parser.add_argument(
+        "--api-base", default=DEFAULT_API_BASE,
+        help="management API root; self-hosted is https://<host>/api/v3 "
+             f"(default: {DEFAULT_API_BASE})",
+    )
     args = parser.parse_args(argv)
 
-    existing_body = _request("GET", "/checks/", args.api_key)
+    existing_body = _request("GET", "/checks/", args.api_key, api_base=args.api_base)
     existing = {
         c.get("slug"): c
         for c in (existing_body or {}).get("checks", [])  # type: ignore[union-attr]
@@ -101,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
         action = "update" if slug in existing else "create"
         print(f"  {action:<6} {slug:<26} {schedule:<20} grace={grace}m")
         if not args.dry_run:
-            _request("POST", "/checks/", args.api_key, payload)
+            _request("POST", "/checks/", args.api_key, payload, api_base=args.api_base)
 
     if args.dry_run:
         print("\n(dry run - nothing written)")

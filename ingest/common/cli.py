@@ -23,6 +23,10 @@ alert on a run that hangs rather than only one that crashes. Exceptions send
 
 ``HEALTHCHECKS_PING_URL`` (a single check for everything) still works and takes
 lower precedence; it is kept only for back-compatibility.
+
+``HEALTHCHECKS_BASE`` is the **ping root**, not the site root. Hosted is
+``https://hc-ping.com`` (the default); a self-hosted instance serves pings
+under ``/ping``, so it must be set to ``https://hc.example.internal/ping``.
 """
 
 from __future__ import annotations
@@ -78,6 +82,8 @@ def healthcheck_url(settings: Settings, job_name: str) -> tuple[str | None, bool
     """Return ``(base_url, autocreate)`` for this job's check.
 
     Prefers the per-job ping-key form; falls back to the single shared URL.
+    ``settings.healthchecks_base`` is the ping root -- ``https://hc-ping.com``
+    hosted, ``https://<host>/ping`` self-hosted.
     """
     if settings.healthchecks_ping_key:
         base = f"{settings.healthchecks_base}/{settings.healthchecks_ping_key}"
@@ -141,15 +147,38 @@ def run_job(job_name: str, main_fn: MainFn, argv: list[str] | None = None) -> No
                    **{k: v for k, v in summary.items() if k not in ("rows", "bytes")})
         ping(ping_url, "", autocreate,
              body=f"{job_name} ok: rows={summary.get('rows', 0)} in {duration_s}s")
-    except SystemExit:
-        raise
-    except Exception as exc:  # noqa: BLE001 - top-level job guard
+    except SystemExit as exc:
+        # market_gate.require_trading_day() exits 0 on holidays, and cron fires
+        # on weekdays regardless of the market calendar. Without a terminal
+        # ping here the check stays in "started" and Healthchecks reports a
+        # hung run on every market holiday -- a false page roughly ten times a
+        # year, which is exactly how alerting gets muted and stops working.
+        code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
         duration_s = round(time.monotonic() - start, 3)
-        logger.log("job_error", job=job_name, error=f"{type(exc).__name__}: {exc}",
-                   duration_s=duration_s)
-        ping(ping_url, "/fail", autocreate,
-             body=f"{job_name} failed after {duration_s}s: {type(exc).__name__}: {exc}")
+        if code == 0:
+            ping(ping_url, "", autocreate,
+                 body=f"{job_name} exited early (not a trading day, or nothing to do)")
+        else:
+            ping(ping_url, "/fail", autocreate,
+                 body=f"{job_name} exited {code} after {duration_s}s")
         logger.close()
+        raise
+    except BaseException as exc:  # noqa: BLE001 - must not leave the check hung
+        # BaseException, not Exception: KeyboardInterrupt and other
+        # BaseExceptions would otherwise skip every handler here and leave the
+        # check in "started" until Healthchecks called it a hung run.
+        duration_s = round(time.monotonic() - start, 3)
+        interrupted = isinstance(exc, KeyboardInterrupt)
+        logger.log(
+            "job_interrupted" if interrupted else "job_error",
+            job=job_name, error=f"{type(exc).__name__}: {exc}", duration_s=duration_s,
+        )
+        ping(ping_url, "/fail", autocreate,
+             body=f"{job_name} {'interrupted' if interrupted else 'failed'} "
+                  f"after {duration_s}s: {type(exc).__name__}: {exc}")
+        logger.close()
+        if interrupted:
+            raise
         sys.exit(1)
     logger.close()
     sys.exit(0)

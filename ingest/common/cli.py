@@ -21,9 +21,6 @@ Each run sends ``/start`` first, so Healthchecks measures duration and can
 alert on a run that hangs rather than only one that crashes. Exceptions send
 ``/fail`` with the error text as the body.
 
-``HEALTHCHECKS_PING_URL`` (a single check for everything) still works and takes
-lower precedence; it is kept only for back-compatibility.
-
 ``HEALTHCHECKS_BASE`` is the **ping root**, not the site root. Hosted is
 ``https://hc-ping.com`` (the default); a self-hosted instance serves pings
 under ``/ping``, so it must be set to ``https://hc.example.internal/ping``.
@@ -81,14 +78,14 @@ def healthcheck_slug(job_name: str) -> str:
 def healthcheck_url(settings: Settings, job_name: str) -> tuple[str | None, bool]:
     """Return ``(base_url, autocreate)`` for this job's check.
 
-    Prefers the per-job ping-key form; falls back to the single shared URL.
     ``settings.healthchecks_base`` is the ping root -- ``https://hc-ping.com``
-    hosted, ``https://<host>/ping`` self-hosted.
+    hosted, ``https://<host>/ping`` self-hosted. Without a ping key there is
+    no check to ping and monitoring is silently off.
     """
     if settings.healthchecks_ping_key:
         base = f"{settings.healthchecks_base}/{settings.healthchecks_ping_key}"
         return f"{base}/{healthcheck_slug(job_name)}", True
-    return settings.healthchecks_ping_url, False
+    return None, False
 
 
 def ping(

@@ -76,20 +76,6 @@ def test_ping_key_builds_autocreating_url(tmp_path: Path) -> None:
     assert autocreate is True
 
 
-def test_shared_url_still_supported_but_not_autocreating(tmp_path: Path) -> None:
-    settings = _settings(tmp_path, healthchecks_ping_url="https://hc-ping.com/UUID")
-    url, autocreate = cli.healthcheck_url(settings, "snapshot_sweep")
-    assert url == "https://hc-ping.com/UUID"
-    assert autocreate is False
-
-
-def test_ping_key_takes_precedence_over_shared_url(tmp_path: Path) -> None:
-    settings = _settings(tmp_path, healthchecks_ping_key="KEY",
-                         healthchecks_ping_url="https://hc-ping.com/UUID")
-    url, _ = cli.healthcheck_url(settings, "reconcile")
-    assert url.endswith("/massive-reconcile")
-
-
 def test_no_config_means_no_url(tmp_path: Path) -> None:
     assert cli.healthcheck_url(_settings(tmp_path), "reconcile") == (None, False)
 
@@ -113,7 +99,7 @@ def test_ping_appends_suffix_and_create_flag(recorder: _Recorder) -> None:
     assert data == b"boom"
 
 
-def test_ping_omits_create_flag_for_shared_url(recorder: _Recorder) -> None:
+def test_ping_omits_create_flag_when_not_autocreating(recorder: _Recorder) -> None:
     cli.ping("https://hc-ping.com/UUID", "/start", autocreate=False)
     (url, _), = recorder.calls
     assert url == "https://hc-ping.com/UUID/start"

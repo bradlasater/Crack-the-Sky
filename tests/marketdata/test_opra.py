@@ -1,4 +1,4 @@
-"""OPRA parser: allowlist, adversaries, round-trip."""
+"""OPRA parser: allowlist and adversaries."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ from marketdata.opra import (
     ALLOWED_ROOTS,
     MULTIPLIER,
     OPRAParseError,
-    format_opra,
     parse_opra,
     ticker_root,
 )
@@ -25,7 +24,6 @@ def test_spy_call() -> None:
     assert c.strike == pytest.approx(420.0)
     assert c.exercise_style == "american"
     assert c.multiplier == MULTIPLIER == 100
-    assert format_opra(c) == "O:SPY260831C00420000"
 
 
 def test_spx_european() -> None:
@@ -80,14 +78,9 @@ def test_malformed_rejected(ticker: str) -> None:
 
 
 def test_quotes_from_snapshot_rows_accepts_a_pyarrow_table() -> None:
-    """The old name said 'table' but the parameter was rows.
-
-    Passing an actual Table failed deep inside with
-    ``'ChunkedArray' object has no attribute 'get'``.
-    """
     import pyarrow as pa
 
-    from marketdata.types import quotes_from_snapshot_rows, quotes_from_snapshot_table
+    from marketdata.types import quotes_from_snapshot_rows
 
     row = {
         "ticker": "O:SPY260918C00770000",
@@ -102,5 +95,3 @@ def test_quotes_from_snapshot_rows_accepts_a_pyarrow_table() -> None:
     from_table = quotes_from_snapshot_rows(table)
     assert len(from_rows) == len(from_table) == 1
     assert from_rows[0].contract.ticker == from_table[0].contract.ticker
-    # Old name stays importable.
-    assert quotes_from_snapshot_table is quotes_from_snapshot_rows

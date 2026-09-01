@@ -5,7 +5,12 @@ Sweeps the full option chain every minute, captures delayed option minute bars
 over websocket, polls trades on a liquid watchlist, and reconciles daily against
 S3 flat files (the flat file always wins). Target host: Ubuntu 24.04 headless,
 repo at `~/data_ingest_infra`. Python 3.11+; deps: `requests`, `websockets`,
-`boto3`, `pyarrow` (no pandas).
+`boto3`, `pyarrow`, `numpy`, `scipy` (no pandas).
+
+Two sibling packages sit at repo root alongside `ingest/`: `marketdata/` (typed,
+schema-validated reads of the clean parquet tree, plus OPRA ticker parsing) and
+`pricing/` (Black–Scholes–Merton greeks and IV inversion — calculators, not a
+surface). See `docs/architecture.html` → "Market data + Greeks".
 
 ## The one thing to understand
 
@@ -57,7 +62,7 @@ websocket, and the `trades_v1` / `minute_aggs_v1` / `day_aggs_v1` flat files.
 | Data | Why it matters |
 |---|---|
 | Option NBBO quotes (REST **and** `quotes_v1`) | No bid/ask anywhere. The minute snapshot sweep is your only record of option pricing state. (`quotes_v1` is also ~131 GB/day.) |
-| Index levels: `I:SPX`, `I:VIX`, `I:VIX9D/3M`, `I:VVIX` | 403 on every endpoint, and `underlying_price` is null in the SPX snapshot. SPX spot is recovered from **put-call parity** on the chain instead → `clean/forwards`. |
+| Index levels: `I:SPX`, `I:VIX` (and other `I:*` tickers such as `I:VIX9D/3M`, `I:VVIX`) | 403 on every endpoint (`I:SPX`/`I:VIX` verified by the probe), and `underlying_price` is null in the SPX snapshot. SPX spot is recovered from **put-call parity** on the chain instead → `clean/forwards`. |
 | Equity trades/quotes, `us_stocks_sip` flat files | — |
 | Same-day equity aggregates | `underlying_bars` is therefore T-1 only. |
 | `/v1/indicators/*` | Compute locally. |
@@ -73,11 +78,17 @@ logs/<job>/dt=YYYY-MM-DD/<epoch>.log   # per-run structured JSONL logs
 logs/cron.log                          # combined cron stdout/stderr
 ```
 
-Datasets: `contracts`, `option_snapshots`, `forwards`, `option_minute_bars`
-(src: `ws` | `rest` | `flatfile`), `option_day_bars`, `option_trades`,
-`underlying_minute_bars`, `underlying_day_bars`, `dividends`, `splits`.
-Timestamps are stored exactly as delivered (ns/ms epoch ints, UTC) — never
-converted.
+Datasets: `contracts`, `contracts_expired`, `option_snapshots`, `forwards`,
+`option_minute_bars` (src: `ws` | `rest` | `flatfile`; the raw hourly websocket
+JSONL lands under the raw-only `raw/option_minute_bars_ws`), `option_day_bars`,
+`option_trades`, `underlying_minute_bars`, `underlying_day_bars`, `dividends`,
+`splits`. Timestamps are stored exactly as delivered (ns/ms epoch ints, UTC) —
+never converted.
+
+Three datasets are currently **write-only** — captured for future use, read by
+nothing yet: `forwards` (per-expiry put-call-parity SPX forward, derived from
+live-only snapshots so it cannot be backfilled), `contracts_expired` (Saturday
+`contracts_sync --expired`), and `underlying_day_bars` (`grouped_daily`).
 
 Clean files are named `{job}-{underlying}-{epoch_ms}.parquet`. Readers that
 want "the current chain" use `latest_contracts()` / `latest_snapshots()`, which
@@ -160,9 +171,13 @@ venv/bin/python scripts/setup_healthchecks.py --api-key hcak_xxx
 ```
 
 `scripts/setup_healthchecks.py` is idempotent and carries the schedule and
-grace period per job. Tests assert that its job list matches `deploy/crontab`
-exactly, so adding a cron line without a check fails CI. `eod_dayaggs_rest` is
-deliberately in neither.
+grace period per job. Tests assert that its job list matches the
+`ingest.jobs.*` lines in `deploy/crontab` exactly, so adding a cron line for a
+Python job without a check fails CI. `eod_dayaggs_rest` is deliberately in
+neither. The one scheduled job without a check is the monthly
+`scripts/prune_raw.sh` (a bash line, not an `ingest.jobs` module) — it fails
+loudly into `logs/cron.log` and never deletes anything irreplaceable, so it is
+deliberately unmonitored.
 
 Self-hosting instead? `HEALTHCHECKS_BASE` is the **ping root**, so set it to
 `https://<host>/ping` (hosted `https://hc-ping.com` already is one), and point
@@ -177,6 +192,10 @@ venv/bin/python -m pytest tests/        # offline, fixture-based
 venv/bin/ruff check ingest tests
 venv/bin/python -m compileall ingest    # syntax check
 ```
+
+Pytest covers all four packages (`ingest`, `marketdata`, `pricing`, plus the
+scripts tests); lint and the syntax check deliberately scope to `ingest` and
+`tests`, matching both CI pipelines.
 
 **CI runs in two places, deliberately:**
 
@@ -195,7 +214,9 @@ venv/bin/python -m compileall ingest    # syntax check
 `scripts/prune_raw.sh --apply` (monthly via cron) drops raw payloads older than
 `RETAIN_DAYS` (default 90) **only** for datasets rebuildable from flat files,
 and only once the replacing flat file is recorded in the manifest with rows
-kept. It never touches `clean/`, `raw/option_snapshots`, `raw/flatfiles`, or
+kept. One exception: `raw/underlying_day_bars` is also pruned, with no manifest
+requirement — it is rebuilt by the daily `grouped_daily` REST call, not a flat
+file. It never touches `clean/`, `raw/option_snapshots`, `raw/flatfiles`, or
 reference data. Run it without `--apply` to see what it would do.
 
 ## Security

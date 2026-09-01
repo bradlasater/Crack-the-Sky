@@ -297,7 +297,7 @@
       <text x="340" y="156" fill="#6e8f9a" font-family="IBM Plex Mono, monospace" font-size="12">contracts_sync</text>
       <text x="340" y="182" fill="#6e8f9a" font-family="IBM Plex Mono, monospace" font-size="12">dividends_sync · holidays_sync</text>
       <text x="340" y="208" fill="#6e8f9a" font-family="IBM Plex Mono, monospace" font-size="12">underlying_bars  (T-1)</text>
-      <text x="340" y="234" fill="#6e8f9a" font-family="IBM Plex Mono, monospace" font-size="12">eod_dayaggs_rest</text>
+      <text x="340" y="234" fill="#6e8f9a" font-family="IBM Plex Mono, monospace" font-size="12">grouped_daily · coverage_audit</text>
       <text x="340" y="260" fill="#b56e6e" font-family="IBM Plex Mono, monospace" font-size="12">flatfile_pull → reconcile</text>
       <text x="340" y="280" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="11">flat file overwrites WS minute bars</text>
 
@@ -309,7 +309,7 @@
       <text x="724" y="172" fill="#e8e4d9" font-family="IBM Plex Mono, monospace" font-size="13">clean/  parquet</text>
       <text x="724" y="196" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="11">schema-projected, src=ws|rest|flatfile</text>
       <text x="724" y="232" fill="#e8e4d9" font-family="IBM Plex Mono, monospace" font-size="13">_meta/</text>
-      <text x="724" y="256" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="11">holidays · manifest · trade cursors</text>
+      <text x="724" y="256" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="11">holidays · manifest · trade cursors · coverage</text>
       <text x="724" y="280" fill="#e8e4d9" font-family="IBM Plex Mono, monospace" font-size="13">logs/</text>
 
       <!-- arrows -->
@@ -376,10 +376,6 @@
       <div class="name">snapshot --eod</div>
       <div class="track"><span class="bar rest" style="left:95.8%; width:3%"></span></div>
     </div>
-    <div class="row">
-      <div class="name">eod_dayaggs_rest</div>
-      <div class="track"><span class="bar rest" style="left:97.5%; width:2.5%"></span></div>
-    </div>
   </div>
 
   <h2>Everything that runs</h2>
@@ -418,13 +414,13 @@
       </tr>
       <tr>
         <td class="job">snapshot_sweep<br><span class="tag rest">rest</span></td>
-        <td class="when">every 5 min, 09:30–16:30</td>
+        <td class="when">every 1 min, 09:30–16:30 · 09:05 pre-open</td>
         <td>Mon–Fri</td>
         <td>Full-chain snapshots for SPY and I:SPX, swept <strong>every minute</strong> — the only dataset here that cannot be backfilled. Clean <code>option_snapshots</code> carries IV, greeks and open interest; also emits <code>clean/forwards</code> (per-expiry put-call-parity forward). Intraday SPY price lives here.</td>
       </tr>
       <tr>
         <td class="job">trades_watchlist<br><span class="tag rest">rest</span></td>
-        <td class="when">every 2 min, 09:32–16:30</td>
+        <td class="when">every 5 min, 09:30–16:30</td>
         <td>Mon–Fri</td>
         <td>Incremental trades for the 7–45 DTE / ±15% moneyness watchlist. Cursor in <code>_meta/trades_cursor.json</code>. Clean <code>option_trades</code> <code>src=rest</code>.</td>
       </tr>
@@ -435,28 +431,34 @@
         <td>Same snapshot job, tagged EOD in filenames and logs.</td>
       </tr>
       <tr>
-        <td class="job">eod_dayaggs_rest<br><span class="tag rest">rest</span></td>
-        <td class="when">16:45</td>
-        <td>Mon–Fri</td>
-        <td>1-day aggregates per contract. Clean <code>option_day_bars</code> <code>src=rest</code>. Empty/404 contracts skipped.</td>
-      </tr>
-      <tr>
         <td class="job">underlying_bars --prev-trading-day<br><span class="tag rest">rest</span></td>
         <td class="when">08:05</td>
         <td>Tue–Sat</td>
         <td>SPY 1-minute equity bars for the <em>previous</em> session only (same-day 403). Clean <code>underlying_minute_bars</code>.</td>
       </tr>
       <tr>
+        <td class="job">grouped_daily<br><span class="tag rest">rest</span></td>
+        <td class="when">08:10 · default date = T-1</td>
+        <td>Tue–Sat</td>
+        <td>Whole-market grouped daily bars in one REST call. Clean <code>underlying_day_bars</code> (currently write-only).</td>
+      </tr>
+      <tr>
         <td class="job">flatfile_pull<br><span class="tag s3">s3</span></td>
         <td class="when">11:05 · default date = T-1</td>
         <td>Tue–Sat</td>
-        <td>OPRA trades / minute aggs / day aggs csv.gz from S3, filtered to <code>O:SPY</code> / <code>O:SPX</code>. Manifest <code>_meta/flatfile_manifest.json</code>. Files usually publish ~11:00 ET next day.</td>
+        <td>OPRA trades / minute aggs / day aggs csv.gz from S3, filtered to roots <code>SPY</code> / <code>SPX</code> / <code>SPXW</code>. Manifest <code>_meta/flatfile_manifest.json</code>. Files usually publish ~11:00 ET next day.</td>
       </tr>
       <tr>
         <td class="job">reconcile<br><span class="tag s3">s3</span></td>
         <td class="when">11:30 · default date = T-1</td>
         <td>Tue–Sat</td>
         <td>Compares WS vs flat-file minute bars, logs deltas, rewrites clean <code>option_minute_bars</code> to the flat-file rows. Flat file always wins.</td>
+      </tr>
+      <tr>
+        <td class="job">coverage_audit</td>
+        <td class="when">12:30 · default date = T-1</td>
+        <td>Tue–Sat</td>
+        <td>The only job that reports on the <em>absence</em> of another job: sweep counts vs schedule (early closes handled via <code>market_gate</code>), largest sweep gap, flat-file manifest completeness, non-empty partitions, WS output, per-underlying ticker counts (SPY/SPX/SPXW present, no foreign roots). Exits non-zero on any gap → Healthchecks <code>/fail</code>. Writes <code>_meta/coverage.json</code>.</td>
       </tr>
       <tr>
         <td class="job">holidays_sync<br><span class="tag rest">rest</span></td>
@@ -468,7 +470,13 @@
         <td class="job">contracts_sync --expired<br><span class="tag rest">rest</span></td>
         <td class="when">09:00</td>
         <td>Saturday</td>
-        <td>Expired-contract pass into <code>contracts_expired</code>.</td>
+        <td>Expired-contract pass into <code>contracts_expired</code> (currently write-only).</td>
+      </tr>
+      <tr>
+        <td class="job">prune_raw.sh --apply</td>
+        <td class="when">03:15 on the 1st</td>
+        <td>Monthly</td>
+        <td>Drops raw payloads older than <code>RETAIN_DAYS</code> (90) for flat-file-rebuildable datasets whose replacement is in the manifest, plus <code>raw/underlying_day_bars</code> (rebuilt from grouped-daily REST). Never touches <code>clean/</code>, snapshots, flatfiles, or reference data. Not healthcheck-monitored.</td>
       </tr>
     </tbody>
   </table>
@@ -493,6 +501,21 @@
         <td class="job">flatfile_pull --date YYYY-MM-DD<br>reconcile --date YYYY-MM-DD</td>
         <td class="when">one missing session</td>
         <td>Same as the Tue–Sat 11:05 / 11:30 pair, for an explicit date.</td>
+      </tr>
+      <tr>
+        <td class="job">bash scripts/repair.sh YYYY-MM-DD</td>
+        <td class="when">coverage_audit reports a gap</td>
+        <td>Re-pull flat file → reconcile → re-audit, for one date. Snapshots cannot be repaired after the fact.</td>
+      </tr>
+      <tr>
+        <td class="job">python -m ingest.jobs.eod_dayaggs_rest --date D --watchlist</td>
+        <td class="when">rarely — flat file preferred</td>
+        <td>Deliberately NOT scheduled: 42k sequential REST calls (~36 min) for what <code>day_aggs_v1</code> delivers in one 4 MB file the next morning.</td>
+      </tr>
+      <tr>
+        <td class="job">bash scripts/prune_raw.sh</td>
+        <td class="when">before the monthly --apply</td>
+        <td>Dry run (no <code>--apply</code>): prints what the scheduled prune would delete.</td>
       </tr>
     </tbody>
   </table>

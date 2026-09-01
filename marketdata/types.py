@@ -9,15 +9,6 @@ from typing import Any, Literal
 CallPut = Literal["call", "put"]
 ExerciseStyle = Literal["european", "american"]
 
-# Snapshot columns that are vendor diagnostics, never pricing inputs.
-VENDOR_SNAPSHOT_FIELDS: tuple[str, ...] = (
-    "greeks_delta",
-    "greeks_gamma",
-    "greeks_theta",
-    "greeks_vega",
-    "implied_volatility",
-)
-
 
 @dataclass(frozen=True, slots=True)
 class Contract:
@@ -87,9 +78,7 @@ def _opt_int(value: Any) -> int | None:
 def quotes_from_snapshot_rows(rows: Any) -> list[Quote]:
     """Map option_snapshots records to :class:`Quote`. Parses every ticker.
 
-    Accepts a list of dicts or a ``pyarrow.Table``. The previous name said
-    "table" while the parameter was rows, so passing an actual Table failed
-    deep inside with ``'ChunkedArray' object has no attribute 'get'``.
+    Accepts a list of dicts or a ``pyarrow.Table``.
 
     Vendor greeks/IV are copied onto the Quote and must stay unused by
     :mod:`pricing`.
@@ -125,25 +114,3 @@ def quotes_from_snapshot_rows(rows: Any) -> list[Quote]:
             )
         )
     return out
-
-
-def forward_from_record(rec: dict[str, Any]) -> Forward:
-    """Map a ``forwards`` parquet row to :class:`Forward`."""
-    exp_raw = rec.get("expiration_date")
-    if not exp_raw:
-        raise ValueError("forwards row missing expiration_date")
-    return Forward(
-        underlying=str(rec.get("underlying_ticker") or ""),
-        expiry=date.fromisoformat(str(exp_raw)[:10]),
-        atm_strike=float(rec["atm_strike"]),
-        forward=float(rec["forward"]),
-        call_price=float(rec["call_price"]),
-        put_price=float(rec["put_price"]),
-        pairs=int(rec["pairs"]),
-        asof_ns=_opt_int(rec.get("asof_ns")),
-        method=str(rec.get("method") or ""),
-    )
-
-
-# Back-compat alias for the pre-rename name.
-quotes_from_snapshot_table = quotes_from_snapshot_rows

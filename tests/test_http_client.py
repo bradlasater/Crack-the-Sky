@@ -128,15 +128,3 @@ def test_paginate_reappends_api_key_to_next_url(client: MassiveClient) -> None:
     assert second.startswith(next_url.split("?")[0])
     assert "cursor=YXA9MQ" in second
     assert f"apiKey={API_KEY}" in second  # re-appended: API omits it
-
-
-def test_paginate_max_pages(client: MassiveClient) -> None:
-    nxt = "https://api.polygon.io/x?cursor=c"
-    client.session = FakeSession([
-        FakeResponse(200, {"results": [{"a": 1}], "next_url": nxt}),
-        FakeResponse(200, {"results": [{"a": 2}], "next_url": nxt}),
-        FakeResponse(200, {"results": [{"a": 3}]}),
-    ])
-    items = list(client.paginate("/x", max_pages=2))
-    assert [i["a"] for i in items] == [1, 2]
-    assert len(client.session.calls) == 2

@@ -23,6 +23,7 @@ from pricing.drift_check import (
     evaluate_drift,
     main,
     run_drift,
+    _post_webhook,
 )
 from pricing.from_market import ChainCounts, greeks_asof
 from tests.marketdata.conftest import forward_row
@@ -265,3 +266,54 @@ def test_default_thresholds_are_the_documented_canary() -> None:
     assert t.fail_frac == 0.25
     assert t.min_compare == 20
     assert t.atm_pct == 0.05
+
+
+def test_oserror_writes_fail_stub_and_exits_1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Filesystem errors must take the FAIL path (stub report + exit 1)."""
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr("pricing.drift_check.run_drift", boom)
+    rc = main(
+        [
+            "--date",
+            DT.isoformat(),
+            "--asof-ns",
+            str(ASOF_NS),
+            "--r",
+            str(R),
+            "--roots",
+            "SPXW",
+            "--data-root",
+            str(tmp_path),
+            "--force",
+        ]
+    )
+    assert rc == 1
+    payload = json.loads(
+        landing.meta_path("drift_check.json", data_root=tmp_path).read_text(encoding="utf-8")
+    )
+    assert payload["status"] == "FAIL"
+    assert any("disk full" in f for f in payload["failures"])
+
+
+def test_webhook_closes_urlopen(monkeypatch: pytest.MonkeyPatch) -> None:
+    closed: list[bool] = []
+
+    class FakeResp:
+        def __enter__(self) -> FakeResp:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            closed.append(True)
+
+    def fake_urlopen(_req: object, timeout: float = 5) -> FakeResp:
+        assert timeout == 5
+        return FakeResp()
+
+    monkeypatch.setattr("pricing.drift_check.urllib.request.urlopen", fake_urlopen)
+    _post_webhook("http://example.test/hook", {"status": "FAIL"})
+    assert closed == [True]

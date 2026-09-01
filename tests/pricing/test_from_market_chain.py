@@ -458,3 +458,38 @@ def test_cli_happy_path(tmp_path: Path) -> None:
     )
     assert rc == 0
     assert out.is_file()
+
+
+def test_cli_output_oserror_exits_1(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    last = _spxw_last()
+    _write(
+        tmp_path,
+        snap=[_spxw_snap(last)],
+        fwd=[forward_row(underlying="I:SPX", expiry=EXPIRY, forward=F_SPX, asof_ns=ASOF_NS)],
+    )
+    out = tmp_path / "greeks.parquet"
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise OSError("permission denied")
+
+    monkeypatch.setattr("pricing.from_market.pq.write_table", boom)
+    rc = main(
+        [
+            "--date",
+            DT.isoformat(),
+            "--asof-ns",
+            str(ASOF_NS),
+            "--r",
+            str(R),
+            "--roots",
+            "SPXW",
+            "--data-root",
+            str(tmp_path),
+            "--output",
+            str(out),
+            "--crr-steps",
+            "21",
+        ]
+    )
+    assert rc == 1
+    assert not out.exists()

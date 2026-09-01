@@ -401,7 +401,8 @@ def _post_webhook(url: str, payload: dict[str, Any]) -> None:
         data = json.dumps(payload, default=str).encode("utf-8")
         req = urllib.request.Request(url, data=data, method="POST")
         req.add_header("Content-Type", "application/json")
-        urllib.request.urlopen(req, timeout=5)
+        with urllib.request.urlopen(req, timeout=5):
+            pass
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
         print(f"warning: drift webhook failed: {exc}", file=sys.stderr)
 
@@ -614,7 +615,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         ping(ping_url, "", autocreate, body=f"{JOB} ok: {report.counts}")
         return 0
-    except (CatalogError, SchemaError, ChainError, DriftError, ValueError) as exc:
+    except (CatalogError, SchemaError, ChainError, DriftError, ValueError, OSError) as exc:
         logger.log("job_error", job=JOB, error=f"{type(exc).__name__}: {exc}")
         print(f"FAIL  drift  {exc}", file=sys.stderr)
         stub = {

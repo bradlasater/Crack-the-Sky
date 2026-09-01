@@ -664,8 +664,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.output:
         out = Path(args.output)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        pq.write_table(table, out)
+        try:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            pq.write_table(table, out)
+        except OSError as exc:
+            print(f"FAIL  output  {exc}", file=sys.stderr)
+            return 1
         print(f"PASS  wrote {out}", file=sys.stderr)
     return 0
 

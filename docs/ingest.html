@@ -200,10 +200,22 @@
             <td>WS vs flat-file minute bars; rewrites clean <code>option_minute_bars</code> from the flat file. Flat file always wins.</td>
           </tr>
           <tr>
+            <td class="job">term_structure<br><span class="tag">derived</span></td>
+            <td class="when">12:00 · default date = T-1</td>
+            <td>Tue–Sat</td>
+            <td>Reduces <code>option_day_bars</code> to <code>atm_term_structure</code>: one row per (root, expiry) with the parity forward, the ATM strike and both leg IVs. Lives in <code>pricing/</code>, not <code>ingest/</code> — it needs numpy/scipy. Derived, so a missed day is rebuilt with <code>scripts/build_term_structure.py</code>; scheduled anyway because a reduction that stops producing is as invisible as a capture that stops.</td>
+          </tr>
+          <tr>
             <td class="job">coverage_audit</td>
             <td class="when">12:30 · default date = T-1</td>
             <td>Tue–Sat</td>
-            <td>Reports on the <em>absence</em> of a job: sweep counts vs <code>market_gate</code> schedule, largest gap, manifest, non-empty partitions, WS output, per-root ticker counts. Exit 1 → Healthchecks <code>/fail</code>.</td>
+            <td>Reports on the <em>absence</em> of a job: sweep counts vs <code>market_gate</code> schedule, largest gap, manifest, non-empty partitions, WS output, per-root ticker counts. Exit 1 → Healthchecks <code>/fail</code>. Looks at T-1 only — see <code>history_audit</code> for the archive.</td>
+          </tr>
+          <tr>
+            <td class="job">history_audit</td>
+            <td class="when">13:00 · whole archive</td>
+            <td>Saturday</td>
+            <td>Walks every weekday since 2022-08-31 and asserts the three flat-file datasets are present. Tells a holiday from a hole by asking the vendor whether a flat file exists for that date — <code>_meta/holidays.json</code> only covers upcoming dates, and a hardcoded list would miss ad-hoc closures. Answers cache into <code>_meta/trading_days.json</code>, the verified historical calendar. A date with data on disk is never probed, so a healthy run makes no network calls (~4s for 1,044 days). Exit 1 → <code>/fail</code>.</td>
           </tr>
           <tr>
             <td class="job">holidays_sync<br><span class="tag rest">rest</span></td>

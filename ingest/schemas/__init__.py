@@ -256,9 +256,33 @@ def _build_schemas() -> dict[str, Any]:
         pa.field("method", pa.string()),      # 'parity' | 'spot' | 'proxy'
     ]
 
+    # One row per (date, root, expiry): the ATM point of the vol surface.
+    # Derived rather than captured -- it can always be rebuilt from
+    # option_day_bars, which is why it stores the inputs (forward, strike,
+    # both leg prices, the rate) beside the output instead of the IV alone.
+    atm_term_structure_fields = [
+        pa.field("date", pa.string()),             # session the prices are from
+        pa.field("underlying", pa.string()),       # OPRA root: SPXW, VIX, ...
+        pa.field("expiration_date", pa.string()),
+        pa.field("dte", pa.int64()),               # calendar days to expiry
+        pa.field("t_years", pa.float64()),         # ACT/365, matching pricing
+        pa.field("forward", pa.float64()),         # put-call parity forward
+        pa.field("atm_strike", pa.float64()),      # strike nearest the forward
+        pa.field("call_price", pa.float64()),
+        pa.field("put_price", pa.float64()),
+        pa.field("call_iv", pa.float64()),
+        pa.field("put_iv", pa.float64()),
+        pa.field("atm_iv", pa.float64()),          # mean of the legs that inverted
+        pa.field("rate", pa.float64()),            # r used, from the curve
+        pa.field("pairs", pa.int64()),             # strikes quoting both legs
+        pa.field("method", pa.string()),           # forward extraction method
+        pa.field("src", pa.string()),              # 'day_bars' | 'snapshots'
+    ]
+
     contracts_schema = pa.schema(contract_fields)
     return {
         "forwards": pa.schema(forward_fields),
+        "atm_term_structure": pa.schema(atm_term_structure_fields),
         "contracts": contracts_schema,
         "contracts_expired": contracts_schema,  # same schema as contracts
         "option_snapshots": pa.schema(snapshot_fields),

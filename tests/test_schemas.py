@@ -30,6 +30,7 @@ DATASETS = [
     "treasury_yields",
     "inflation",
     "forwards",
+    "atm_term_structure",
     "dividends",
     "splits",
 ]

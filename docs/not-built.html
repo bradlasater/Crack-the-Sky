@@ -60,17 +60,17 @@
           <tr>
             <td>Vol surfaces / interpolator</td>
             <td><span class="badge missing">not built</span></td>
-            <td>Per-contract IV invert. Do not start surfaces from this handbook.</td>
+            <td>The <em>ATM</em> curve is built — <code>atm_term_structure</code>, one row per (date, root, expiry), 2022-08-31 onward. There is still no smile fit and no interpolator, so there is nothing to evaluate off-strike or between expiries.</td>
           </tr>
           <tr>
             <td>Rates warehouse / curve</td>
-            <td><span class="badge missing">not built</span></td>
-            <td>Scalar <code>r</code> (<code>DRIFT_CHECK_R</code>).</td>
+            <td><span class="badge shipped">built</span></td>
+            <td><code>rates_sync</code> lands <code>treasury_yields</code>; <code>ingest.common.rates.rate_for</code> is what every IV inversion discounts with. History is walked back to 1962, so historical dates resolve properly (2022-08-31 → 2.4%, 2023-05-10 → 5.47%). <code>DRIFT_CHECK_R</code> remains only as the canary's scalar override.</td>
           </tr>
           <tr>
             <td>Holiday calendar for T / trading-day theta</td>
             <td><span class="badge missing">not built</span></td>
-            <td>Ingest gate uses <code>_meta/holidays.json</code> (closed / early-close). Pricing T is ACT/365; 252 is a constant, not a calendar.</td>
+            <td>Pricing T is still ACT/365 and 252 is still a constant, not a calendar — nothing here is trading-day aware. A verified <em>historical</em> calendar does now exist as a by-product of <code>history_audit</code> (<code>_meta/trading_days.json</code>, every weekday since 2022-08-31 marked session or holiday against the vendor), so the input for trading-day theta is available even though nothing consumes it. The ingest gate still uses <code>_meta/holidays.json</code>, which only covers upcoming dates.</td>
           </tr>
           <tr>
             <td>NBBO mid</td>
@@ -93,9 +93,14 @@
             <td>Parquet under <code>DATA_ROOT</code>. Docstring leftover only.</td>
           </tr>
           <tr>
-            <td>VIX / VVIX ingest</td>
+            <td>VIX options ingest</td>
+            <td><span class="badge shipped">built</span></td>
+            <td>VIX and VIXW <em>options</em> are captured: roots in <code>OPTION_ROOTS</code>, swept by <code>snapshot_sweep</code>, kept by the flat-file filter, and re-filtered across the whole history. The VIX <em>index level</em> is still a 403, so the per-expiry parity forward is the VX future of that expiry — which is the right object for a term structure.</td>
+          </tr>
+          <tr>
+            <td>VVIX ingest</td>
             <td><span class="badge missing">not built</span></td>
-            <td>Entitlements probe expects 403 on I:VIX.</td>
+            <td>No capture, no root, nothing downstream. Split out from the VIX row because that half shipped and this half did not, and one row cannot carry both badges honestly.</td>
           </tr>
           <tr>
             <td>pandas</td>

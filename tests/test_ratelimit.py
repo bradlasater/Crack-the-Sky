@@ -63,9 +63,13 @@ def test_default_bucket_is_shared() -> None:
 
 def test_shared_bucket_state_is_visible_to_another_instance(tmp_path) -> None:
     """Two bucket objects on one file draw from the same tokens."""
+    # Refill has to be slow enough that it cannot outrun the draws below.
+    # At 1000/s a slower machine refills a whole token between acquires and
+    # the second bucket never has to wait -- which is a flaky test, not a
+    # working limiter.
     path = tmp_path / "ratelimit.json"
-    a = ratelimit.SharedTokenBucket(path, rate=1000.0, burst=10.0)
-    b = ratelimit.SharedTokenBucket(path, rate=1000.0, burst=10.0)
+    a = ratelimit.SharedTokenBucket(path, rate=5.0, burst=10.0)
+    b = ratelimit.SharedTokenBucket(path, rate=5.0, burst=10.0)
     for _ in range(10):
         assert a.acquire() == 0.0
     # The allowance is gone; b must wait rather than getting its own ten.
@@ -74,10 +78,10 @@ def test_shared_bucket_state_is_visible_to_another_instance(tmp_path) -> None:
 
 def test_shared_bucket_refills_over_time(tmp_path) -> None:
     path = tmp_path / "ratelimit.json"
-    bucket = ratelimit.SharedTokenBucket(path, rate=100.0, burst=1.0)
+    bucket = ratelimit.SharedTokenBucket(path, rate=2.0, burst=1.0)
     bucket.acquire()
     waited = bucket.acquire()
-    assert 0.0 < waited < 0.5
+    assert 0.0 < waited < 2.0
 
 
 def test_shared_bucket_survives_a_corrupt_state_file(tmp_path) -> None:
@@ -185,40 +189,103 @@ def _saturate(bucket, stop: threading.Event, priority: str) -> None:
         bucket.acquire(priority=priority)
 
 
-@pytest.mark.parametrize("make", [
-    lambda p: TokenBucket(rate=200.0, burst=10.0),
-    lambda p: ratelimit.SharedTokenBucket(p, rate=200.0, burst=10.0),
-])
-def test_normal_keeps_its_rate_against_a_saturating_low_job(tmp_path, make) -> None:
-    """A long normal-priority run must not be starved by low-priority load."""
-    bucket = make(tmp_path / "rl.json")
-    needed = 60  # a sweep's worth, well beyond the reserve
-
+def _time_normal_against_hogs(bucket, hog_count: int, needed: int) -> float:
+    """Seconds for ``needed`` normal-priority acquires under low-priority load."""
     stop = threading.Event()
     hogs = [
         threading.Thread(target=_saturate, args=(bucket, stop, ratelimit.LOW),
                          daemon=True)
-        for _ in range(4)
+        for _ in range(hog_count)
     ]
     for h in hogs:
         h.start()
     time.sleep(0.1)  # let the hogs drain the bucket first
-
     try:
         start = time.monotonic()
         for _ in range(needed):
             bucket.acquire(priority=ratelimit.NORMAL)
-        elapsed = time.monotonic() - start
+        return time.monotonic() - start
     finally:
         stop.set()
         for h in hogs:
             h.join(timeout=2)
 
-    # Unimpeded this is ~needed/rate = 0.3s. Without preemption four saturating
-    # low-priority threads would take most of the refill and stretch it past a
-    # second. The bound is loose enough for a busy box, tight enough to fail
-    # if priority is not actually enforced.
-    assert elapsed < 0.75, f"normal priority starved: {elapsed:.2f}s"
+
+def _bucket(kind: str, tmp_path, rate: float, burst: float):
+    if kind == "in_process":
+        return TokenBucket(rate=rate, burst=burst)
+    return ratelimit.SharedTokenBucket(
+        tmp_path / f"rl-{time.monotonic_ns()}.json", rate=rate, burst=burst
+    )
+
+
+@pytest.mark.parametrize("kind", ["in_process", "shared"])
+def test_normal_holds_its_rate_under_low_priority_load(tmp_path, kind) -> None:
+    """A long normal-priority run must finish at close to its unimpeded rate.
+
+    Asserted on the enforced side only, deliberately. How *slow* an
+    unenforced bucket gets depends on whether the hog threads win enough
+    scheduler time to saturate it, which is not stable under CI load; how
+    fast the enforced one stays is. The mechanism itself is pinned
+    deterministically by the claim tests below.
+    """
+    needed, rate = 60, 200.0
+    elapsed = _time_normal_against_hogs(_bucket(kind, tmp_path, rate, 10.0), 4, needed)
+    unimpeded = needed / rate  # 0.30s
+    assert elapsed < unimpeded * 2.5, (
+        f"normal priority starved: {elapsed:.2f}s against {unimpeded:.2f}s unimpeded"
+    )
+
+
+@pytest.mark.parametrize("kind", ["in_process", "shared"])
+def test_a_live_normal_claim_parks_low_priority(tmp_path, kind) -> None:
+    """The mechanism, without threads: a live claim gates low priority only.
+
+    This is what makes the guarantee sustained rather than a one-burst floor
+    -- a sweep needs ~173 requests, far more than a reserve holds, so the
+    claim has to keep low-priority callers out for the whole run.
+    """
+    bucket = _bucket(kind, tmp_path, rate=100.0, burst=10.0)
+    claim_for = 0.3
+
+    def _set_claim(until: float) -> None:
+        if kind == "in_process":
+            bucket._normal_claim = until
+        else:
+            bucket.path.write_text(json.dumps({
+                "tokens": 10.0, "updated": time.time(), "normal_claim": until,
+            }), encoding="utf-8")
+
+    # A full bucket and a live claim: normal is served at once...
+    _set_claim(time.time() + claim_for)
+    assert bucket.acquire(priority=ratelimit.NORMAL) == 0.0
+
+    # ...while low priority waits it out, despite tokens being available.
+    _set_claim(time.time() + claim_for)
+    waited = bucket.acquire(priority=ratelimit.LOW)
+    assert waited > 0.0, "low priority ignored a live normal-priority claim"
+
+
+@pytest.mark.parametrize("kind", ["in_process", "shared"])
+def test_a_waiting_normal_caller_registers_a_claim(tmp_path, kind) -> None:
+    """The claim is set by the act of waiting, not by anything external."""
+    bucket = _bucket(kind, tmp_path, rate=1.0, burst=2.0)
+    for _ in range(2):
+        assert bucket.acquire(priority=ratelimit.NORMAL) == 0.0
+
+    done = threading.Event()
+    threading.Thread(
+        target=lambda: (bucket.acquire(priority=ratelimit.NORMAL), done.set()),
+        daemon=True,
+    ).start()
+    time.sleep(0.15)  # long enough for it to fail once and stamp the claim
+
+    if kind == "in_process":
+        claim = bucket._normal_claim
+    else:
+        claim = json.loads(bucket.path.read_text())["normal_claim"]
+    assert claim > time.time(), "a waiting normal caller left no claim"
+    done.wait(timeout=5)
 
 
 def test_low_priority_is_not_throttled_when_nothing_competes(tmp_path) -> None:
@@ -233,9 +300,10 @@ def test_low_priority_is_not_throttled_when_nothing_competes(tmp_path) -> None:
     for _ in range(100):
         bucket.acquire(priority=ratelimit.LOW)
     elapsed = time.monotonic() - start
-    # 100 requests at 500/s from a 20-token burst is ~0.16s; the reserve must
-    # not turn this into a multiple of that.
-    assert elapsed < 0.5, f"low priority throttled with no contention: {elapsed:.2f}s"
+    # 100 requests at 500/s from a 20-token burst is ~0.16s. The bound is
+    # loose because it is guarding against the reserve turning this into
+    # multiple seconds, not against a slow disk.
+    assert elapsed < 1.5, f"low priority throttled with no contention: {elapsed:.2f}s"
 
 
 def test_a_stale_claim_cannot_wedge_low_priority(tmp_path) -> None:

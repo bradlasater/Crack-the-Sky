@@ -51,6 +51,11 @@ JOBS: dict[str, tuple[str, int, str]] = {
     "holidays_sync":    ("0 7 * * 0",       240, "Market calendar refresh (weekly)"),
     "snapshot_sweep":   ("* 10-15 * * 1-5", 10,  "1/min full-chain snapshots - THE irreplaceable dataset"),
     "ws_minute_bars":   ("25 9 * * 1-5",    600, "Delayed options websocket capture (long-running)"),
+    # The run check above can only alarm on "did today's capture finish", which
+    # with a 10-hour grace means a process that dies at 09:26 stays green all
+    # day. This second check is pinged from the job's 5-minute stats tick, so a
+    # mid-session death surfaces in ~15 minutes instead of ~10 hours.
+    "ws_minute_bars_alive": ("*/5 10-15 * * 1-5", 15, "Websocket capture liveness (pinged every 5 min while running)"),
     "trades_watchlist": ("*/5 10-15 * * 1-5", 20, "Same-day option trades for the liquid watchlist"),
     "underlying_bars":  ("5 8 * * 2-6",     90,  "SPY minute bars, T-1 only"),
     "grouped_daily":    ("10 8 * * 2-6",    90,  "Whole-market daily bars (SPY + VIX proxies)"),

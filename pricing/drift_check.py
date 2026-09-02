@@ -804,6 +804,14 @@ def main(argv: list[str] | None = None) -> int:
     logger = get_run_logger(JOB, dt, log_root=log_root)
     ping_url, autocreate = _hc_target(file_vals)
     ping(ping_url, "/start", autocreate)
+    # ``cli.run_job`` guarantees exactly one terminal event and one terminal
+    # ping per run. This job does not go through it, and the exception
+    # taxonomy caught below is narrow: on 2026-09-01 the 17:00 cron run logged
+    # ``job_start`` and then nothing at all -- no job_end, no job_error, no
+    # ping -- because whatever ended it was outside that taxonomy. A canary
+    # that can die without saying so is not a canary, so every exit path from
+    # here on is accounted for, including the ones nobody enumerated.
+    sent_terminal = False
     try:
         if not args.force:
             try:
@@ -812,6 +820,7 @@ def main(argv: list[str] | None = None) -> int:
                 code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
                 if code == 0:
                     logger.log("job_end", job=JOB, skipped="not_a_trading_day", date=dt.isoformat())
+                    sent_terminal = True
                     ping(ping_url, "", autocreate, body=f"{JOB} skipped (not a trading day)")
                     return 0
                 raise
@@ -859,8 +868,12 @@ def main(argv: list[str] | None = None) -> int:
             path = _write_report(report, data_root)
             print(f"{report.status}  wrote {path}", file=sys.stderr)
         if report.status == FAIL:
+            logger.log("job_end", job=JOB, status=FAIL, date=dt.isoformat())
+            sent_terminal = True
             _alert_fail(payload, file_vals=file_vals, ping_url=ping_url, autocreate=autocreate)
             return 1
+        logger.log("job_end", job=JOB, status=report.status, date=dt.isoformat())
+        sent_terminal = True
         ping(ping_url, "", autocreate, body=f"{JOB} ok: {report.counts}")
         return 0
     except (CatalogError, SchemaError, ChainError, DriftError, ValueError, OSError) as exc:
@@ -878,9 +891,28 @@ def main(argv: list[str] | None = None) -> int:
                 path.write_text(json.dumps(stub, indent=2) + "\n", encoding="utf-8")
             except OSError as write_exc:
                 print(f"warning: could not write report: {write_exc}", file=sys.stderr)
+        sent_terminal = True
         _alert_fail(stub, file_vals=file_vals, ping_url=ping_url, autocreate=autocreate)
         return 1
+    except BaseException as exc:
+        # Deliberately broad, and re-raised: MemoryError, KeyboardInterrupt, a
+        # SIGTERM-turned-SystemExit and every bug outside the taxonomy above
+        # used to leave the run silent. Report, then let it propagate.
+        logger.log("job_error", job=JOB, error=f"{type(exc).__name__}: {exc}",
+                   unhandled=True)
+        print(f"FAIL  drift  unhandled {type(exc).__name__}: {exc}", file=sys.stderr)
+        sent_terminal = True
+        ping(ping_url, "/fail", autocreate,
+             body=f"{JOB} unhandled {type(exc).__name__}: {exc}"[:10000])
+        raise
     finally:
+        if not sent_terminal:
+            # Reached only if the interpreter left the try block by a route
+            # neither handler saw. Still better than silence.
+            logger.log("job_end", job=JOB, status=FAIL, date=dt.isoformat(),
+                       error="run ended without a terminal event")
+            ping(ping_url, "/fail", autocreate,
+                 body=f"{JOB} ended without a terminal event")
         logger.close()
 
 

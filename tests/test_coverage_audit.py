@@ -52,8 +52,10 @@ def _write_manifest(root: Path, day: date, datasets=("trades_v1", "minute_aggs_v
 # ---------------------------------------------------------------------------
 
 def test_expected_sweeps_regular_session(tmp_path: Path) -> None:
-    # 09:30 -> 16:20 (close + 20 min buffer) = 410 minutes.
-    assert audit.expected_sweeps(RUN_DATE, tmp_path) == 410
+    # 09:30 -> 16:30 (close + the crontab's 30-minute tail), both endpoints
+    # firing, = 421 sweeps. Not close + 20: that is the websocket deadline,
+    # and borrowing it here understated the day by ten sweeps.
+    assert audit.expected_sweeps(RUN_DATE, tmp_path) == 421
 
 
 def test_expected_sweeps_shrinks_on_early_close(tmp_path: Path) -> None:
@@ -75,23 +77,125 @@ def test_expected_sweeps_shrinks_on_early_close(tmp_path: Path) -> None:
 # Individual checks
 # ---------------------------------------------------------------------------
 
+def _window_base_ms(tmp_path: Path) -> int:
+    """Epoch-ms of the first scheduled in-session sweep on RUN_DATE."""
+    open_et, _ = audit.sweep_window(RUN_DATE, tmp_path)
+    return int(open_et.timestamp() * 1000)
+
+
+def _singleton_ms(tmp_path: Path, which: str) -> int:
+    """Epoch-ms of the pre-open or EOD sweep, as the crontab schedules it."""
+    from datetime import datetime
+
+    from ingest.common import market_gate
+    at = audit.PREOPEN_SWEEP_ET if which == "preopen" else audit.EOD_SWEEP_ET
+    return int(datetime.combine(RUN_DATE, at, tzinfo=market_gate.ET).timestamp() * 1000)
+
+
+def _land_full_day(tmp_path: Path, roots=("SPY", "I:SPX", "VIX")) -> Path:
+    """A healthy day exactly as the crontab produces it, singletons included."""
+    part = tmp_path / "clean" / "option_snapshots" / f"dt={RUN_DATE.isoformat()}"
+    part.mkdir(parents=True, exist_ok=True)
+    expected = audit.expected_sweeps(RUN_DATE, tmp_path)
+    base = _window_base_ms(tmp_path)
+    for root in roots:
+        for i in range(expected):
+            (part / f"snapshot_sweep-{root}-{base + i * 60_000}.parquet").touch()
+        for which in ("preopen", "eod"):
+            ms = _singleton_ms(tmp_path, which)
+            (part / f"snapshot_sweep-eod-{root}-{ms}.parquet").touch()
+    return part
+
+
 def test_snapshots_fail_when_nothing_landed(tmp_path: Path) -> None:
     checks = audit.check_snapshots(_settings(tmp_path), RUN_DATE)
     assert {c.status for c in checks} == {audit.FAIL}
-    assert all("no sweeps landed" in c.detail for c in checks)
+    per_root = [c for c in checks if c.name.startswith("snapshots[")]
+    assert all("no in-session sweeps landed" in c.detail for c in per_root)
 
 
 def test_snapshots_pass_at_full_cadence(tmp_path: Path) -> None:
-    settings = _settings(tmp_path)
+    _land_full_day(tmp_path)
+    checks = audit.check_snapshots(_settings(tmp_path), RUN_DATE)
+    assert {c.status for c in checks} == {audit.PASS}
+
+
+def test_scheduled_preopen_and_eod_sweeps_are_not_gaps(tmp_path: Path) -> None:
+    """The regression this check existed to have: a healthy day must be clean.
+
+    The 09:05 -> 09:30 wait and the 16:30 -> 16:35 wait are both far beyond
+    MAX_SWEEP_GAP_S. Scanning the whole partition made every single day WARN
+    on SPY and SPX, which is how the one dataset that cannot be backfilled
+    ended up with an alarm nobody could act on.
+    """
+    _land_full_day(tmp_path)
+    checks = audit.check_snapshots(_settings(tmp_path), RUN_DATE)
+    per_root = {c.name: c for c in checks if c.name.startswith("snapshots[")}
+    assert {c.status for c in per_root.values()} == {audit.PASS}
+    for check in per_root.values():
+        assert check.data["max_gap_s"] <= audit.MAX_SWEEP_GAP_S
+        assert check.data["preopen"] == 1
+        assert check.data["eod"] == 1
+
+
+def test_missing_preopen_sweep_fails_even_at_full_cadence(tmp_path: Path) -> None:
+    """Settled open interest exists only in the 09:05 sweep."""
+    part = _land_full_day(tmp_path)
+    ms = _singleton_ms(tmp_path, "preopen")
+    (part / f"snapshot_sweep-eod-VIX-{ms}.parquet").unlink()
+    checks = {c.name: c for c in audit.check_snapshots(_settings(tmp_path), RUN_DATE)}
+    assert checks["snapshots_preopen"].status == audit.FAIL
+    assert checks["snapshots_preopen"].data["missing"] == ["VIX"]
+    assert checks["snapshots[VIX]"].status == audit.PASS  # cadence itself is fine
+
+
+def test_missing_eod_sweep_fails_even_at_full_cadence(tmp_path: Path) -> None:
+    """drift_check reprices the EOD chain; losing it is silent otherwise."""
+    part = _land_full_day(tmp_path)
+    ms = _singleton_ms(tmp_path, "eod")
+    (part / f"snapshot_sweep-eod-SPY-{ms}.parquet").unlink()
+    checks = {c.name: c for c in audit.check_snapshots(_settings(tmp_path), RUN_DATE)}
+    assert checks["snapshots_eod"].status == audit.FAIL
+    assert checks["snapshots_eod"].data["missing"] == ["SPY"]
+
+
+def test_out_of_session_sweeps_are_reported_but_never_counted(tmp_path: Path) -> None:
+    """A sweep run by hand overnight must not pad the ratio or fake a gap.
+
+    Manual runs land in the same dt= partition. Counting them let extra
+    out-of-hours sweeps satisfy the 95% ratio while real in-session minutes
+    were missing, and made the overnight wait look like an 8-hour outage.
+    """
+    part = _land_full_day(tmp_path)
+    base = _window_base_ms(tmp_path)
+    stray = base - 8 * 3600 * 1000  # ~01:30 ET, as a manual run would land
+    for root in ("SPY", "I:SPX", "VIX"):
+        (part / f"snapshot_sweep-{root}-{stray}.parquet").touch()
+    checks = {c.name: c for c in audit.check_snapshots(_settings(tmp_path), RUN_DATE)}
+    spy = checks["snapshots[SPY]"]
+    assert spy.status == audit.PASS
+    assert spy.data["stray"] == 1
+    assert spy.data["sweeps"] == audit.expected_sweeps(RUN_DATE, tmp_path)
+    assert spy.data["max_gap_s"] <= audit.MAX_SWEEP_GAP_S
+
+
+def test_a_hole_is_not_masked_by_extra_out_of_session_sweeps(tmp_path: Path) -> None:
+    """Strays must not buy back a genuinely missing chunk of the session."""
     part = tmp_path / "clean" / "option_snapshots" / f"dt={RUN_DATE.isoformat()}"
     part.mkdir(parents=True)
     expected = audit.expected_sweeps(RUN_DATE, tmp_path)
-    base = 1788000000000
+    base = _window_base_ms(tmp_path)
+    kept = int(expected * 0.90)
     for root in ("SPY", "I:SPX", "VIX"):
-        for i in range(expected):
+        for i in range(kept):
             (part / f"snapshot_sweep-{root}-{base + i * 60_000}.parquet").touch()
-    checks = audit.check_snapshots(settings, RUN_DATE)
-    assert {c.status for c in checks} == {audit.PASS}
+        # Plenty of overnight runs -- enough to restore the raw file count.
+        for j in range(expected - kept):
+            ms = base - (j + 1) * 60_000 - 8 * 3600 * 1000
+            (part / f"snapshot_sweep-{root}-{ms}.parquet").touch()
+    checks = {c.name: c for c in audit.check_snapshots(_settings(tmp_path), RUN_DATE)}
+    assert checks["snapshots[SPY]"].status == audit.FAIL
+    assert "only 90% of expected sweeps" in checks["snapshots[SPY]"].detail
 
 
 def test_snapshots_warn_on_a_hole(tmp_path: Path) -> None:
@@ -100,7 +204,7 @@ def test_snapshots_warn_on_a_hole(tmp_path: Path) -> None:
     part = tmp_path / "clean" / "option_snapshots" / f"dt={RUN_DATE.isoformat()}"
     part.mkdir(parents=True)
     expected = audit.expected_sweeps(RUN_DATE, tmp_path)
-    base = 1788000000000
+    base = _window_base_ms(tmp_path)
     for root in ("SPY", "I:SPX", "VIX"):
         for i in range(expected):
             offset = i * 60_000 + (600_000 if i > expected // 2 else 0)
@@ -187,3 +291,70 @@ def test_render_lists_every_check(tmp_path: Path) -> None:
     checks = [audit.Check("a", audit.PASS, "ok"), audit.Check("b", audit.FAIL, "bad")]
     out = audit._render(RUN_DATE, checks)
     assert "PASS" in out and "FAIL" in out and RUN_DATE.isoformat() in out
+
+
+# ---------------------------------------------------------------------------
+# Disk runway
+# ---------------------------------------------------------------------------
+#
+# option_snapshots cannot be backfilled and prune_raw.sh rightly refuses to
+# touch it, so a full volume is a capture outage with a long fuse. Monitor the
+# fuse.
+
+def _land_snapshot_bytes(tmp_path: Path, day: date, total: int) -> None:
+    part = tmp_path / "clean" / "option_snapshots" / f"dt={day.isoformat()}"
+    part.mkdir(parents=True, exist_ok=True)
+    (part / f"snapshot_sweep-SPY-{day.toordinal()}.parquet").write_bytes(b"x" * total)
+
+
+def _fake_usage(monkeypatch, free: int, total: int = 1_000_000_000_000) -> None:
+    import shutil as _shutil
+    monkeypatch.setattr(
+        audit.shutil, "disk_usage",
+        lambda p: _shutil._ntuple_diskusage(total, total - free, free),
+    )
+
+
+def test_disk_runway_skips_without_a_growth_sample(tmp_path: Path, monkeypatch) -> None:
+    _fake_usage(monkeypatch, free=500_000_000_000)
+    checks = audit.check_disk(_settings(tmp_path), RUN_DATE)
+    assert checks[0].status == audit.SKIP
+
+
+def test_disk_runway_passes_with_headroom(tmp_path: Path, monkeypatch) -> None:
+    _land_snapshot_bytes(tmp_path, RUN_DATE, 1_000_000)
+    _fake_usage(monkeypatch, free=1_000_000 * 500)
+    check = audit.check_disk(_settings(tmp_path), RUN_DATE)[0]
+    assert check.status == audit.PASS
+    assert check.data["days_remaining"] == 500.0
+
+
+def test_disk_runway_warns_then_fails_as_it_shrinks(tmp_path: Path, monkeypatch) -> None:
+    _land_snapshot_bytes(tmp_path, RUN_DATE, 1_000_000)
+    settings = _settings(tmp_path)
+
+    _fake_usage(monkeypatch, free=1_000_000 * 100)  # 100 days
+    assert audit.check_disk(settings, RUN_DATE)[0].status == audit.WARN
+
+    _fake_usage(monkeypatch, free=1_000_000 * 30)   # 30 days
+    assert audit.check_disk(settings, RUN_DATE)[0].status == audit.FAIL
+
+
+def test_growth_ignores_partitions_after_the_audited_day(tmp_path: Path) -> None:
+    """Today's partition is half-written; counting it doubles the runway."""
+    from datetime import timedelta
+    _land_snapshot_bytes(tmp_path, RUN_DATE, 1_000_000)
+    _land_snapshot_bytes(tmp_path, RUN_DATE + timedelta(days=1), 10_000)  # in progress
+    per_day, sampled = audit.daily_snapshot_growth(_settings(tmp_path), RUN_DATE)
+    assert per_day == 1_000_000
+    assert sampled == 1
+
+
+def test_growth_uses_the_busiest_day_not_the_mean(tmp_path: Path) -> None:
+    """A short day in the sample must not flatter the runway."""
+    from datetime import timedelta
+    _land_snapshot_bytes(tmp_path, RUN_DATE - timedelta(days=1), 10_000)  # part day
+    _land_snapshot_bytes(tmp_path, RUN_DATE, 1_000_000)
+    per_day, sampled = audit.daily_snapshot_growth(_settings(tmp_path), RUN_DATE)
+    assert per_day == 1_000_000
+    assert sampled == 2

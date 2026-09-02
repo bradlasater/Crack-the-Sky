@@ -78,8 +78,23 @@
       <p>
         Also in code, not in <code>.env.example</code>:
         <code>MASSIVE_MAX_RPS</code> / <code>MASSIVE_BURST</code> (40),
+        <code>MASSIVE_RATELIMIT_SHARED</code> (1 — the token bucket is
+        cross-process by default, so every job on the box draws on one
+        allowance rather than one each; set 0 for the old per-process
+        behaviour),
+        <code>MASSIVE_RATELIMIT_STATE</code>
+        (<code>DATA_ROOT/_meta/ratelimit.json</code>),
+        <code>MASSIVE_PRIORITY_RESERVE</code> (0.35 — the fraction of the
+        bucket reserved for <code>snapshot_sweep</code>; every other capture
+        job draws at low priority and stops at this floor, which is where
+        &ldquo;everything else yields API budget to it&rdquo; is actually
+        enforced),
         <code>TRADES_CONCURRENCY</code> (8),
         <code>RETAIN_DAYS</code> (90),
+        <code>QUARANTINE_RETAIN_DAYS</code> (30 — superseded re-filter output
+        under <code>_quarantine/</code>, pruned on the monthly run),
+        <code>FLATFILE_RETAIN_DAYS</code> (365 — only consulted with
+        <code>prune_raw.sh --flatfiles</code>, which is opt-in),
         <code>MIN_FREE_GB</code> (100 on backfill),
         <code>TZ_NAME</code> (America/New_York),
         <code>JOB_MAX_ATTEMPTS</code> (3) / <code>JOB_RETRY_BASE_S</code> (30s,

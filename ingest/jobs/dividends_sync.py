@@ -9,7 +9,7 @@ from __future__ import annotations
 from itertools import islice
 from typing import Any
 
-from ingest.common import landing
+from ingest.common import landing, ratelimit
 from ingest.common.cli import run_job
 from ingest.common.config import Settings
 from ingest.common.http_client import MassiveClient
@@ -79,7 +79,7 @@ def _sync_dataset(
 
 
 def _main_fn(args, settings: Settings, logger: JsonlLogger):
-    client = MassiveClient(settings)
+    client = MassiveClient(settings, priority=ratelimit.LOW)
     tickers = parse_underlyings(args.underlying, DEFAULT_TICKERS)
     totals = {"rows": 0}
     for ticker in tickers:

@@ -53,9 +53,21 @@
 
       <p>
         Three pipes into one disk tree. Everything live is 15-minute delayed.
-        Cron is the scheduler; <code>flock</code> prevents overlap. Shared runner
-        is <code>ingest.common.cli.run_job</code> (settings, market gate, JSONL
-        logs, per-job Healthchecks <code>/start</code> and <code>/fail</code>).
+        Cron is the scheduler; every line goes through
+        <code>scripts/cronjob.sh</code>, which takes the job's
+        <code>flock</code> and — when a previous run still holds it — logs a
+        <code>job_skipped</code> event instead of dropping the run in silence.
+        Shared runner is <code>ingest.common.cli.run_job</code> (settings,
+        market gate, JSONL logs, per-job Healthchecks <code>/start</code> and
+        <code>/fail</code>).
+      </p>
+      <p>
+        Outbound REST rate is bounded <em>per box</em>, not per process: the
+        token bucket keeps its tokens in
+        <code>_meta/ratelimit.json</code> under <code>flock</code>, and every
+        capture job except <code>snapshot_sweep</code> draws at low priority
+        and stops at a reserve. Snapshots cannot be re-swept; trades and bars
+        come back from the flat files, so they are the ones that yield.
       </p>
 
       <div class="diagram" aria-label="Ingest architecture">
@@ -209,7 +221,7 @@
             <td class="job">coverage_audit</td>
             <td class="when">12:30 · default date = T-1</td>
             <td>Tue–Sat</td>
-            <td>Reports on the <em>absence</em> of a job: sweep counts vs <code>market_gate</code> schedule, largest gap, manifest, non-empty partitions, WS output, per-root ticker counts. Exit 1 → Healthchecks <code>/fail</code>. Looks at T-1 only — see <code>history_audit</code> for the archive.</td>
+            <td>Reports on the <em>absence</em> of a job: sweep counts vs <code>market_gate</code> schedule, largest gap, manifest, non-empty partitions, WS output, per-root ticker counts, and disk runway. Cadence is measured over the continuous 09:30–16:30 window <em>only</em>: the scheduled 09:05 pre-open and 16:35 EOD sweeps are asserted separately (<code>snapshots_preopen</code> / <code>snapshots_eod</code>), and sweeps run by hand outside the session are reported but never counted — folding all three together made SPY and SPX WARN every single day on a healthy box, and let out-of-hours runs pad the ratio over a real hole. Exit 1 → Healthchecks <code>/fail</code>. Looks at T-1 only — see <code>history_audit</code> for the archive.</td>
           </tr>
           <tr>
             <td class="job">history_audit</td>

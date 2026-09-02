@@ -468,3 +468,83 @@ def test_slack_webhook_wraps_text_field(monkeypatch: pytest.MonkeyPatch) -> None
     drift_mod._post_webhook("http://example.test/hook", {"status": "FAIL", "date": DT.isoformat()})
     assert captured[0]["status"] == "FAIL"
     assert "text" not in captured[0]
+
+
+# ---------------------------------------------------------------------------
+# Terminal-event guarantee
+# ---------------------------------------------------------------------------
+#
+# On 2026-09-01 the 17:00 cron run of this job logged job_start and then
+# nothing: no job_end, no job_error, no Healthchecks ping. The exception
+# taxonomy main() catches is narrow, and anything outside it left the run
+# silent -- the pricing canary failing in exactly the way it exists to detect.
+
+def _drift_pings(monkeypatch) -> list[tuple[str, bytes]]:
+    calls: list[tuple[str, bytes]] = []
+    monkeypatch.setattr(
+        drift_mod, "ping",
+        lambda url, suffix="", autocreate=False, body=None: calls.append(
+            ((url or "") + suffix, body or b"")
+        ),
+    )
+    return calls
+
+
+@pytest.mark.parametrize("exc", [MemoryError("oom"), RuntimeError("boom"), KeyError("k")])
+def test_unhandled_exception_still_reports_before_propagating(
+    tmp_path, monkeypatch, exc
+) -> None:
+    """An exception outside the taxonomy must ping /fail, then re-raise."""
+    calls = _drift_pings(monkeypatch)
+    events: list[tuple[str, dict]] = []
+
+    class _Logger:
+        def log(self, event, **fields):
+            events.append((event, fields))
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(drift_mod, "get_run_logger", lambda *a, **k: _Logger())
+    monkeypatch.setattr(drift_mod, "require_trading_day", lambda *a, **k: None)
+
+    def _explode(*a, **k):
+        raise exc
+
+    monkeypatch.setattr(drift_mod, "run_drift", _explode)
+
+    with pytest.raises(type(exc)):
+        drift_mod.main(["--date", "2026-09-01", "--data-root", str(tmp_path)])
+
+    assert any(e == "job_error" and f.get("unhandled") for e, f in events), events
+    assert any(url.endswith("/fail") for url, _ in calls), calls
+
+
+def test_successful_run_logs_exactly_one_terminal_event(tmp_path, monkeypatch) -> None:
+    """The healthy path must be accounted for too, or the guarantee is empty."""
+    calls = _drift_pings(monkeypatch)
+    events: list[tuple[str, dict]] = []
+
+    class _Logger:
+        def log(self, event, **fields):
+            events.append((event, fields))
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(drift_mod, "get_run_logger", lambda *a, **k: _Logger())
+    monkeypatch.setattr(drift_mod, "require_trading_day", lambda *a, **k: None)
+
+    report = drift_mod.DriftReport(
+        date="2026-09-01", asof_ns=1, cutoff_et="16:40", r=None,
+        status=drift_mod.PASS, failures=[], counts={"priced": 1},
+    )
+    monkeypatch.setattr(drift_mod, "run_drift", lambda *a, **k: report)
+
+    rc = drift_mod.main(
+        ["--date", "2026-09-01", "--data-root", str(tmp_path), "--dry-run"]
+    )
+    assert rc == 0
+    terminal = [e for e, _ in events if e in ("job_end", "job_error")]
+    assert terminal == ["job_end"], events
+    assert sum(1 for url, _ in calls if not url.endswith("/start")) == 1, calls

@@ -199,11 +199,35 @@ def test_every_scheduled_job_is_monitored() -> None:
     assert not missing, f"scheduled but unmonitored: {sorted(missing)}"
 
 
+# Checks that are pinged by a running job rather than started by cron. Each
+# needs an owning cron job, or it is exactly the never-pinged check the test
+# above exists to prevent.
+JOB_PINGED_CHECKS = {"ws_minute_bars_alive": "ws_minute_bars"}
+
+
 def test_no_monitoring_for_unscheduled_jobs() -> None:
     """A check for a job nothing runs would alert forever."""
     mod = _setup_module()
-    extra = set(mod.JOBS) - _scheduled_jobs()
+    extra = set(mod.JOBS) - _scheduled_jobs() - set(JOB_PINGED_CHECKS)
     assert not extra, f"monitored but not scheduled: {sorted(extra)}"
+
+
+def test_job_pinged_checks_have_a_scheduled_owner() -> None:
+    """A liveness check is only meaningful while its owning job is running."""
+    mod = _setup_module()
+    scheduled = _scheduled_jobs()
+    for check, owner in JOB_PINGED_CHECKS.items():
+        assert check in mod.JOBS, f"{check} is not registered"
+        assert owner in scheduled, f"{check} has no scheduled owner ({owner})"
+
+
+def test_liveness_check_slug_matches_what_the_job_pings() -> None:
+    """The job and the setup script must agree, or the check is never pinged."""
+    from ingest.jobs.ws_minute_bars import LIVENESS_JOB
+
+    mod = _setup_module()
+    assert LIVENESS_JOB in mod.JOBS
+    assert mod.slug_for(LIVENESS_JOB) == cli.healthcheck_slug(LIVENESS_JOB)
 
 
 def test_eod_dayaggs_is_deliberately_unmonitored() -> None:

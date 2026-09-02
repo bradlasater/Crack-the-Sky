@@ -18,7 +18,7 @@ from __future__ import annotations
 import sys
 from typing import Any
 
-from ingest.common import landing, market_gate
+from ingest.common import landing, market_gate, ratelimit
 from ingest.common.cli import run_job
 from ingest.common.config import Settings
 from ingest.common.http_client import MassiveClient
@@ -52,7 +52,7 @@ def _bar_record(bar: dict[str, Any]) -> dict[str, Any]:
 
 def _main_fn(args, settings: Settings, logger: JsonlLogger, keep_all: bool):
     run_date = run_date_from_args(args)
-    client = MassiveClient(settings)
+    client = MassiveClient(settings, priority=ratelimit.LOW)
     body = client.get(
         f"{GROUPED_PATH}/{run_date.isoformat()}", params={"adjusted": "true"}
     )

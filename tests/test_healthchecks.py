@@ -199,11 +199,35 @@ def test_every_scheduled_job_is_monitored() -> None:
     assert not missing, f"scheduled but unmonitored: {sorted(missing)}"
 
 
+# Checks that are pinged by a running job rather than started by cron. Each
+# needs an owning cron job, or it is exactly the never-pinged check the test
+# above exists to prevent.
+JOB_PINGED_CHECKS = {"ws_minute_bars_alive": "ws_minute_bars"}
+
+
 def test_no_monitoring_for_unscheduled_jobs() -> None:
     """A check for a job nothing runs would alert forever."""
     mod = _setup_module()
-    extra = set(mod.JOBS) - _scheduled_jobs()
+    extra = set(mod.JOBS) - _scheduled_jobs() - set(JOB_PINGED_CHECKS)
     assert not extra, f"monitored but not scheduled: {sorted(extra)}"
+
+
+def test_job_pinged_checks_have_a_scheduled_owner() -> None:
+    """A liveness check is only meaningful while its owning job is running."""
+    mod = _setup_module()
+    scheduled = _scheduled_jobs()
+    for check, owner in JOB_PINGED_CHECKS.items():
+        assert check in mod.JOBS, f"{check} is not registered"
+        assert owner in scheduled, f"{check} has no scheduled owner ({owner})"
+
+
+def test_liveness_check_slug_matches_what_the_job_pings() -> None:
+    """The job and the setup script must agree, or the check is never pinged."""
+    from ingest.jobs.ws_minute_bars import LIVENESS_JOB
+
+    mod = _setup_module()
+    assert LIVENESS_JOB in mod.JOBS
+    assert mod.slug_for(LIVENESS_JOB) == cli.healthcheck_slug(LIVENESS_JOB)
 
 
 def test_eod_dayaggs_is_deliberately_unmonitored() -> None:
@@ -610,3 +634,76 @@ def test_retry_backoff_is_exponential_and_capped(tmp_path, monkeypatch, recorder
     with pytest.raises(SystemExit):
         cli.run_job("contracts_sync", boom, [])
     assert sleeps == [30.0, 60.0, 120.0, 240.0, 300.0, 300.0]
+
+
+def test_liveness_schedule_stays_inside_the_capture_window() -> None:
+    """Expecting a ping when the job is not running would alarm every day.
+
+    The check exists to catch a mid-session death, so every minute it expects
+    a ping must fall between the first stats tick and the capture deadline.
+    A wider expression would be "better coverage" that pages nightly and gets
+    muted, which is worse than the gap it closes.
+    """
+    from datetime import date, datetime, timedelta
+
+    from ingest.common import market_gate
+    from ingest.jobs.ws_minute_bars import STATS_INTERVAL_S, WINDOW_START
+
+    mod = _setup_module()
+    schedule, grace_minutes, _ = mod.JOBS["ws_minute_bars_alive"]
+    minute_field, hour_field = schedule.split()[0], schedule.split()[1]
+
+    def _expand(field: str, hi: int) -> list[int]:
+        out: set[int] = set()
+        for part in field.split(","):
+            step = 1
+            if "/" in part:
+                part, step_s = part.split("/")
+                step = int(step_s)
+            if part == "*":
+                lo_v, hi_v = 0, hi
+            elif "-" in part:
+                lo_s, hi_s = part.split("-")
+                lo_v, hi_v = int(lo_s), int(hi_s)
+            else:
+                lo_v = hi_v = int(part)
+            out.update(range(lo_v, hi_v + 1, step))
+        return sorted(out)
+
+    minutes, hours = _expand(minute_field, 59), _expand(hour_field, 23)
+    first = datetime(2026, 9, 2, hours[0], minutes[0], tzinfo=market_gate.ET)
+    last = datetime(2026, 9, 2, hours[-1], minutes[-1], tzinfo=market_gate.ET)
+
+    day = date(2026, 9, 2)
+    earliest_ping = (
+        datetime.combine(day, WINDOW_START, tzinfo=market_gate.ET)
+        + timedelta(seconds=STATS_INTERVAL_S)
+    )
+    deadline = market_gate.option_capture_end_et(day)
+
+    assert first >= earliest_ping, (
+        f"expects a ping at {first:%H:%M}, before the first stats tick "
+        f"at {earliest_ping:%H:%M}"
+    )
+    assert last + timedelta(minutes=grace_minutes) <= deadline, (
+        f"last expected ping {last:%H:%M} + {grace_minutes}m grace runs past "
+        f"the {deadline:%H:%M} capture deadline"
+    )
+
+
+def test_run_check_grace_covers_the_whole_capture_window() -> None:
+    """The terminal ping arrives hours after the scheduled start time."""
+    from datetime import date, datetime, timedelta
+
+    from ingest.common import market_gate
+
+    mod = _setup_module()
+    schedule, grace_minutes, _ = mod.JOBS["ws_minute_bars"]
+    minute, hour = int(schedule.split()[0]), int(schedule.split()[1])
+
+    day = date(2026, 9, 2)
+    starts = datetime(2026, 9, 2, hour, minute, tzinfo=market_gate.ET)
+    deadline = market_gate.option_capture_end_et(day)
+    assert starts + timedelta(minutes=grace_minutes) > deadline, (
+        "grace expires before the job's own terminal ping is due"
+    )

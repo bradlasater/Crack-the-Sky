@@ -15,7 +15,7 @@ from typing import Any
 
 import requests
 
-from ingest.common import landing
+from ingest.common import landing, ratelimit
 from ingest.common.cli import run_job
 from ingest.common.config import Settings
 from ingest.common.http_client import MassiveClient
@@ -84,7 +84,7 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger, watchlist: bool):
     if args.limit is not None:
         tickers = tickers[: args.limit]
 
-    client = MassiveClient(settings)
+    client = MassiveClient(settings, priority=ratelimit.LOW)
     records: list[dict[str, Any]] = []
     raw_bars: list[dict[str, Any]] = []
     skipped_404 = empty = 0

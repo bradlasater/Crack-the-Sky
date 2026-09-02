@@ -18,7 +18,7 @@ from itertools import islice
 from typing import Any
 
 from ingest import schemas
-from ingest.common import landing
+from ingest.common import landing, ratelimit
 from ingest.common.cli import run_job
 from ingest.common.config import Settings
 from ingest.common.http_client import MassiveClient
@@ -26,6 +26,7 @@ from ingest.common.logging_utils import JsonlLogger
 from ingest.jobs import (
     latest_clean_records,
     parse_underlyings,
+    partition_dates,
     run_date_from_args,
     strip_flag,
 )
@@ -40,13 +41,28 @@ CONTRACTS_PATH = "/v3/reference/options/contracts"
 def _previous_tickers(
     settings: Settings, dataset: str, run_date, underlying: str
 ) -> set[str]:
-    """Tickers of the latest existing clean partition for this underlying."""
-    previous = latest_clean_records(settings, dataset, run_date)
-    return {
-        r["ticker"]
-        for r in previous
-        if r.get("underlying_ticker") == underlying and r.get("ticker")
-    }
+    """Tickers of the most recent partition that actually holds ``underlying``.
+
+    Walking back per underlying is the point. ``latest_clean_records`` returns
+    whatever the newest partition is, and the underlyings are synced in order
+    into a *shared* partition -- so at the 08:00 run SPY writes today's
+    partition first, and SPX and VIX then diff against a partition that does
+    not contain them yet. The baseline came back empty and every contract
+    looked new: 2026-09-02 reported SPX ``new=28642, gone=0`` on a day the
+    universe barely moved, and ``gone`` was structurally always zero, so a
+    mass delisting could never have shown up.
+    """
+    for dt in reversed(partition_dates(settings, dataset)):
+        if dt > run_date:
+            continue
+        tickers = {
+            r["ticker"]
+            for r in latest_clean_records(settings, dataset, dt)
+            if r.get("underlying_ticker") == underlying and r.get("ticker")
+        }
+        if tickers:
+            return tickers
+    return set()
 
 
 def _sync_pass(
@@ -97,7 +113,7 @@ def _sync_pass(
 
 
 def _main_fn(args, settings: Settings, logger: JsonlLogger, expired: bool):
-    client = MassiveClient(settings)
+    client = MassiveClient(settings, priority=ratelimit.LOW)
     underlyings = parse_underlyings(args.underlying, DEFAULT_UNDERLYINGS)
     totals = {"rows": 0, "new": 0, "gone": 0, "expired_rows": 0}
     for underlying in underlyings:

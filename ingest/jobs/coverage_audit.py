@@ -16,6 +16,7 @@ of them fail, so cron, Healthchecks.io and the box CI workflow all surface it:
   * ``contracts`` -- universe present, and per-underlying counts sane.
   * ``option_trades`` / bars -- partitions non-empty.
   * websocket capture -- raw files present and ``ws_gap`` events counted.
+  * disk runway -- how many days of snapshot growth the volume still holds.
   * per-underlying ticker coverage -- so an SPX-shaped hole cannot again look
     like a healthy run.
 
@@ -26,9 +27,10 @@ Run: ``python -m ingest.jobs.coverage_audit [--date YYYY-MM-DD]``
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +53,39 @@ SWEEP_INTERVAL_S = 60
 SWEEP_MIN_RATIO = 0.95
 # Largest tolerated hole between consecutive sweeps.
 MAX_SWEEP_GAP_S = 180
+
+# The crontab schedules three *different* things into one partition, and
+# conflating them is what made this check useless: it reported a WARN on SPY
+# and SPX every single day, on a healthy box.
+#
+#   05 09            one pre-open sweep, for the prior session's settled OI
+#   30-59 9 / 10-15 / 0-30 16   the continuous 1-minute cadence
+#   35 16            one EOD sweep
+#
+# The 09:05 -> 09:30 wait (1500s) and the 16:30 -> 16:35 wait (300s) are the
+# schedule working as designed, but both blow MAX_SWEEP_GAP_S, so a
+# whole-partition gap scan can only ever cry wolf. Any sweep run by hand
+# outside the session lands in the same partition too, which is how one
+# afternoon of manual runs produced a reported "29,493s gap".
+#
+# So: the cadence numbers below are computed over the continuous window only,
+# and the two deliberate singletons are asserted separately.
+SWEEP_WINDOW_OPEN_ET = time(9, 30)
+# Continuous cadence runs to close + 30 min (crontab "0-30 16"). This is
+# deliberately *not* market_gate.option_capture_end_et (close + 20): that is
+# the websocket job's deadline, and borrowing it here understated the
+# expected count by ten sweeps a day.
+SWEEP_TAIL = timedelta(minutes=30)
+# A stamp is the moment the sweep *wrote*, not the moment cron fired it, and a
+# full two-chain sweep takes ~14s. Without this the 16:30 sweep lands at
+# 16:30:13, outside a window ending at 16:30:00, and gets miscounted as the
+# EOD singleton.
+SWEEP_WRITE_GRACE = timedelta(minutes=2)
+# The two scheduled singletons, with a tolerance either side for cron jitter
+# and sweep duration.
+PREOPEN_SWEEP_ET = time(9, 5)
+EOD_SWEEP_ET = time(16, 35)
+SINGLETON_TOLERANCE = timedelta(minutes=10)
 # Underlying roots we expect on every trading day.
 EXPECTED_ROOTS = ("SPY", "SPX", "VIX")
 # Flat-file datasets flatfile_pull is responsible for.
@@ -69,16 +104,29 @@ class Check:
     data: dict[str, Any] = field(default_factory=dict)
 
 
-def expected_sweeps(d: date, data_root: Path | str | None = None) -> int:
-    """Sweeps the 1-minute schedule should produce on ``d``.
+def sweep_window(
+    d: date, data_root: Path | str | None = None
+) -> tuple[datetime, datetime]:
+    """The continuous 1-minute sweep window on ``d`` as ``(open, end)`` ET.
 
-    Window is 09:30 ET to the option capture end (market close + 20 min), so
-    a 13:00 early close yields ~241 instead of ~421 without special-casing.
+    09:30 to market close + :data:`SWEEP_TAIL`, so a 13:00 early close closes
+    the window at 13:30 without special-casing.
     """
-    open_et = datetime.combine(d, market_gate.time(9, 30), tzinfo=market_gate.ET)
-    end_et = market_gate.option_capture_end_et(d, data_root)
-    minutes = int((end_et - open_et).total_seconds() // SWEEP_INTERVAL_S)
-    return max(minutes, 0)
+    open_et = datetime.combine(d, SWEEP_WINDOW_OPEN_ET, tzinfo=market_gate.ET)
+    end_et = market_gate.market_close_et(d, data_root) + SWEEP_TAIL
+    return open_et, end_et + SWEEP_WRITE_GRACE
+
+
+def expected_sweeps(d: date, data_root: Path | str | None = None) -> int:
+    """Sweeps the 1-minute schedule should produce inside the window on ``d``.
+
+    Both endpoints fire (cron runs at 09:30 *and* at 16:30), so this is the
+    number of minutes spanned plus one.
+    """
+    open_et, end_et = sweep_window(d, data_root)
+    scheduled_span = (end_et - SWEEP_WRITE_GRACE) - open_et
+    minutes = int(scheduled_span.total_seconds() // SWEEP_INTERVAL_S)
+    return max(minutes + 1, 0) if minutes >= 0 else 0
 
 
 def _sweep_stamps(settings: Settings, d: date) -> dict[str, list[int]]:
@@ -97,18 +145,54 @@ def _sweep_stamps(settings: Settings, d: date) -> dict[str, list[int]]:
     return {root: sorted(v) for root, v in out.items()}
 
 
+def _classify_stamps(
+    stamps: list[int], d: date, data_root: Path | str | None = None
+) -> dict[str, list[int]]:
+    """Split one root's sweep stamps by what the schedule intended them to be.
+
+    ``window`` are the continuous 1-minute sweeps, and are the only ones the
+    cadence and gap numbers may be computed from. ``preopen`` and ``eod`` are
+    the two scheduled singletons. ``stray`` is everything else -- typically a
+    sweep run by hand outside the session; reported, never counted.
+    """
+    open_et, end_et = sweep_window(d, data_root)
+    preopen_at = datetime.combine(d, PREOPEN_SWEEP_ET, tzinfo=market_gate.ET)
+    eod_at = datetime.combine(d, EOD_SWEEP_ET, tzinfo=market_gate.ET)
+    out: dict[str, list[int]] = {"window": [], "preopen": [], "eod": [], "stray": []}
+    for ms in stamps:
+        at = datetime.fromtimestamp(ms / 1000.0, tz=market_gate.ET)
+        if open_et <= at <= end_et:
+            out["window"].append(ms)
+        elif abs(at - preopen_at) <= SINGLETON_TOLERANCE:
+            out["preopen"].append(ms)
+        elif abs(at - eod_at) <= SINGLETON_TOLERANCE:
+            out["eod"].append(ms)
+        else:
+            out["stray"].append(ms)
+    return {k: sorted(v) for k, v in out.items()}
+
+
 def check_snapshots(settings: Settings, d: date) -> list[Check]:
     """Snapshot cadence and continuity -- the irreplaceable dataset."""
     stamps = _sweep_stamps(settings, d)
     expected = expected_sweeps(d, settings.data_root)
     checks: list[Check] = []
+    missing_preopen: list[str] = []
+    missing_eod: list[str] = []
     for root in EXPECTED_ROOTS:
-        got = stamps.get(root, [])
+        parts = _classify_stamps(stamps.get(root, []), d, settings.data_root)
+        got = parts["window"]
+        if not parts["preopen"]:
+            missing_preopen.append(root)
+        if not parts["eod"]:
+            missing_eod.append(root)
         if not got:
             checks.append(Check(
                 f"snapshots[{root}]", FAIL,
-                f"no sweeps landed (expected ~{expected})",
-                {"sweeps": 0, "expected": expected},
+                f"no in-session sweeps landed (expected ~{expected})",
+                {"sweeps": 0, "expected": expected,
+                 "preopen": len(parts["preopen"]), "eod": len(parts["eod"]),
+                 "stray": len(parts["stray"])},
             ))
             continue
         ratio = len(got) / expected if expected else 1.0
@@ -124,13 +208,35 @@ def check_snapshots(settings: Settings, d: date) -> list[Check]:
         if max_gap > MAX_SWEEP_GAP_S:
             status = FAIL if status == FAIL else WARN
             notes.append(f"largest gap {max_gap:.0f}s")
+        if parts["stray"]:
+            notes.append(f"{len(parts['stray'])} sweep(s) outside the schedule")
         checks.append(Check(
             f"snapshots[{root}]", status,
             f"{len(got)}/{expected} sweeps"
             + (f" -- {'; '.join(notes)}" if notes else ""),
             {"sweeps": len(got), "expected": expected,
-             "ratio": round(ratio, 4), "max_gap_s": round(max_gap, 1)},
+             "ratio": round(ratio, 4), "max_gap_s": round(max_gap, 1),
+             "preopen": len(parts["preopen"]), "eod": len(parts["eod"]),
+             "stray": len(parts["stray"])},
         ))
+    # The two singletons carry data the cadence cannot: the pre-open sweep is
+    # the only capture of the prior session's settled open interest, and the
+    # EOD sweep is what drift_check reprices. Losing either is silent
+    # otherwise, because 421 healthy in-session sweeps say nothing about them.
+    checks.append(Check(
+        "snapshots_preopen",
+        FAIL if missing_preopen else PASS,
+        f"missing for {', '.join(missing_preopen)}" if missing_preopen
+        else f"present for {', '.join(EXPECTED_ROOTS)}",
+        {"missing": missing_preopen},
+    ))
+    checks.append(Check(
+        "snapshots_eod",
+        FAIL if missing_eod else PASS,
+        f"missing for {', '.join(missing_eod)}" if missing_eod
+        else f"present for {', '.join(EXPECTED_ROOTS)}",
+        {"missing": missing_eod},
+    ))
     return checks
 
 
@@ -277,6 +383,82 @@ def check_websocket(settings: Settings, d: date, logger: JsonlLogger) -> list[Ch
                   {"files": len(files), "bytes": total, "ws_gap_events": gaps})]
 
 
+# Disk runway thresholds, in days of continued snapshot growth.
+#
+# option_snapshots is the one dataset that must never stop, it runs ~1.7 GB a
+# day, and prune_raw.sh correctly refuses to touch it -- so the volume filling
+# up is a capture outage with a long fuse. The fuse is the thing to monitor:
+# working the runway out once, by hand, is not monitoring it.
+DISK_WARN_DAYS = 180
+DISK_FAIL_DAYS = 60
+# Partitions sampled to estimate daily growth. Enough to smooth a short
+# session or a half-captured day, few enough to stay cheap.
+DISK_SAMPLE_PARTITIONS = 5
+
+
+def _partition_bytes(part: Path) -> int:
+    return sum(f.stat().st_size for f in part.glob("*.parquet") if f.is_file())
+
+
+def daily_snapshot_growth(settings: Settings, through: date) -> tuple[float, int]:
+    """Bytes/day of ``option_snapshots`` growth, and how many days were sampled.
+
+    Partitions after ``through`` are excluded because the audit runs at 12:30
+    against T-1: today's partition is still being written, and including it
+    would halve the estimate and so overstate the runway.
+
+    The busiest sampled day is used rather than the mean. A runway estimate
+    should err towards alarming early, and the sample legitimately contains
+    short days -- the first day of capture, an early close -- that would
+    otherwise flatter the number.
+    """
+    root = _clean_root(settings, "option_snapshots")
+    if not root.is_dir():
+        return 0.0, 0
+    parts = sorted(
+        (p for p in root.glob("dt=*") if p.is_dir() and p.name[3:] <= through.isoformat()),
+        key=lambda p: p.name,
+    )[-DISK_SAMPLE_PARTITIONS:]
+    sizes = [b for b in (_partition_bytes(p) for p in parts) if b > 0]
+    if not sizes:
+        return 0.0, 0
+    return float(max(sizes)), len(sizes)
+
+
+def check_disk(settings: Settings, d: date) -> list[Check]:
+    """Days of runway left on the warehouse volume at current growth."""
+    try:
+        usage = shutil.disk_usage(Path(settings.data_root))
+    except OSError as exc:
+        return [Check("disk_runway", FAIL,
+                      f"cannot stat {settings.data_root}: {exc}", {})]
+
+    per_day, sampled = daily_snapshot_growth(settings, d)
+    free_gb = usage.free / 1e9
+    data = {
+        "free_bytes": usage.free,
+        "total_bytes": usage.total,
+        "snapshot_bytes_per_day": round(per_day),
+        "sampled_partitions": sampled,
+    }
+    if per_day <= 0:
+        return [Check("disk_runway", SKIP,
+                      f"{free_gb:,.0f} GB free -- no growth sample yet", data)]
+    days = usage.free / per_day
+    data["days_remaining"] = round(days, 1)
+    status = PASS
+    if days < DISK_FAIL_DAYS:
+        status = FAIL
+    elif days < DISK_WARN_DAYS:
+        status = WARN
+    return [Check(
+        "disk_runway", status,
+        f"{free_gb:,.0f} GB free -- {days:,.0f} days at "
+        f"{per_day / 1e9:.2f} GB/day of snapshots",
+        data,
+    )]
+
+
 def run_checks(settings: Settings, d: date, logger: JsonlLogger) -> list[Check]:
     """Every check for one trading day."""
     checks: list[Check] = []
@@ -285,6 +467,7 @@ def run_checks(settings: Settings, d: date, logger: JsonlLogger) -> list[Check]:
     checks += check_partitions(settings, d)
     checks += check_underlying_coverage(settings, d)
     checks += check_websocket(settings, d, logger)
+    checks += check_disk(settings, d)
     return checks
 
 

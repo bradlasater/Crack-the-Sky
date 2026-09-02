@@ -15,7 +15,7 @@ import json
 import sys
 from typing import Any
 
-from ingest.common import landing
+from ingest.common import landing, ratelimit
 from ingest.common.cli import run_job
 from ingest.common.config import Settings
 from ingest.common.http_client import MassiveClient
@@ -36,7 +36,7 @@ def _holiday_record(result: dict[str, Any]) -> dict[str, Any]:
 
 def _main_fn(args, settings: Settings, logger: JsonlLogger):
     run_date = run_date_from_args(args)
-    client = MassiveClient(settings)
+    client = MassiveClient(settings, priority=ratelimit.LOW)
     body = client.get(MARKETSTATUS_UPCOMING_PATH)
     raw_results = body if isinstance(body, list) else body.get("results") or []
     records = [

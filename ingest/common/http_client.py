@@ -25,6 +25,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 
+from ingest.common import ratelimit
 from ingest.common.config import Settings
 from ingest.common.ratelimit import TokenBucket, default_bucket
 
@@ -65,12 +66,21 @@ class MassiveHTTPError(requests.HTTPError):
 class MassiveClient:
     """Thin wrapper around ``requests.Session`` with auth, retries, pagination."""
 
-    def __init__(self, settings: Settings, bucket: TokenBucket | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        bucket: TokenBucket | None = None,
+        priority: str = ratelimit.NORMAL,
+    ) -> None:
         self.settings = settings
         self.base = settings.massive_api_base.rstrip("/")
         self.session = requests.Session()
-        # Shared by default so every job in the process draws on one budget.
+        # Shared by default so every job on the box draws on one budget.
         self.bucket = bucket if bucket is not None else default_bucket()
+        # Jobs whose data can be re-pulled from flat files pass
+        # ``priority=ratelimit.LOW`` and stop drawing at the reserve, leaving
+        # headroom for the snapshot sweep, which cannot be re-run.
+        self.priority = priority
 
     # ------------------------------------------------------------------ utils
     def _url(self, path: str) -> str:
@@ -108,7 +118,7 @@ class MassiveClient:
         url = self._with_api_key(self._url(path), params)
         last_exc: Exception | None = None
         for attempt in range(1, MAX_TRIES + 1):
-            self.bucket.acquire()
+            self.bucket.acquire(priority=self.priority)
             try:
                 resp = self.session.get(url, timeout=TIMEOUT_S)
             except requests.RequestException as exc:  # network-level failure

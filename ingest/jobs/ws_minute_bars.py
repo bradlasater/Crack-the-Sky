@@ -65,6 +65,21 @@ SUBSCRIBE_CHUNK_SIZE = 3000  # tickers per subscribe message (<< 1MB limit)
 WINDOW_START = dtime(9, 25)  # ET
 HEARTBEAT_TIMEOUT_S = 90
 STATS_INTERVAL_S = 300  # periodic ws_stats log cadence
+# Slug suffix for the liveness check pinged on every stats tick.
+#
+# This job pings /start at 09:25 and its terminal ping at ~16:20, and nothing
+# in between -- so its Healthchecks check needs a many-hour grace, and a
+# capture that dies at 09:26 stays green until the evening. Every other job in
+# the repo is short enough that "did it finish" is the same question as "is it
+# alive"; this one is not. A second check pinged from the stats tick brings
+# detection to ~10 minutes across the bulk of the session.
+#
+# It does not cover the whole window, and does not pretend to: one cron
+# expression cannot say "every 5 minutes from 09:30 to 16:20", and expecting
+# pings when the job is not running would alarm nightly. See
+# scripts/setup_healthchecks.py for exactly which minutes are covered, which
+# are not, and why the tails are left to the run check.
+LIVENESS_JOB = "ws_minute_bars_alive"
 BACKOFF_MIN_S = 1.0
 BACKOFF_MAX_S = 60.0
 
@@ -195,6 +210,35 @@ def parse_events(payload: str | bytes) -> list[dict[str, Any]]:
         rec["recv_ms"] = recv_ms
         out.append(rec)
     return out
+
+
+def parse_persisted_line(line: str | bytes) -> list[dict[str, Any]]:
+    """Parse one line of the persisted JSONL capture back into AM records.
+
+    This is the inverse of what :class:`HourlyJsonlWriter` writes, and it is
+    deliberately *not* ``parse_events``. The writer persists records that have
+    already been projected onto :data:`AM_FIELDS` -- the ``ev`` discriminator
+    is gone by then -- so feeding a persisted line to ``parse_events`` silently
+    yields nothing. ``reconcile`` did exactly that, which is why its websocket
+    side reported zero rows on days the capture worked perfectly.
+
+    A raw frame (a JSON array, or an object still carrying ``ev``) is still
+    accepted and delegated to ``parse_events``, so any archive written before
+    the projection existed keeps reading.
+    """
+    try:
+        data = json.loads(line)
+    except (ValueError, TypeError):
+        return []
+    if isinstance(data, list) or (isinstance(data, dict) and "ev" in data):
+        return parse_events(line)
+    if not isinstance(data, dict):
+        return []
+    # A projected record is identified by its symbol: every AM event has one,
+    # and a line without it is not a bar we can attribute to a contract.
+    if not data.get("sym"):
+        return []
+    return [data]
 
 
 def describe_events(payload: str | bytes) -> list[str]:
@@ -343,6 +387,8 @@ async def _read_loop(
     logger: JsonlLogger,
     deadline: datetime,
     stats: dict[str, Any],
+    liveness_url: str | None = None,
+    liveness_autocreate: bool = False,
 ) -> None:
     """Read frames until the deadline, a close, or a pre-ACK heartbeat timeout.
 
@@ -365,6 +411,12 @@ async def _read_loop(
             distinct_symbols=len(stats["symbols"]),
             queue_depth=writer.queue.qsize(),
         )
+        # Best effort, and never allowed to interrupt the read loop: ping()
+        # already swallows every error.
+        ping(liveness_url, "", liveness_autocreate,
+             body=f"{LIVENESS_JOB} events={stats['events']} "
+                  f"symbols={len(stats['symbols'])} "
+                  f"queue={writer.queue.qsize()}")
 
     while True:
         remaining = (deadline - market_gate.now_et()).total_seconds()
@@ -406,6 +458,8 @@ async def _capture(
     deadline: datetime,
     writer: HourlyJsonlWriter,
     chunks: list[str],
+    liveness_url: str | None = None,
+    liveness_autocreate: bool = False,
 ) -> dict[str, Any]:
     """Connection supervisor: connect, auth, subscribe, read, reconnect."""
     stats: dict[str, Any] = {
@@ -428,7 +482,8 @@ async def _capture(
                     # auth_failed: wrong key — retrying will never help
                     raise _FatalAuth("websocket auth_failed; check MASSIVE_API_KEY")
                 backoff = BACKOFF_MIN_S  # healthy connection resets backoff
-                await _read_loop(ws, writer, logger, deadline, stats)
+                await _read_loop(ws, writer, logger, deadline, stats,
+                                 liveness_url, liveness_autocreate)
         except _FatalAuth:
             raise
         except TimeoutError:
@@ -539,8 +594,12 @@ def main(argv: list[str] | None = None) -> int:
         writer = HourlyJsonlWriter(settings.data_root, run_date, logger)
         writer.start()
         try:
+            liveness_url, liveness_autocreate = healthcheck_url(
+                settings, LIVENESS_JOB
+            )
             stats = asyncio.run(
-                _capture(settings, logger, run_date, deadline, writer, chunks)
+                _capture(settings, logger, run_date, deadline, writer, chunks,
+                         liveness_url, liveness_autocreate)
             )
         finally:
             writer.stop()

@@ -31,21 +31,22 @@ LOG=/data/massive/logs/cron.log
 # m h dom mon dow  command
 
 # --- reference data -------------------------------------------------------
-00 08 * * 1-5    cd $REPO && flock -n /tmp/massive-contracts_sync.lock $PY -m ingest.jobs.contracts_sync >> $LOG 2>&1
-30 16 * * 1-5    cd $REPO && flock -n /tmp/massive-contracts_sync.lock $PY -m ingest.jobs.contracts_sync >> $LOG 2>&1
-00 08 * * 1-5    cd $REPO && flock -n /tmp/massive-dividends_sync.lock $PY -m ingest.jobs.dividends_sync >> $LOG 2>&1
-00 09 * * 6      cd $REPO && flock -n /tmp/massive-contracts_sync.lock $PY -m ingest.jobs.contracts_sync --expired >> $LOG 2>&1
-00 07 * * 0      cd $REPO && flock -n /tmp/massive-holidays_sync.lock $PY -m ingest.jobs.holidays_sync >> $LOG 2>&1
+00 08 * * 1-5    cd $REPO && bash scripts/cronjob.sh contracts_sync $PY -m ingest.jobs.contracts_sync >> $LOG 2>&1
+30 16 * * 1-5    cd $REPO && bash scripts/cronjob.sh contracts_sync $PY -m ingest.jobs.contracts_sync >> $LOG 2>&1
+00 08 * * 1-5    cd $REPO && bash scripts/cronjob.sh dividends_sync $PY -m ingest.jobs.dividends_sync >> $LOG 2>&1
+00 09 * * 6      cd $REPO && bash scripts/cronjob.sh contracts_sync $PY -m ingest.jobs.contracts_sync --expired >> $LOG 2>&1
+00 07 * * 0      cd $REPO && bash scripts/cronjob.sh holidays_sync $PY -m ingest.jobs.holidays_sync >> $LOG 2>&1
 
 # --- snapshots: 1/minute through the session (the irreplaceable dataset) ---
 # A sweep of both chains takes ~13s wall (SPY and I:SPX run concurrently), so
-# a 60s slot is comfortable; flock -n drops any run that would overlap.
+# a 60s slot is comfortable; a run that would overlap is dropped, and
+# scripts/cronjob.sh logs a job_skipped event so the drop is not silent.
 # 09:05 pre-open captures the prior session's settled open interest.
-05 09 * * 1-5    cd $REPO && flock -n /tmp/massive-snapshot_sweep.lock $PY -m ingest.jobs.snapshot_sweep >> $LOG 2>&1
-30-59 9 * * 1-5  cd $REPO && flock -n /tmp/massive-snapshot_sweep.lock $PY -m ingest.jobs.snapshot_sweep >> $LOG 2>&1
-* 10-15 * * 1-5  cd $REPO && flock -n /tmp/massive-snapshot_sweep.lock $PY -m ingest.jobs.snapshot_sweep >> $LOG 2>&1
-0-30 16 * * 1-5  cd $REPO && flock -n /tmp/massive-snapshot_sweep.lock $PY -m ingest.jobs.snapshot_sweep >> $LOG 2>&1
-35 16 * * 1-5    cd $REPO && flock -n /tmp/massive-snapshot_sweep.lock $PY -m ingest.jobs.snapshot_sweep --eod >> $LOG 2>&1
+05 09 * * 1-5    cd $REPO && bash scripts/cronjob.sh snapshot_sweep $PY -m ingest.jobs.snapshot_sweep >> $LOG 2>&1
+30-59 9 * * 1-5  cd $REPO && bash scripts/cronjob.sh snapshot_sweep $PY -m ingest.jobs.snapshot_sweep >> $LOG 2>&1
+* 10-15 * * 1-5  cd $REPO && bash scripts/cronjob.sh snapshot_sweep $PY -m ingest.jobs.snapshot_sweep >> $LOG 2>&1
+0-30 16 * * 1-5  cd $REPO && bash scripts/cronjob.sh snapshot_sweep $PY -m ingest.jobs.snapshot_sweep >> $LOG 2>&1
+35 16 * * 1-5    cd $REPO && bash scripts/cronjob.sh snapshot_sweep $PY -m ingest.jobs.snapshot_sweep --eod >> $LOG 2>&1
 
 # --- identity canary: after the 16:35 EOD snapshot has written today's
 # snapshots + forwards. Own IV/Greeks from the as-of chain; pass/fail is
@@ -54,33 +55,33 @@ LOG=/data/massive/logs/cron.log
 # Bounded SPY CRR (--spy-atm-pct 0.05; --max-rows 400 caps CRR rows only).
 # Exits non-zero on identity/data failure, which pings Healthchecks /fail
 # and mails if MAILTO is set.
-00 17 * * 1-5    cd $REPO && flock -n /tmp/massive-drift_check.lock $PY -m pricing.drift_check >> $LOG 2>&1
+00 17 * * 1-5    cd $REPO && bash scripts/cronjob.sh drift_check $PY -m pricing.drift_check >> $LOG 2>&1
 
 # --- websocket minute bars (same-day tape) --------------------------------
-25 09 * * 1-5    cd $REPO && flock -n /tmp/massive-ws_minute_bars.lock $PY -m ingest.jobs.ws_minute_bars >> $LOG 2>&1
+25 09 * * 1-5    cd $REPO && bash scripts/cronjob.sh ws_minute_bars $PY -m ingest.jobs.ws_minute_bars >> $LOG 2>&1
 
 # --- same-day trades: every 5 min ------------------------------------------
 # ~8,000 tickers once SPX is correctly banded; polled through a thread pool
 # (TRADES_CONCURRENCY, default 8) bounded by the shared token bucket. Cold
 # start is the slow run; later runs only fetch past each ticker's cursor.
-30-55/5 9 * * 1-5  cd $REPO && flock -n /tmp/massive-trades_watchlist.lock $PY -m ingest.jobs.trades_watchlist >> $LOG 2>&1
-*/5 10-15 * * 1-5  cd $REPO && flock -n /tmp/massive-trades_watchlist.lock $PY -m ingest.jobs.trades_watchlist >> $LOG 2>&1
-0-30/5 16 * * 1-5  cd $REPO && flock -n /tmp/massive-trades_watchlist.lock $PY -m ingest.jobs.trades_watchlist >> $LOG 2>&1
+30-55/5 9 * * 1-5  cd $REPO && bash scripts/cronjob.sh trades_watchlist $PY -m ingest.jobs.trades_watchlist >> $LOG 2>&1
+*/5 10-15 * * 1-5  cd $REPO && bash scripts/cronjob.sh trades_watchlist $PY -m ingest.jobs.trades_watchlist >> $LOG 2>&1
+0-30/5 16 * * 1-5  cd $REPO && bash scripts/cronjob.sh trades_watchlist $PY -m ingest.jobs.trades_watchlist >> $LOG 2>&1
 
 # --- underlying ------------------------------------------------------------
-05 08 * * 2-6    cd $REPO && flock -n /tmp/massive-underlying_bars.lock $PY -m ingest.jobs.underlying_bars --prev-trading-day >> $LOG 2>&1
-10 08 * * 2-6    cd $REPO && flock -n /tmp/massive-grouped_daily.lock $PY -m ingest.jobs.grouped_daily >> $LOG 2>&1
+05 08 * * 2-6    cd $REPO && bash scripts/cronjob.sh underlying_bars $PY -m ingest.jobs.underlying_bars --prev-trading-day >> $LOG 2>&1
+10 08 * * 2-6    cd $REPO && bash scripts/cronjob.sh grouped_daily $PY -m ingest.jobs.grouped_daily >> $LOG 2>&1
 # Treasury curve: the discount rate every IV inversion uses. 2 requests.
 # History is already walked back to 1962; `--full` resumes if that changes.
-20 08 * * 2-6    cd $REPO && flock -n /tmp/massive-rates_sync.lock $PY -m ingest.jobs.rates_sync >> $LOG 2>&1
+20 08 * * 2-6    cd $REPO && bash scripts/cronjob.sh rates_sync $PY -m ingest.jobs.rates_sync >> $LOG 2>&1
 
 # --- T+1 flat files: the authoritative record ------------------------------
-05 11 * * 2-6    cd $REPO && flock -n /tmp/massive-flatfile_pull.lock $PY -m ingest.jobs.flatfile_pull >> $LOG 2>&1
-30 11 * * 2-6    cd $REPO && flock -n /tmp/massive-reconcile.lock $PY -m ingest.jobs.reconcile >> $LOG 2>&1
+05 11 * * 2-6    cd $REPO && bash scripts/cronjob.sh flatfile_pull $PY -m ingest.jobs.flatfile_pull >> $LOG 2>&1
+30 11 * * 2-6    cd $REPO && bash scripts/cronjob.sh reconcile $PY -m ingest.jobs.reconcile >> $LOG 2>&1
 
 # --- broker executions (IBKR Flex; no gateway, read-only) ------------------
 # 18:30 ET, after the trade date is final. A day with no fills is not an error.
-30 18 * * 1-5    cd $REPO && flock -n /tmp/massive-ibkr_executions.lock $PY -m ingest.jobs.ibkr_executions >> $LOG 2>&1
+30 18 * * 1-5    cd $REPO && bash scripts/cronjob.sh ibkr_executions $PY -m ingest.jobs.ibkr_executions >> $LOG 2>&1
 
 # --- derived: ATM implied-vol term structure -------------------------------
 # Reduces T-1 option_day_bars to one row per (root, expiry): parity forward,
@@ -89,12 +90,12 @@ LOG=/data/massive/logs/cron.log
 # scripts/build_term_structure.py rather than lost -- but it is scheduled and
 # monitored anyway, because a reduction that quietly stops producing is
 # exactly as invisible as a capture that stops.
-00 12 * * 2-6    cd $REPO && flock -n /tmp/massive-term_structure.lock $PY -m pricing.term_structure >> $LOG 2>&1
+00 12 * * 2-6    cd $REPO && bash scripts/cronjob.sh term_structure $PY -m pricing.term_structure >> $LOG 2>&1
 
 # --- did we actually capture everything? -----------------------------------
 # Runs after flatfile_pull (11:05) and reconcile (11:30) have settled T-1.
 # Exits non-zero on any gap, which pings Healthchecks /fail.
-30 12 * * 2-6    cd $REPO && flock -n /tmp/massive-coverage_audit.lock $PY -m ingest.jobs.coverage_audit >> $LOG 2>&1
+30 12 * * 2-6    cd $REPO && bash scripts/cronjob.sh coverage_audit $PY -m ingest.jobs.coverage_audit >> $LOG 2>&1
 
 # --- is the whole archive still complete? ----------------------------------
 # coverage_audit only ever looks at T-1, which is how 19 trading days in
@@ -104,10 +105,10 @@ LOG=/data/massive/logs/cron.log
 # Weekly, not daily: dates whose data is on disk need no probe, so a healthy
 # run makes no network calls and takes ~4s. Saturday, after that morning's
 # flatfile_pull has settled Friday.
-00 13 * * 6      cd $REPO && flock -n /tmp/massive-history_audit.lock $PY -m ingest.jobs.history_audit >> $LOG 2>&1
+00 13 * * 6      cd $REPO && bash scripts/cronjob.sh history_audit $PY -m ingest.jobs.history_audit >> $LOG 2>&1
 
 # --- retention: prune raw payloads reconstructible from flat files ---------
-15 03 1 * *      cd $REPO && flock -n /tmp/massive-prune.lock bash scripts/prune_raw.sh --apply >> $LOG 2>&1
+15 03 1 * *      cd $REPO && bash scripts/cronjob.sh prune bash scripts/prune_raw.sh --apply >> $LOG 2>&1
 
 # NOTE: eod_dayaggs_rest is deliberately NOT scheduled. It made 42,162
 # sequential REST calls (36 min) to produce ~16,700 rows that day_aggs_v1

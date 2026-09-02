@@ -52,9 +52,15 @@ Two classes of data, opposite treatment:
 ## Operations
 
 - Runs on an Ubuntu headless box; `cron` + `flock` is the whole scheduler
-  (`deploy/crontab` is the source of truth).
+  (`deploy/crontab` is the source of truth). Every line goes through
+  `scripts/cronjob.sh`, so a run dropped for overlapping the previous one
+  logs `job_skipped` rather than vanishing.
 - Every job has its own Healthchecks.io check — a dead job pages, it doesn't
-  hide. A daily `coverage_audit` alarms on any capture gap.
+  hide. A daily `coverage_audit` alarms on any capture gap, and on the disk
+  runway left at the current rate of snapshot growth.
+- Outbound REST rate is bounded per *box*, not per process, and every capture
+  job except `snapshot_sweep` draws at low priority — the API budget yields to
+  the dataset that cannot be re-pulled.
 - CI is split on purpose: GitHub-hosted runs the offline test/lint gate on
   every PR; a self-hosted runner on the box runs live entitlement probes and
   the daily coverage audit against real credentials and data.

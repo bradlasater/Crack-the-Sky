@@ -56,8 +56,8 @@ from zoneinfo import ZoneInfo
 
 import pyarrow as pa
 
+from ingest.common import config as _config
 from ingest.common.cli import healthcheck_slug, ping
-from ingest.common.config import _parse_env_file
 from ingest.common.landing import meta_path
 from ingest.common.logging_utils import get_run_logger
 from ingest.common.market_gate import require_trading_day, today_et
@@ -571,7 +571,12 @@ def _render(report: DriftReport) -> str:
 
 
 def _dotenv() -> dict[str, str]:
-    return _parse_env_file(Path(".env"))
+    # Resolved through the module rather than bound at import time. A direct
+    # ``from ... import _parse_env_file`` alias cannot be patched by the test
+    # harness -- the name is captured before any fixture runs -- so the
+    # credential scrubbing in tests/conftest.py silently did not cover this
+    # job, and it is the one that pings on every run.
+    return _config._parse_env_file(Path(".env"))
 
 
 def _get(name: str, default: str | None = None, file_vals: Mapping[str, str] | None = None) -> str | None:
@@ -794,17 +799,26 @@ def main(argv: list[str] | None = None) -> int:
     data_root = args.data_root or _get("DATA_ROOT", "/data/massive", file_vals)
     log_root = _get("LOG_ROOT", None, file_vals) or str(Path(data_root) / "logs")
     dt = date.fromisoformat(args.date) if args.date else today_et()
-    try:
-        r = float(args.r) if args.r is not None else default_r(file_vals)
-        roots = narrow_roots(tuple(args.roots.split(",")))
-    except (ValueError, DriftError) as exc:
-        print(f"FAIL  drift  {exc}", file=sys.stderr)
-        return 1
 
     logger = get_run_logger(JOB, dt, log_root=log_root)
     ping_url, autocreate = _hc_target(file_vals)
     ping(ping_url, "/start", autocreate)
+    # ``cli.run_job`` guarantees exactly one terminal event and one terminal
+    # ping per run. This job does not go through it, and the exception
+    # taxonomy caught below is narrow: on 2026-09-01 the 17:00 cron run logged
+    # ``job_start`` and then nothing at all -- no job_end, no job_error, no
+    # ping -- because whatever ended it was outside that taxonomy. A canary
+    # that can die without saying so is not a canary, so every exit path from
+    # here on is accounted for, including the ones nobody enumerated.
+    #
+    # Config validation is inside the guard, not before it: a bad
+    # DRIFT_CHECK_R or --roots used to return 1 before the logger or the
+    # /start ping existed, so the run that never happened looked identical to
+    # a run that was never scheduled.
+    sent_terminal = False
     try:
+        r = float(args.r) if args.r is not None else default_r(file_vals)
+        roots = narrow_roots(tuple(args.roots.split(",")))
         if not args.force:
             try:
                 require_trading_day(dt, force=False, data_root=data_root)
@@ -812,6 +826,7 @@ def main(argv: list[str] | None = None) -> int:
                 code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
                 if code == 0:
                     logger.log("job_end", job=JOB, skipped="not_a_trading_day", date=dt.isoformat())
+                    sent_terminal = True
                     ping(ping_url, "", autocreate, body=f"{JOB} skipped (not a trading day)")
                     return 0
                 raise
@@ -859,8 +874,12 @@ def main(argv: list[str] | None = None) -> int:
             path = _write_report(report, data_root)
             print(f"{report.status}  wrote {path}", file=sys.stderr)
         if report.status == FAIL:
+            logger.log("job_end", job=JOB, status=FAIL, date=dt.isoformat())
+            sent_terminal = True
             _alert_fail(payload, file_vals=file_vals, ping_url=ping_url, autocreate=autocreate)
             return 1
+        logger.log("job_end", job=JOB, status=report.status, date=dt.isoformat())
+        sent_terminal = True
         ping(ping_url, "", autocreate, body=f"{JOB} ok: {report.counts}")
         return 0
     except (CatalogError, SchemaError, ChainError, DriftError, ValueError, OSError) as exc:
@@ -878,9 +897,28 @@ def main(argv: list[str] | None = None) -> int:
                 path.write_text(json.dumps(stub, indent=2) + "\n", encoding="utf-8")
             except OSError as write_exc:
                 print(f"warning: could not write report: {write_exc}", file=sys.stderr)
+        sent_terminal = True
         _alert_fail(stub, file_vals=file_vals, ping_url=ping_url, autocreate=autocreate)
         return 1
+    except BaseException as exc:
+        # Deliberately broad, and re-raised: MemoryError, KeyboardInterrupt, a
+        # SIGTERM-turned-SystemExit and every bug outside the taxonomy above
+        # used to leave the run silent. Report, then let it propagate.
+        logger.log("job_error", job=JOB, error=f"{type(exc).__name__}: {exc}",
+                   unhandled=True)
+        print(f"FAIL  drift  unhandled {type(exc).__name__}: {exc}", file=sys.stderr)
+        sent_terminal = True
+        ping(ping_url, "/fail", autocreate,
+             body=f"{JOB} unhandled {type(exc).__name__}: {exc}"[:10000])
+        raise
     finally:
+        if not sent_terminal:
+            # Reached only if the interpreter left the try block by a route
+            # neither handler saw. Still better than silence.
+            logger.log("job_end", job=JOB, status=FAIL, date=dt.isoformat(),
+                       error="run ended without a terminal event")
+            ping(ping_url, "/fail", autocreate,
+                 body=f"{JOB} ended without a terminal event")
         logger.close()
 
 

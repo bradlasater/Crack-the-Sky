@@ -27,7 +27,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from ingest.common import landing
+from ingest.common import landing, ratelimit
 from ingest.common.cli import run_job
 from ingest.common.config import Settings
 from ingest.common.http_client import MassiveClient
@@ -107,7 +107,7 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger):
         tickers = tickers[: args.limit]
 
     cursors = _load_cursors(settings)
-    client = MassiveClient(settings)
+    client = MassiveClient(settings, priority=ratelimit.LOW)
     records: list[dict[str, Any]] = []
     raw_trades: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []

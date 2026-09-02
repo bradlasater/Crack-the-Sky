@@ -32,10 +32,14 @@ from ingest.common.logging_utils import JsonlLogger
 from ingest.jobs import read_partition
 from ingest.jobs.flatfile_pull import previous_trading_day
 from ingest.jobs.ws_minute_bars import DATASET as WS_RAW_DATASET
-from ingest.jobs.ws_minute_bars import parse_events
+from ingest.jobs.ws_minute_bars import parse_persisted_line
 
 JOB = "reconcile"
 CLEAN_DATASET = "option_minute_bars"
+
+
+class UnreadableWsCapture(RuntimeError):
+    """Raw WS files are present for the date but yield no records."""
 
 
 def _ws_raw_stats(data_root: Path, d: date) -> dict[str, Any] | None:
@@ -53,11 +57,19 @@ def _ws_raw_stats(data_root: Path, d: date) -> dict[str, Any] | None:
         opener = gzip.open if path.suffix == ".gz" else open
         with opener(path, "rt", encoding="utf-8") as fh:  # type: ignore[arg-type]
             for line in fh:
-                for rec in parse_events(line):
+                for rec in parse_persisted_line(line):
                     rows += 1
                     if rec.get("sym"):
                         tickers.add(rec["sym"])
                     volume += rec.get("v") or 0
+    if rows == 0:
+        # Files exist but nothing parsed out of them. That is not "the
+        # websocket captured nothing" -- it is a reader that no longer
+        # understands the format on disk, which is how this comparison
+        # silently degraded into flat-file-vs-zero. Say so instead.
+        raise UnreadableWsCapture(
+            f"{len(files)} raw WS file(s) for {d.isoformat()} parsed to 0 records"
+        )
     return {"rows": rows, "tickers": len(tickers), "volume": volume}
 
 

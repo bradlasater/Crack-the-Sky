@@ -296,6 +296,14 @@ def main(argv: list[str] | None = None) -> int:
             rest.append(argv[i])
             i += 1
 
+    # run_job gates on the run date, which for this job is incidental -- the
+    # subject is the archive, not today. Defaulting to the previous trading
+    # day (the same convention flatfile_pull uses) means the weekly Saturday
+    # cron line gates on Friday's session and needs no --force.
+    if "--date" not in rest:
+        prev = market_gate.previous_trading_day(market_gate.today_et())
+        rest = rest + ["--date", prev.isoformat()]
+
     def main_fn(a, st, log):
         a.start, a.end, a.offline = start, end, offline
         return _main_fn(a, st, log)

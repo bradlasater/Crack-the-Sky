@@ -31,24 +31,33 @@ Pricing is done in the forward measure -- ``S = F`` with ``q`` implied from
 ``F``, which reduces BSM to Black-76 -- because a spot and a dividend yield
 are exactly what this tier does not provide.
 
-Run: ``python -m pricing.term_structure --date YYYY-MM-DD [--root SPXW ...]``
+Run: ``python -m pricing.term_structure [--date YYYY-MM-DD] [--underlying SPXW,VIX]``
+(default date: the previous trading day). For the archive, use
+``scripts/build_term_structure.py``.
 """
 
 from __future__ import annotations
 
-import argparse
 import sys
 from collections import defaultdict
 from datetime import date
 from pathlib import Path
 from typing import Any
 
-from ingest.common import landing
+from ingest.common import landing, market_gate
+from ingest.common.cli import run_job
 from ingest.common.config import Settings
-from ingest.common.rates import RateCurveError, load_curve, rate_for
-from ingest.jobs import OPTION_ROOTS, forward_from_parity, parse_option_ticker
+from ingest.common.logging_utils import JsonlLogger
+from ingest.common.rates import load_curve, rate_for
+from ingest.jobs import (
+    OPTION_ROOTS,
+    forward_from_parity,
+    parse_option_ticker,
+    parse_underlyings,
+)
 from pricing.iv import implied_vol
 
+JOB = "term_structure"
 DATASET = "atm_term_structure"
 SRC = "day_bars"
 
@@ -227,48 +236,58 @@ def build_for_date(
     )
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Standalone CLI: this is a derivation, not a captured dataset.
+class TermStructureError(RuntimeError):
+    """Raised when a session yields nothing, so run_job exits 1 and pings /fail."""
 
-    It deliberately does not use ``cli.run_job``. That wrapper gates on the
-    market being open and pings a Healthchecks monitor, both of which are
-    right for a capture job and wrong for a reduction that is most often run
-    in bulk over closed historical days.
-    """
-    parser = argparse.ArgumentParser(prog="term_structure")
-    parser.add_argument("--date", required=True, help="session date, YYYY-MM-DD")
-    parser.add_argument("--root", action="append", default=None,
-                        help="OPRA root; repeatable (default: all)")
-    parser.add_argument("--dry-run", action="store_true", help="compute, write nothing")
-    args = parser.parse_args(argv)
 
+def _main_fn(args, settings: Settings, logger: JsonlLogger):
     d = date.fromisoformat(args.date)
-    roots = tuple(args.root) if args.root else OPTION_ROOTS
-    settings = Settings.load()
+    roots = tuple(parse_underlyings(args.underlying, list(OPTION_ROOTS)))
 
-    try:
-        rows = build_for_date(settings, d, roots)
-    except RateCurveError as exc:
-        print(f"FAIL  rates  {exc}", file=sys.stderr)
-        return 1
-
+    rows = build_for_date(settings, d, roots)
     if not rows:
-        print(f"FAIL  no term structure for {d} "
-              f"(no option_day_bars, or no expiry quoting both legs)", file=sys.stderr)
-        return 1
+        raise TermStructureError(
+            f"no term structure for {d}: no option_day_bars, or no expiry "
+            "quoting both a call and a put"
+        )
 
-    priced = [r for r in rows if r["atm_iv"] is not None]
     by_root: dict[str, int] = {}
     for r in rows:
         by_root[r["underlying"]] = by_root.get(r["underlying"], 0) + 1
+    priced = [r for r in rows if r["atm_iv"] is not None]
+    logger.log("term_structure", date=d.isoformat(), expiries=len(rows),
+               priced=len(priced), by_root=by_root)
     print(f"PASS  {len(rows)} expiries ({len(priced)} with an IV)  "
           + "  ".join(f"{k}={v}" for k, v in sorted(by_root.items())), file=sys.stderr)
 
     if not args.dry_run:
-        path = landing.write_clean(DATASET, d, rows, job="term_structure",
+        path = landing.write_clean(DATASET, d, rows, job=JOB,
                                    data_root=settings.data_root)
         print(f"PASS  wrote {path}", file=sys.stderr)
-    return 0
+    return {"rows": len(rows), "priced": len(priced), "roots": len(by_root)}
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI for the scheduled T-1 run; exits 0 on success, 1 on failure.
+
+    Uses ``cli.run_job`` for the same reason every capture job does: a
+    reduction that runs nightly and stops producing is exactly as invisible
+    as a capture that stops, and run_job is what wires up the Healthchecks
+    ping, the per-run JSONL log and the trading-day gate.
+
+    ``--date`` defaults to the previous trading day so the Tue-Sat cron line
+    needs no arguments and so a Saturday run gates on Friday's session, the
+    same convention flatfile_pull and coverage_audit follow.
+
+    Bulk history does *not* come through here -- ``scripts/build_term_structure.py``
+    calls :func:`build_for_date` directly, so backfilling a thousand closed
+    days neither pings a monitor nor trips the gate.
+    """
+    argv = list(argv) if argv is not None else sys.argv[1:]
+    if "--date" not in argv:
+        prev = market_gate.previous_trading_day(market_gate.today_et())
+        argv += ["--date", prev.isoformat()]
+    return run_job(JOB, _main_fn, argv)  # run_job exits; return is for tests
 
 
 if __name__ == "__main__":

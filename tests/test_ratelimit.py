@@ -189,28 +189,6 @@ def _saturate(bucket, stop: threading.Event, priority: str) -> None:
         bucket.acquire(priority=priority)
 
 
-def _time_normal_against_hogs(bucket, hog_count: int, needed: int) -> float:
-    """Seconds for ``needed`` normal-priority acquires under low-priority load."""
-    stop = threading.Event()
-    hogs = [
-        threading.Thread(target=_saturate, args=(bucket, stop, ratelimit.LOW),
-                         daemon=True)
-        for _ in range(hog_count)
-    ]
-    for h in hogs:
-        h.start()
-    time.sleep(0.1)  # let the hogs drain the bucket first
-    try:
-        start = time.monotonic()
-        for _ in range(needed):
-            bucket.acquire(priority=ratelimit.NORMAL)
-        return time.monotonic() - start
-    finally:
-        stop.set()
-        for h in hogs:
-            h.join(timeout=2)
-
-
 def _bucket(kind: str, tmp_path, rate: float, burst: float):
     if kind == "in_process":
         return TokenBucket(rate=rate, burst=burst)
@@ -220,20 +198,46 @@ def _bucket(kind: str, tmp_path, rate: float, burst: float):
 
 
 @pytest.mark.parametrize("kind", ["in_process", "shared"])
-def test_normal_holds_its_rate_under_low_priority_load(tmp_path, kind) -> None:
-    """A long normal-priority run must finish at close to its unimpeded rate.
+def test_normal_wins_the_tokens_while_low_priority_saturates(tmp_path, kind) -> None:
+    """Under contention, the tokens go to normal priority.
 
-    Asserted on the enforced side only, deliberately. How *slow* an
-    unenforced bucket gets depends on whether the hog threads win enough
-    scheduler time to saturate it, which is not stable under CI load; how
-    fast the enforced one stays is. The mechanism itself is pinned
-    deterministically by the claim tests below.
+    Counted, not timed. Wall-clock bounds do not survive a shared CI runner:
+    with four threads contending on one flock the per-acquire cost swamps the
+    token rate, and a 1.16s run says nothing about whether priority worked.
+    The *share* of tokens each side wins is the property that matters, and it
+    holds whatever the machine is doing -- a slow box slows both sides.
     """
-    needed, rate = 60, 200.0
-    elapsed = _time_normal_against_hogs(_bucket(kind, tmp_path, rate, 10.0), 4, needed)
-    unimpeded = needed / rate  # 0.30s
-    assert elapsed < unimpeded * 2.5, (
-        f"normal priority starved: {elapsed:.2f}s against {unimpeded:.2f}s unimpeded"
+    bucket = _bucket(kind, tmp_path, rate=200.0, burst=10.0)
+    granted = {"low": 0}
+    stop = threading.Event()
+
+    def hog() -> None:
+        while not stop.is_set():
+            bucket.acquire(priority=ratelimit.LOW)
+            granted["low"] += 1
+
+    hogs = [threading.Thread(target=hog, daemon=True) for _ in range(4)]
+    for h in hogs:
+        h.start()
+    time.sleep(0.1)  # let them drain the bucket and start competing
+
+    try:
+        before = granted["low"]
+        needed = 60
+        for _ in range(needed):
+            bucket.acquire(priority=ratelimit.NORMAL)
+        low_during = granted["low"] - before
+    finally:
+        stop.set()
+        for h in hogs:
+            h.join(timeout=2)
+
+    # Four saturating threads against one sweep: unenforced they take their
+    # share of every refill (measured 60-1800 tokens over this window),
+    # enforced they get 0. The allowance is for a low-priority acquire that
+    # was already past the claim check when the sweep started.
+    assert low_during <= needed * 0.1, (
+        f"low priority won {low_during} tokens while normal won {needed}"
     )
 
 

@@ -59,11 +59,16 @@
       ansible.builtin.command:
         cmd: crontab {{ repo_dir }}/deploy/crontab
 
+    - name: Linger state
+      ansible.builtin.command: loginctl show-user {{ ansible_env.USER }} -p Linger --value
+      register: linger_state
+      changed_when: false
+
     - name: Linger enabled (user services survive logout/reboot)
+      # No failed_when override: without linger the runner dies at
+      # logout/reboot, so a failure here must fail the play, not hide.
       ansible.builtin.command: loginctl enable-linger
-      register: linger
-      changed_when: linger.stdout != ""
-      failed_when: false
+      when: linger_state.stdout != "yes"
 
     - name: Actions runner present?
       ansible.builtin.stat:

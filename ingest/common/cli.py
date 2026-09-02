@@ -37,9 +37,12 @@ from datetime import date
 from typing import Any
 
 import requests
+import websockets
+from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError
 
 from ingest.common import market_gate
 from ingest.common.config import Settings
+from ingest.common.http_client import RETRYABLE_STATUS, MassiveHTTPError
 from ingest.common.logging_utils import JsonlLogger, get_run_logger
 
 MainFn = Callable[[argparse.Namespace, Settings, JsonlLogger], Mapping[str, Any] | None]
@@ -78,6 +81,38 @@ def _retry_policy() -> tuple[int, float]:
     attempts = int(os.environ.get("JOB_MAX_ATTEMPTS", "3"))
     base_s = float(os.environ.get("JOB_RETRY_BASE_S", "30"))
     return max(1, attempts), max(0.0, base_s)
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """Transient (worth an in-run retry) vs deterministic (fail immediately).
+
+    The HTTP client already retries 429/5xx per request; a job-level retry only
+    pays when the *run* died on exhausted retries or on infra outside the
+    client's scope (S3, the websocket feed). Deterministic failures -- a 403
+    PermissionError, a non-retryable 4xx, schema/argument ValueErrors -- would
+    just rerun the whole job for nothing, so they fail on first sight.
+    """
+    if isinstance(exc, MassiveHTTPError):
+        return exc.status_code in RETRYABLE_STATUS
+    if isinstance(exc, (requests.RequestException, ConnectionError, TimeoutError)):
+        # requests: network-level or client retries already exhausted.
+        # Builtin ConnectionError/TimeoutError: socket resets, ws read deadline.
+        # (PermissionError is a sibling OSError, not matched here -- good:
+        # the HTTP client raises it for a deterministic 403.)
+        return True
+    if isinstance(exc, NoCredentialsError):
+        return False  # missing S3 creds will not fix themselves in 30s
+    if isinstance(exc, ClientError):
+        code = exc.response.get("Error", {}).get("Code", "")
+        status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0)
+        return (
+            status in RETRYABLE_STATUS
+            or "Throttl" in code
+            or code in ("RequestTimeout", "ServiceUnavailable", "SlowDown")
+        )
+    if isinstance(exc, BotoCoreError):  # EndpointConnectionError and friends
+        return True
+    return isinstance(exc, websockets.ConnectionClosed)
 
 
 def healthcheck_slug(job_name: str) -> str:
@@ -140,13 +175,15 @@ def run_job(job_name: str, main_fn: MainFn, argv: list[str] | None = None) -> No
     """
     args = build_parser(job_name).parse_args(argv)
     run_date: date = date.fromisoformat(args.date) if args.date else market_gate.today_et()
+    # Parse before the /start ping: a typo like JOB_MAX_ATTEMPTS=three must
+    # crash loudly *before* the check enters "started", not strand it hung.
+    max_attempts, retry_base_s = _retry_policy()
 
     settings = Settings.load()
     logger = get_run_logger(job_name, run_date, log_root=settings.log_root)
     start = time.monotonic()
     ping_url, autocreate = healthcheck_url(settings, job_name)
     ping(ping_url, "/start", autocreate)
-    max_attempts, retry_base_s = _retry_policy()
     attempt = 0
     while True:
         attempt += 1
@@ -193,7 +230,12 @@ def run_job(job_name: str, main_fn: MainFn, argv: list[str] | None = None) -> No
             # check in "started" until Healthchecks called it a hung run.
             interrupted = isinstance(exc, KeyboardInterrupt)
             duration_s = round(time.monotonic() - start, 3)
-            if not interrupted and isinstance(exc, Exception) and attempt < max_attempts:
+            if (
+                not interrupted
+                and isinstance(exc, Exception)
+                and attempt < max_attempts
+                and _is_retryable(exc)
+            ):
                 sleep_s = min(retry_base_s * (2 ** (attempt - 1)), RETRY_CAP_S)
                 logger.log("job_retry", job=job_name, attempt=attempt,
                            error=f"{type(exc).__name__}: {exc}", sleep_s=sleep_s)

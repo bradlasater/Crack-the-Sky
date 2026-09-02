@@ -486,13 +486,63 @@ def test_retry_exhaustion_fails_with_a_single_terminal_ping(tmp_path, monkeypatc
 
     def always_broken(a, s, log):
         calls["n"] += 1
-        raise RuntimeError("still down")
+        raise ConnectionError("still down")
 
     with pytest.raises(SystemExit) as excinfo:
         cli.run_job("contracts_sync", always_broken, [])
     assert excinfo.value.code == 1
     assert calls["n"] == 3, "default JOB_MAX_ATTEMPTS is 3"
     assert _suffixes(recorder) == ["/start", "/fail"]
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ValueError("bad schema"),
+        PermissionError("HTTP 403: not entitled"),
+        cli.MassiveHTTPError(400, "https://api.polygon.io/v3/x"),
+        RuntimeError("bug"),
+    ],
+)
+def test_deterministic_failures_are_not_retried(tmp_path, monkeypatch, recorder, exc):
+    """403s, 4xx, schema/argument errors and bugs rerun the job for nothing."""
+    _run_settings(monkeypatch, tmp_path)
+    calls = {"n": 0}
+
+    def boom(a, s, log):
+        calls["n"] += 1
+        raise exc
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.run_job("contracts_sync", boom, [])
+    assert excinfo.value.code == 1
+    assert calls["n"] == 1
+    assert _suffixes(recorder) == ["/start", "/fail"]
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ConnectionError("reset"),
+        TimeoutError("ws read deadline"),
+        cli.MassiveHTTPError(429, "https://api.polygon.io/v3/x"),
+        cli.MassiveHTTPError(503, "https://api.polygon.io/v3/x"),
+    ],
+)
+def test_transient_failures_are_retried(tmp_path, monkeypatch, recorder, exc):
+    _run_settings(monkeypatch, tmp_path)
+    calls = {"n": 0}
+
+    def flaky(a, s, log):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise exc
+        return {"rows": 1}
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.run_job("contracts_sync", flaky, [])
+    assert excinfo.value.code == 0
+    assert calls["n"] == 2
 
 
 def test_systemexit_is_never_retried(tmp_path, monkeypatch, recorder):
@@ -530,11 +580,20 @@ def test_retry_attempts_are_env_configurable(tmp_path, monkeypatch, recorder):
 
     def boom(a, s, log):
         calls["n"] += 1
-        raise RuntimeError("x")
+        raise ConnectionError("x")
 
     with pytest.raises(SystemExit):
         cli.run_job("contracts_sync", boom, [])
     assert calls["n"] == 1, "JOB_MAX_ATTEMPTS=1 disables retry"
+
+
+def test_bad_retry_config_crashes_before_the_check_starts(tmp_path, monkeypatch, recorder):
+    """A typo like JOB_MAX_ATTEMPTS=three must not strand the check hung."""
+    _run_settings(monkeypatch, tmp_path)
+    monkeypatch.setenv("JOB_MAX_ATTEMPTS", "three")
+    with pytest.raises(ValueError):
+        cli.run_job("contracts_sync", lambda a, s, log: {"rows": 1}, [])
+    assert recorder.calls == [], "no /start may precede a config crash"
 
 
 def test_retry_backoff_is_exponential_and_capped(tmp_path, monkeypatch, recorder):
@@ -546,7 +605,7 @@ def test_retry_backoff_is_exponential_and_capped(tmp_path, monkeypatch, recorder
     monkeypatch.setenv("JOB_RETRY_BASE_S", "30")
 
     def boom(a, s, log):
-        raise RuntimeError("x")
+        raise ConnectionError("x")
 
     with pytest.raises(SystemExit):
         cli.run_job("contracts_sync", boom, [])

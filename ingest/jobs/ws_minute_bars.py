@@ -68,11 +68,17 @@ STATS_INTERVAL_S = 300  # periodic ws_stats log cadence
 # Slug suffix for the liveness check pinged on every stats tick.
 #
 # This job pings /start at 09:25 and its terminal ping at ~16:20, and nothing
-# in between -- so its Healthchecks check needs a 10-hour grace, and a capture
-# that dies at 09:26 stays green until the evening. Every other job in the
-# repo is short enough that "did it finish" is the same question as "is it
-# alive"; this one is not. A second, short-period check pinged from the stats
-# tick closes that window to ~15 minutes without weakening the run check.
+# in between -- so its Healthchecks check needs a many-hour grace, and a
+# capture that dies at 09:26 stays green until the evening. Every other job in
+# the repo is short enough that "did it finish" is the same question as "is it
+# alive"; this one is not. A second check pinged from the stats tick brings
+# detection to ~10 minutes across the bulk of the session.
+#
+# It does not cover the whole window, and does not pretend to: one cron
+# expression cannot say "every 5 minutes from 09:30 to 16:20", and expecting
+# pings when the job is not running would alarm nightly. See
+# scripts/setup_healthchecks.py for exactly which minutes are covered, which
+# are not, and why the tails are left to the run check.
 LIVENESS_JOB = "ws_minute_bars_alive"
 BACKOFF_MIN_S = 1.0
 BACKOFF_MAX_S = 60.0

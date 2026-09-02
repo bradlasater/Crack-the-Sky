@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import errno
+import json
 import threading
 import time
+
+import pytest
 
 from ingest.common import ratelimit
 from ingest.common.ratelimit import TokenBucket, default_bucket
@@ -166,3 +169,83 @@ def test_in_process_bucket_honours_priority_too(tmp_path) -> None:
     for _ in range(int(10.0 - 10.0 * ratelimit.RESERVE_FRACTION)):
         assert bucket.acquire(priority=ratelimit.LOW) == 0.0
     assert bucket.acquire(priority=ratelimit.LOW) > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Sustained priority, not just a first burst
+# ---------------------------------------------------------------------------
+#
+# A reserve alone only protects the first burst: once a sweep has drained it,
+# every later refill token is contended and a saturating low-priority job wins
+# its share. snapshot_sweep paginates ~173 requests per run, far more than the
+# ~14 tokens a reserve holds, so the guarantee has to survive the whole run.
+
+def _saturate(bucket, stop: threading.Event, priority: str) -> None:
+    while not stop.is_set():
+        bucket.acquire(priority=priority)
+
+
+@pytest.mark.parametrize("make", [
+    lambda p: TokenBucket(rate=200.0, burst=10.0),
+    lambda p: ratelimit.SharedTokenBucket(p, rate=200.0, burst=10.0),
+])
+def test_normal_keeps_its_rate_against_a_saturating_low_job(tmp_path, make) -> None:
+    """A long normal-priority run must not be starved by low-priority load."""
+    bucket = make(tmp_path / "rl.json")
+    needed = 60  # a sweep's worth, well beyond the reserve
+
+    stop = threading.Event()
+    hogs = [
+        threading.Thread(target=_saturate, args=(bucket, stop, ratelimit.LOW),
+                         daemon=True)
+        for _ in range(4)
+    ]
+    for h in hogs:
+        h.start()
+    time.sleep(0.1)  # let the hogs drain the bucket first
+
+    try:
+        start = time.monotonic()
+        for _ in range(needed):
+            bucket.acquire(priority=ratelimit.NORMAL)
+        elapsed = time.monotonic() - start
+    finally:
+        stop.set()
+        for h in hogs:
+            h.join(timeout=2)
+
+    # Unimpeded this is ~needed/rate = 0.3s. Without preemption four saturating
+    # low-priority threads would take most of the refill and stretch it past a
+    # second. The bound is loose enough for a busy box, tight enough to fail
+    # if priority is not actually enforced.
+    assert elapsed < 0.75, f"normal priority starved: {elapsed:.2f}s"
+
+
+def test_low_priority_is_not_throttled_when_nothing_competes(tmp_path) -> None:
+    """Yielding must cost nothing while the sweep is idle.
+
+    The reserve plus claim is chosen over giving low priority its own smaller
+    rate precisely so trades polling keeps the full budget outside the moments
+    a sweep is actually waiting.
+    """
+    bucket = ratelimit.SharedTokenBucket(tmp_path / "rl.json", rate=500.0, burst=20.0)
+    start = time.monotonic()
+    for _ in range(100):
+        bucket.acquire(priority=ratelimit.LOW)
+    elapsed = time.monotonic() - start
+    # 100 requests at 500/s from a 20-token burst is ~0.16s; the reserve must
+    # not turn this into a multiple of that.
+    assert elapsed < 0.5, f"low priority throttled with no contention: {elapsed:.2f}s"
+
+
+def test_a_stale_claim_cannot_wedge_low_priority(tmp_path) -> None:
+    """A job killed mid-acquire must not park the bucket indefinitely."""
+    path = tmp_path / "rl.json"
+    path.write_text(json.dumps({
+        "tokens": 10.0, "updated": time.time(),
+        "normal_claim": time.time() + 86_400,   # a claim from a bad clock
+    }), encoding="utf-8")
+    bucket = ratelimit.SharedTokenBucket(path, rate=100.0, burst=10.0)
+    start = time.monotonic()
+    bucket.acquire(priority=ratelimit.LOW)
+    assert time.monotonic() - start < ratelimit.NORMAL_CLAIM_S + 1.0

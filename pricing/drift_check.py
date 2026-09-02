@@ -56,8 +56,8 @@ from zoneinfo import ZoneInfo
 
 import pyarrow as pa
 
+from ingest.common import config as _config
 from ingest.common.cli import healthcheck_slug, ping
-from ingest.common.config import _parse_env_file
 from ingest.common.landing import meta_path
 from ingest.common.logging_utils import get_run_logger
 from ingest.common.market_gate import require_trading_day, today_et
@@ -571,7 +571,12 @@ def _render(report: DriftReport) -> str:
 
 
 def _dotenv() -> dict[str, str]:
-    return _parse_env_file(Path(".env"))
+    # Resolved through the module rather than bound at import time. A direct
+    # ``from ... import _parse_env_file`` alias cannot be patched by the test
+    # harness -- the name is captured before any fixture runs -- so the
+    # credential scrubbing in tests/conftest.py silently did not cover this
+    # job, and it is the one that pings on every run.
+    return _config._parse_env_file(Path(".env"))
 
 
 def _get(name: str, default: str | None = None, file_vals: Mapping[str, str] | None = None) -> str | None:
@@ -794,12 +799,6 @@ def main(argv: list[str] | None = None) -> int:
     data_root = args.data_root or _get("DATA_ROOT", "/data/massive", file_vals)
     log_root = _get("LOG_ROOT", None, file_vals) or str(Path(data_root) / "logs")
     dt = date.fromisoformat(args.date) if args.date else today_et()
-    try:
-        r = float(args.r) if args.r is not None else default_r(file_vals)
-        roots = narrow_roots(tuple(args.roots.split(",")))
-    except (ValueError, DriftError) as exc:
-        print(f"FAIL  drift  {exc}", file=sys.stderr)
-        return 1
 
     logger = get_run_logger(JOB, dt, log_root=log_root)
     ping_url, autocreate = _hc_target(file_vals)
@@ -811,8 +810,15 @@ def main(argv: list[str] | None = None) -> int:
     # ping -- because whatever ended it was outside that taxonomy. A canary
     # that can die without saying so is not a canary, so every exit path from
     # here on is accounted for, including the ones nobody enumerated.
+    #
+    # Config validation is inside the guard, not before it: a bad
+    # DRIFT_CHECK_R or --roots used to return 1 before the logger or the
+    # /start ping existed, so the run that never happened looked identical to
+    # a run that was never scheduled.
     sent_terminal = False
     try:
+        r = float(args.r) if args.r is not None else default_r(file_vals)
+        roots = narrow_roots(tuple(args.roots.split(",")))
         if not args.force:
             try:
                 require_trading_day(dt, force=False, data_root=data_root)

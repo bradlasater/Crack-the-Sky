@@ -9,8 +9,9 @@ connection — proving the supervisor reconnects and re-subscribes fully
 from __future__ import annotations
 
 import asyncio
+import gzip
 import json
-from datetime import timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -195,3 +196,84 @@ def test_capture_reconnects_and_resubscribes(tmp_path, monkeypatch):
     # AM events from both connections reached the writer
     assert stats["events"] >= 2
     assert stats["distinct_symbols"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# Reading the capture back
+# ---------------------------------------------------------------------------
+#
+# parse_events reads a *frame off the wire*; the writer persists records that
+# have already been projected onto AM_FIELDS, so the ev discriminator is gone
+# by the time they hit disk. Feeding a persisted line to parse_events silently
+# yields nothing, which is exactly what reconcile did -- reporting ws_rows=0
+# on days the capture worked perfectly.
+
+def test_parse_persisted_line_reads_a_writer_projected_record():
+    line = json.dumps({
+        "sym": "O:SPY260930C00780000", "v": 10, "av": 2416, "op": 3.18,
+        "vw": 3.47, "o": 3.47, "c": 3.47, "h": 3.47, "l": 3.47, "a": 3.23,
+        "z": 2, "s": 1788277440000, "e": 1788277500000, "recv_ms": 1788278402085,
+    })
+    recs = wsjob.parse_persisted_line(line)
+    assert len(recs) == 1
+    assert recs[0]["sym"] == "O:SPY260930C00780000"
+    assert recs[0]["v"] == 10
+
+
+def test_parse_events_would_have_dropped_that_line():
+    """The bug, pinned: the projection has no ``ev`` for parse_events to match."""
+    line = json.dumps({"sym": "O:SPY260930C00780000", "v": 10})
+    assert wsjob.parse_events(line) == []
+    assert len(wsjob.parse_persisted_line(line)) == 1
+
+
+def test_parse_persisted_line_still_reads_a_legacy_raw_frame():
+    """Archives written before the projection existed must keep reading."""
+    frame = json.dumps([
+        {"ev": "AM", "sym": "O:SPX260901P07425000", "v": 50, "s": 1, "e": 2},
+        {"ev": "status", "status": "connected"},
+    ])
+    recs = wsjob.parse_persisted_line(frame)
+    assert len(recs) == 1
+    assert recs[0]["sym"] == "O:SPX260901P07425000"
+
+
+@pytest.mark.parametrize("line", [
+    "", "   ", "not json", "[", "null", "123", '"a string"',
+    json.dumps([1, 2, 3]),
+    json.dumps({"v": 10}),            # no sym: not attributable to a contract
+    json.dumps({"sym": "", "v": 10}),  # empty sym, likewise
+])
+def test_parse_persisted_line_rejects_malformed_input(line):
+    assert wsjob.parse_persisted_line(line) == []
+
+
+def test_writer_output_round_trips_through_the_reader(tmp_path):
+    """The two halves must agree: whatever the writer writes, the reader reads."""
+    logger = JsonlLogger(path=None, echo=False)
+    writer = wsjob.HourlyJsonlWriter(tmp_path, date(2026, 9, 1), logger)
+    writer.start()
+    records = wsjob.parse_events(json.dumps([
+        {"ev": "AM", "sym": "O:SPY1", "v": 3, "s": 1, "e": 2},
+        {"ev": "AM", "sym": "O:SPY2", "v": 7, "s": 1, "e": 2},
+    ]))
+    for rec in records:
+        writer.queue.put(rec)
+    writer.stop()
+    writer.join(timeout=10)
+
+    part = tmp_path / "raw" / wsjob.DATASET / "dt=2026-09-01"
+    lines = [
+        line
+        for f in sorted(part.glob("*.jsonl*"))
+        for line in _read_lines(f)
+    ]
+    read_back = [r for line in lines for r in wsjob.parse_persisted_line(line)]
+    assert [r["sym"] for r in read_back] == ["O:SPY1", "O:SPY2"]
+    assert sum(r["v"] for r in read_back) == 10
+
+
+def _read_lines(path):
+    opener = gzip.open if path.suffix == ".gz" else open
+    with opener(path, "rt", encoding="utf-8") as fh:
+        return [line for line in fh if line.strip()]

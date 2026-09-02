@@ -114,9 +114,9 @@ for entry in "${PRUNABLE[@]}"; do
     freed=$((freed + bytes))
     if [ "$APPLY" = "1" ]; then
       rm -rf "$part"
-      log "msg\":\"pruned\",\"dataset\":\"$ds\",\"date\":\"$day\",\"bytes\":$bytes"
+      log "msg\":\"pruned\",\"dataset\":\"$ds\",\"date\":\"$day\",\"path\":\"$part\",\"bytes\":$bytes"
     else
-      log "msg\":\"would_prune\",\"dataset\":\"$ds\",\"date\":\"$day\",\"bytes\":$bytes"
+      log "msg\":\"would_prune\",\"dataset\":\"$ds\",\"date\":\"$day\",\"path\":\"$part\",\"bytes\":$bytes"
     fi
   done
 done
@@ -124,9 +124,20 @@ done
 qcutoff="$(date -I -d "$QUARANTINE_RETAIN_DAYS days ago")"
 qroot="$DATA_ROOT/_quarantine"
 if [ -d "$qroot" ]; then
-  # Age comes from the directory's own mtime: quarantine paths are grouped by
-  # the run that created them (pre-root-filter/, refilter/, ...), so the dt=
-  # inside them is the market date, not the date it was superseded.
+  # Age the individual dt= batches, never the bucket above them. The two
+  # layouts in use nest the date at different depths --
+  #   _quarantine/pre-root-filter/dt=<date>/<dataset>/
+  #   _quarantine/refilter/<dataset>/dt=<date>/
+  # -- so the batch is found by name at any depth rather than by position.
+  #
+  # Pruning the top-level bucket instead would be destructive: a directory's
+  # mtime does not change when files are added *below* an existing child, so
+  # refilter/ can look untouched for months while fresh output lands under
+  # refilter/<dataset>/. Deleting it wholesale would take the last 30 days of
+  # quarantined output with it -- exactly the data someone would reach for.
+  #
+  # mtime, not the dt= value: dt= is the market date of the data, while
+  # retention here is about how long ago it was superseded.
   while IFS= read -r batch; do
     [ -d "$batch" ] || continue
     mtime="$(date -I -r "$batch")"
@@ -139,7 +150,14 @@ if [ -d "$qroot" ]; then
     else
       log "msg\":\"would_prune\",\"dataset\":\"_quarantine\",\"path\":\"$batch\",\"bytes\":$bytes"
     fi
-  done < <(find "$qroot" -mindepth 1 -maxdepth 1 -type d)
+  done < <(find "$qroot" -mindepth 2 -type d -name 'dt=*')
+
+  # Buckets and dataset directories left empty by the above carry nothing;
+  # -depth so children are considered before their parents. Only ever removes
+  # already-empty directories, and never $qroot itself.
+  if [ "$APPLY" = "1" ]; then
+    find "$qroot" -mindepth 1 -depth -type d -empty -delete 2>/dev/null || true
+  fi
 fi
 
 # --- flat files: opt-in, re-downloadable from S3 ---------------------------
@@ -166,9 +184,9 @@ if [ "$PRUNE_FLATFILES" = "1" ]; then
       freed=$((freed + bytes))
       if [ "$APPLY" = "1" ]; then
         rm -rf "$part"
-        log "msg\":\"pruned\",\"dataset\":\"flatfiles/$ds\",\"date\":\"$day\",\"bytes\":$bytes"
+        log "msg\":\"pruned\",\"dataset\":\"flatfiles/$ds\",\"date\":\"$day\",\"path\":\"$part\",\"bytes\":$bytes"
       else
-        log "msg\":\"would_prune\",\"dataset\":\"flatfiles/$ds\",\"date\":\"$day\",\"bytes\":$bytes"
+        log "msg\":\"would_prune\",\"dataset\":\"flatfiles/$ds\",\"date\":\"$day\",\"path\":\"$part\",\"bytes\":$bytes"
       fi
     done < <(find "$froot" -mindepth 2 -maxdepth 2 -type d -name 'dt=*')
   fi

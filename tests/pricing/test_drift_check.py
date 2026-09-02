@@ -548,3 +548,41 @@ def test_successful_run_logs_exactly_one_terminal_event(tmp_path, monkeypatch) -
     terminal = [e for e, _ in events if e in ("job_end", "job_error")]
     assert terminal == ["job_end"], events
     assert sum(1 for url, _ in calls if not url.endswith("/start")) == 1, calls
+
+
+def test_invalid_config_still_reports_a_terminal_event(tmp_path, monkeypatch) -> None:
+    """Validation failures happen inside the accounted run, not before it.
+
+    A bad DRIFT_CHECK_R used to return 1 before the logger or the /start ping
+    existed, so a run that failed instantly looked exactly like a run that was
+    never scheduled.
+    """
+    calls = _drift_pings(monkeypatch)
+    events: list[tuple[str, dict]] = []
+
+    class _Logger:
+        def log(self, event, **fields):
+            events.append((event, fields))
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(drift_mod, "get_run_logger", lambda *a, **k: _Logger())
+    monkeypatch.setenv("DRIFT_CHECK_R", "not-a-number")
+
+    rc = drift_mod.main(["--date", "2026-09-01", "--data-root", str(tmp_path)])
+    assert rc == 1
+    assert any(e == "job_error" for e, _ in events), events
+    assert any(url.endswith("/fail") for url, _ in calls), calls
+
+
+def test_dotenv_is_patchable_so_tests_cannot_reach_production(tmp_path) -> None:
+    """The credential scrub in tests/conftest.py must actually cover this job.
+
+    ``_dotenv`` resolves the parser through the config *module*; a
+    ``from ... import _parse_env_file`` alias would be bound before any
+    fixture runs, and this job pings on every run.
+    """
+    assert "HEALTHCHECKS_PING_KEY" not in drift_mod._dotenv()
+    url, _ = drift_mod._hc_target(drift_mod._dotenv())
+    assert url is None

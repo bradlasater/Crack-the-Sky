@@ -82,10 +82,29 @@ LOG=/data/massive/logs/cron.log
 # 18:30 ET, after the trade date is final. A day with no fills is not an error.
 30 18 * * 1-5    cd $REPO && flock -n /tmp/massive-ibkr_executions.lock $PY -m ingest.jobs.ibkr_executions >> $LOG 2>&1
 
+# --- derived: ATM implied-vol term structure -------------------------------
+# Reduces T-1 option_day_bars to one row per (root, expiry): parity forward,
+# ATM strike, both leg IVs. Must run after flatfile_pull (11:05) has landed
+# the day bars it reads. Being derived, a missed day is rebuilt with
+# scripts/build_term_structure.py rather than lost -- but it is scheduled and
+# monitored anyway, because a reduction that quietly stops producing is
+# exactly as invisible as a capture that stops.
+00 12 * * 2-6    cd $REPO && flock -n /tmp/massive-term_structure.lock $PY -m pricing.term_structure >> $LOG 2>&1
+
 # --- did we actually capture everything? -----------------------------------
 # Runs after flatfile_pull (11:05) and reconcile (11:30) have settled T-1.
 # Exits non-zero on any gap, which pings Healthchecks /fail.
 30 12 * * 2-6    cd $REPO && flock -n /tmp/massive-coverage_audit.lock $PY -m ingest.jobs.coverage_audit >> $LOG 2>&1
+
+# --- is the whole archive still complete? ----------------------------------
+# coverage_audit only ever looks at T-1, which is how 19 trading days in
+# Feb-Apr 2023 sat missing for years while every daily run passed. This walks
+# the entire history instead, and tells a holiday from a hole by asking the
+# vendor whether a flat file exists for the date.
+# Weekly, not daily: dates whose data is on disk need no probe, so a healthy
+# run makes no network calls and takes ~4s. Saturday, after that morning's
+# flatfile_pull has settled Friday.
+00 13 * * 6      cd $REPO && flock -n /tmp/massive-history_audit.lock $PY -m ingest.jobs.history_audit >> $LOG 2>&1
 
 # --- retention: prune raw payloads reconstructible from flat files ---------
 15 03 1 * *      cd $REPO && flock -n /tmp/massive-prune.lock bash scripts/prune_raw.sh --apply >> $LOG 2>&1

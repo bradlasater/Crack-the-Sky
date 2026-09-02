@@ -58,7 +58,9 @@ JOBS: dict[str, tuple[str, int, str]] = {
     "flatfile_pull":    ("5 11 * * 2-6",    120, "T-1 S3 flat files - the authoritative record"),
     "reconcile":        ("30 11 * * 2-6",   120, "Rewrite minute bars from the flat file"),
     "ibkr_executions":  ("30 18 * * 1-5",   120, "Broker fills via IBKR Flex (no gateway)"),
+    "term_structure":   ("0 12 * * 2-6",    120, "ATM vol term structure from T-1 day bars (derived, rebuildable)"),
     "coverage_audit":   ("30 12 * * 2-6",   180, "Did yesterday actually land? Fails loudly if not"),
+    "history_audit":    ("0 13 * * 6",      300, "Is the whole archive still complete? Weekly, vendor-verified"),
     "drift_check":      ("0 17 * * 1-5",    60,  "Own IV/Greeks identity canary (vendor diffs diagnostic). After EOD snapshot."),
 }
 

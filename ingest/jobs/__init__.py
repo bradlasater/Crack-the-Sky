@@ -62,6 +62,37 @@ def ticker_root(ticker: str) -> str | None:
     return m.group(1) if m else None
 
 
+_OPRA_RE = re.compile(r"^O:([A-Z]+)(\d{2})(\d{2})(\d{2})([CP])(\d{8})$")
+
+
+def parse_option_ticker(ticker: str) -> dict[str, Any] | None:
+    """Full OPRA symbol -> ``{root, expiration_date, contract_type, strike}``.
+
+    ``O:SPXW260918C05000000`` is root ``SPXW``, expiring 2026-09-18, a call
+    struck at 5000.0 -- the trailing eight digits are the strike in
+    thousandths of a dollar. Returns None for anything that is not an option
+    symbol, so a mixed column can be filtered without raising.
+
+    ``option_day_bars`` carries only the ticker, never the contract terms, so
+    this is the only way to recover strike and expiry for the four years of
+    history that predate ``option_snapshots``.
+    """
+    m = _OPRA_RE.match(str(ticker or ""))
+    if m is None:
+        return None
+    root, yy, mm, dd, kind, strike = m.groups()
+    try:
+        expiry = date(2000 + int(yy), int(mm), int(dd))
+    except ValueError:  # a malformed date is not a contract we can use
+        return None
+    return {
+        "root": root,
+        "expiration_date": expiry.isoformat(),
+        "contract_type": "call" if kind == "C" else "put",
+        "strike": int(strike) / 1000.0,
+    }
+
+
 def run_date_from_args(args: argparse.Namespace) -> date:
     """Resolve the trading date from parsed CLI args (default: today, ET)."""
     return date.fromisoformat(args.date) if args.date else market_gate.today_et()

@@ -88,6 +88,8 @@
         <dd><code>contracts_expired</code>, <code>underlying_day_bars</code>. Captured; nothing in pricing/marketdata consumes them yet.</dd>
         <dt>Now consumed</dt>
         <dd><code>forwards</code> is no longer write-only — <code>from_market</code> joins per-expiry parity F.</dd>
+        <dt>Derived</dt>
+        <dd><code>atm_term_structure</code> — one row per (date, root, expiry), built from <code>option_day_bars</code> by <code>pricing.term_structure</code>. Not captured: the whole archive rebuilds in ~7 minutes via <code>scripts/build_term_structure.py</code>, so it is safe to delete and safe to recompute after any change to the reduction. Built from day bars rather than snapshots precisely because day bars reach back to 2022-08-31 while snapshots only begin in 2026.</dd>
       </dl>
 
       <footer>

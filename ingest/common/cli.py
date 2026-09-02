@@ -29,6 +29,7 @@ under ``/ping``, so it must be set to ``https://hc.example.internal/ping``.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from collections.abc import Callable, Mapping
@@ -36,9 +37,12 @@ from datetime import date
 from typing import Any
 
 import requests
+import websockets
+from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError
 
 from ingest.common import market_gate
 from ingest.common.config import Settings
+from ingest.common.http_client import RETRYABLE_STATUS, MassiveHTTPError
 from ingest.common.logging_utils import JsonlLogger, get_run_logger
 
 MainFn = Callable[[argparse.Namespace, Settings, JsonlLogger], Mapping[str, Any] | None]
@@ -65,6 +69,50 @@ def build_parser(job_name: str) -> argparse.ArgumentParser:
 
 HEALTHCHECK_SLUG_PREFIX = "massive-"
 PING_TIMEOUT_S = 5  # snapshot_sweep has a 60s budget; never block on monitoring
+RETRY_CAP_S = 300.0  # longest single backoff between in-run attempts
+
+
+def _retry_policy() -> tuple[int, float]:
+    """(max attempts, base backoff seconds) for in-run retries.
+
+    Code-only knobs (like ``MASSIVE_MAX_RPS``), not in .env.example:
+    ``JOB_MAX_ATTEMPTS`` (default 3) and ``JOB_RETRY_BASE_S`` (default 30).
+    """
+    attempts = int(os.environ.get("JOB_MAX_ATTEMPTS", "3"))
+    base_s = float(os.environ.get("JOB_RETRY_BASE_S", "30"))
+    return max(1, attempts), max(0.0, base_s)
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """Transient (worth an in-run retry) vs deterministic (fail immediately).
+
+    The HTTP client already retries 429/5xx per request; a job-level retry only
+    pays when the *run* died on exhausted retries or on infra outside the
+    client's scope (S3, the websocket feed). Deterministic failures -- a 403
+    PermissionError, a non-retryable 4xx, schema/argument ValueErrors -- would
+    just rerun the whole job for nothing, so they fail on first sight.
+    """
+    if isinstance(exc, MassiveHTTPError):
+        return exc.status_code in RETRYABLE_STATUS
+    if isinstance(exc, (requests.RequestException, ConnectionError, TimeoutError)):
+        # requests: network-level or client retries already exhausted.
+        # Builtin ConnectionError/TimeoutError: socket resets, ws read deadline.
+        # (PermissionError is a sibling OSError, not matched here -- good:
+        # the HTTP client raises it for a deterministic 403.)
+        return True
+    if isinstance(exc, NoCredentialsError):
+        return False  # missing S3 creds will not fix themselves in 30s
+    if isinstance(exc, ClientError):
+        code = exc.response.get("Error", {}).get("Code", "")
+        status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0)
+        return (
+            status in RETRYABLE_STATUS
+            or "Throttl" in code
+            or code in ("RequestTimeout", "ServiceUnavailable", "SlowDown")
+        )
+    if isinstance(exc, BotoCoreError):  # EndpointConnectionError and friends
+        return True
+    return isinstance(exc, websockets.ConnectionClosed)
 
 
 def healthcheck_slug(job_name: str) -> str:
@@ -117,65 +165,92 @@ def run_job(job_name: str, main_fn: MainFn, argv: list[str] | None = None) -> No
     Steps: parse args -> load settings -> open run log -> market gate (unless
     ``--force``) -> time ``main_fn`` -> log ``job_end`` -> healthcheck ping
     (``/fail`` suffix on exception).
+
+    Transient exceptions are retried in-process (see ``_retry_policy``):
+    cron has no backoff, so without this a one-off network blip waits a full
+    tick -- a full day for the T-1 jobs -- before trying again. Retries share
+    one Healthchecks run: a single ``/start`` up front and exactly one
+    terminal ping at the end. SystemExit (market gate, explicit exits) and
+    KeyboardInterrupt are never retried.
     """
     args = build_parser(job_name).parse_args(argv)
     run_date: date = date.fromisoformat(args.date) if args.date else market_gate.today_et()
+    # Parse before the /start ping: a typo like JOB_MAX_ATTEMPTS=three must
+    # crash loudly *before* the check enters "started", not strand it hung.
+    max_attempts, retry_base_s = _retry_policy()
 
     settings = Settings.load()
     logger = get_run_logger(job_name, run_date, log_root=settings.log_root)
     start = time.monotonic()
     ping_url, autocreate = healthcheck_url(settings, job_name)
     ping(ping_url, "/start", autocreate)
-    try:
-        logger.log(
-            "job_start",
-            job=job_name,
-            date=run_date.isoformat(),
-            force=args.force,
-            limit=args.limit,
-            dry_run=args.dry_run,
-            underlying=args.underlying,
-        )
-        market_gate.require_trading_day(run_date, force=args.force, data_root=settings.data_root)
-        summary = main_fn(args, settings, logger) or {}
-        duration_s = round(time.monotonic() - start, 3)
-        logger.log("job_end", job=job_name, rows=summary.get("rows", 0),
-                   bytes=summary.get("bytes", 0), duration_s=duration_s,
-                   **{k: v for k, v in summary.items() if k not in ("rows", "bytes")})
-        ping(ping_url, "", autocreate,
-             body=f"{job_name} ok: rows={summary.get('rows', 0)} in {duration_s}s")
-    except SystemExit as exc:
-        # market_gate.require_trading_day() exits 0 on holidays, and cron fires
-        # on weekdays regardless of the market calendar. Without a terminal
-        # ping here the check stays in "started" and Healthchecks reports a
-        # hung run on every market holiday -- a false page roughly ten times a
-        # year, which is exactly how alerting gets muted and stops working.
-        code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
-        duration_s = round(time.monotonic() - start, 3)
-        if code == 0:
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            logger.log(
+                "job_start",
+                job=job_name,
+                date=run_date.isoformat(),
+                force=args.force,
+                limit=args.limit,
+                dry_run=args.dry_run,
+                underlying=args.underlying,
+                attempt=attempt,
+            )
+            market_gate.require_trading_day(run_date, force=args.force,
+                                            data_root=settings.data_root)
+            summary = main_fn(args, settings, logger) or {}
+            duration_s = round(time.monotonic() - start, 3)
+            logger.log("job_end", job=job_name, rows=summary.get("rows", 0),
+                       bytes=summary.get("bytes", 0), duration_s=duration_s,
+                       **{k: v for k, v in summary.items() if k not in ("rows", "bytes")})
             ping(ping_url, "", autocreate,
-                 body=f"{job_name} exited early (not a trading day, or nothing to do)")
-        else:
-            ping(ping_url, "/fail", autocreate,
-                 body=f"{job_name} exited {code} after {duration_s}s")
-        logger.close()
-        raise
-    except BaseException as exc:  # noqa: BLE001 - must not leave the check hung
-        # BaseException, not Exception: KeyboardInterrupt and other
-        # BaseExceptions would otherwise skip every handler here and leave the
-        # check in "started" until Healthchecks called it a hung run.
-        duration_s = round(time.monotonic() - start, 3)
-        interrupted = isinstance(exc, KeyboardInterrupt)
-        logger.log(
-            "job_interrupted" if interrupted else "job_error",
-            job=job_name, error=f"{type(exc).__name__}: {exc}", duration_s=duration_s,
-        )
-        ping(ping_url, "/fail", autocreate,
-             body=f"{job_name} {'interrupted' if interrupted else 'failed'} "
-                  f"after {duration_s}s: {type(exc).__name__}: {exc}")
-        logger.close()
-        if interrupted:
+                 body=f"{job_name} ok: rows={summary.get('rows', 0)} in {duration_s}s")
+            break
+        except SystemExit as exc:
+            # market_gate.require_trading_day() exits 0 on holidays, and cron fires
+            # on weekdays regardless of the market calendar. Without a terminal
+            # ping here the check stays in "started" and Healthchecks reports a
+            # hung run on every market holiday -- a false page roughly ten times a
+            # year, which is exactly how alerting gets muted and stops working.
+            code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+            duration_s = round(time.monotonic() - start, 3)
+            if code == 0:
+                ping(ping_url, "", autocreate,
+                     body=f"{job_name} exited early (not a trading day, or nothing to do)")
+            else:
+                ping(ping_url, "/fail", autocreate,
+                     body=f"{job_name} exited {code} after {duration_s}s")
+            logger.close()
             raise
-        sys.exit(1)
+        except BaseException as exc:  # noqa: BLE001 - must not leave the check hung
+            # BaseException, not Exception: KeyboardInterrupt and other
+            # BaseExceptions would otherwise skip every handler here and leave the
+            # check in "started" until Healthchecks called it a hung run.
+            interrupted = isinstance(exc, KeyboardInterrupt)
+            duration_s = round(time.monotonic() - start, 3)
+            if (
+                not interrupted
+                and isinstance(exc, Exception)
+                and attempt < max_attempts
+                and _is_retryable(exc)
+            ):
+                sleep_s = min(retry_base_s * (2 ** (attempt - 1)), RETRY_CAP_S)
+                logger.log("job_retry", job=job_name, attempt=attempt,
+                           error=f"{type(exc).__name__}: {exc}", sleep_s=sleep_s)
+                time.sleep(sleep_s)
+                continue
+            logger.log(
+                "job_interrupted" if interrupted else "job_error",
+                job=job_name, error=f"{type(exc).__name__}: {exc}", duration_s=duration_s,
+            )
+            ping(ping_url, "/fail", autocreate,
+                 body=f"{job_name} {'interrupted' if interrupted else 'failed'} "
+                      f"after {duration_s}s: {type(exc).__name__}: {exc}")
+            logger.close()
+            if interrupted:
+                raise
+            sys.exit(1)
     logger.close()
     sys.exit(0)

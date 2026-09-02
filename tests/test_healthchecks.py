@@ -44,6 +44,12 @@ def recorder(monkeypatch) -> _Recorder:
     return rec
 
 
+@pytest.fixture(autouse=True)
+def _no_retry_sleep(monkeypatch) -> None:
+    """Retry backoff is real in prod (30s+); tests must not wait for it."""
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+
+
 # ---------------------------------------------------------------------------
 # Slug / URL construction
 # ---------------------------------------------------------------------------
@@ -445,3 +451,162 @@ def test_terminal_ping_matrix(outcome, tmp_path, monkeypatch, recorder):
     suf = _suffixes(recorder)
     assert suf[0] == "/start"
     assert len(suf) == 2, f"{outcome}: expected one terminal ping, got {suf}"
+
+
+# ---------------------------------------------------------------------------
+# In-run retry: cron has no backoff, so transient failures retry in-process
+# ---------------------------------------------------------------------------
+
+def _run_settings(monkeypatch, tmp_path: Path) -> None:
+    settings = _settings(tmp_path, healthchecks_ping_key="KEY")
+    monkeypatch.setattr(cli.Settings, "load", classmethod(lambda cls: settings))
+
+
+def test_transient_failure_is_retried_then_succeeds(tmp_path, monkeypatch, recorder):
+    """A one-off blip must not burn a whole cron tick."""
+    _run_settings(monkeypatch, tmp_path)
+    calls = {"n": 0}
+
+    def flaky(a, s, log):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise ConnectionError("blip")
+        return {"rows": 5}
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.run_job("contracts_sync", flaky, [])
+    assert excinfo.value.code == 0
+    assert calls["n"] == 3
+    assert _suffixes(recorder) == ["/start", ""], "retries share one run: no extra pings"
+
+
+def test_retry_exhaustion_fails_with_a_single_terminal_ping(tmp_path, monkeypatch, recorder):
+    _run_settings(monkeypatch, tmp_path)
+    calls = {"n": 0}
+
+    def always_broken(a, s, log):
+        calls["n"] += 1
+        raise ConnectionError("still down")
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.run_job("contracts_sync", always_broken, [])
+    assert excinfo.value.code == 1
+    assert calls["n"] == 3, "default JOB_MAX_ATTEMPTS is 3"
+    assert _suffixes(recorder) == ["/start", "/fail"]
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ValueError("bad schema"),
+        PermissionError("HTTP 403: not entitled"),
+        cli.MassiveHTTPError(400, "https://api.polygon.io/v3/x"),
+        RuntimeError("bug"),
+    ],
+)
+def test_deterministic_failures_are_not_retried(tmp_path, monkeypatch, recorder, exc):
+    """403s, 4xx, schema/argument errors and bugs rerun the job for nothing."""
+    _run_settings(monkeypatch, tmp_path)
+    calls = {"n": 0}
+
+    def boom(a, s, log):
+        calls["n"] += 1
+        raise exc
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.run_job("contracts_sync", boom, [])
+    assert excinfo.value.code == 1
+    assert calls["n"] == 1
+    assert _suffixes(recorder) == ["/start", "/fail"]
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ConnectionError("reset"),
+        TimeoutError("ws read deadline"),
+        cli.MassiveHTTPError(429, "https://api.polygon.io/v3/x"),
+        cli.MassiveHTTPError(503, "https://api.polygon.io/v3/x"),
+    ],
+)
+def test_transient_failures_are_retried(tmp_path, monkeypatch, recorder, exc):
+    _run_settings(monkeypatch, tmp_path)
+    calls = {"n": 0}
+
+    def flaky(a, s, log):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise exc
+        return {"rows": 1}
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.run_job("contracts_sync", flaky, [])
+    assert excinfo.value.code == 0
+    assert calls["n"] == 2
+
+
+def test_systemexit_is_never_retried(tmp_path, monkeypatch, recorder):
+    """Deterministic exits (market gate, explicit sys.exit) fail immediately."""
+    _run_settings(monkeypatch, tmp_path)
+    calls = {"n": 0}
+
+    def explicit_exit(a, s, log):
+        calls["n"] += 1
+        sys.exit(2)
+
+    with pytest.raises(SystemExit):
+        cli.run_job("contracts_sync", explicit_exit, [])
+    assert calls["n"] == 1
+    assert _suffixes(recorder) == ["/start", "/fail"]
+
+
+def test_keyboard_interrupt_is_never_retried(tmp_path, monkeypatch, recorder):
+    _run_settings(monkeypatch, tmp_path)
+    calls = {"n": 0}
+
+    def interrupted(a, s, log):
+        calls["n"] += 1
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        cli.run_job("contracts_sync", interrupted, [])
+    assert calls["n"] == 1
+
+
+def test_retry_attempts_are_env_configurable(tmp_path, monkeypatch, recorder):
+    _run_settings(monkeypatch, tmp_path)
+    monkeypatch.setenv("JOB_MAX_ATTEMPTS", "1")
+    calls = {"n": 0}
+
+    def boom(a, s, log):
+        calls["n"] += 1
+        raise ConnectionError("x")
+
+    with pytest.raises(SystemExit):
+        cli.run_job("contracts_sync", boom, [])
+    assert calls["n"] == 1, "JOB_MAX_ATTEMPTS=1 disables retry"
+
+
+def test_bad_retry_config_crashes_before_the_check_starts(tmp_path, monkeypatch, recorder):
+    """A typo like JOB_MAX_ATTEMPTS=three must not strand the check hung."""
+    _run_settings(monkeypatch, tmp_path)
+    monkeypatch.setenv("JOB_MAX_ATTEMPTS", "three")
+    with pytest.raises(ValueError):
+        cli.run_job("contracts_sync", lambda a, s, log: {"rows": 1}, [])
+    assert recorder.calls == [], "no /start may precede a config crash"
+
+
+def test_retry_backoff_is_exponential_and_capped(tmp_path, monkeypatch, recorder):
+    """Backoff doubles from JOB_RETRY_BASE_S and is capped at RETRY_CAP_S."""
+    _run_settings(monkeypatch, tmp_path)
+    sleeps: list[float] = []
+    monkeypatch.setattr(cli.time, "sleep", sleeps.append)
+    monkeypatch.setenv("JOB_MAX_ATTEMPTS", "7")
+    monkeypatch.setenv("JOB_RETRY_BASE_S", "30")
+
+    def boom(a, s, log):
+        raise ConnectionError("x")
+
+    with pytest.raises(SystemExit):
+        cli.run_job("contracts_sync", boom, [])
+    assert sleeps == [30.0, 60.0, 120.0, 240.0, 300.0, 300.0]

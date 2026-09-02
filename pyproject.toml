@@ -1,5 +1,24 @@
-# Tooling config only -- this repo is run as `python -m ingest.jobs.<name>`
-# from a venv, not installed as a package.
+# The repo runs as `python -m ingest.jobs.<name>`; it is also installable
+# (`pip install -e .`) so imports do not depend on the current directory.
+# Runtime deps are pinned in requirements.txt and referenced dynamically
+# below -- keep versions there, not here.
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crack-the-sky"
+version = "0.1.0"
+description = "Massive.com options ingestion and SPY/SPX pricing stack"
+requires-python = ">=3.11"
+dynamic = ["dependencies"]
+
+[tool.setuptools.packages.find]
+include = ["ingest*", "marketdata*", "pricing*"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
 
 [tool.ruff]
 target-version = "py311"

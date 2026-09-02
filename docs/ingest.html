@@ -224,6 +224,18 @@
             <td>Drops raw payloads older than <code>RETAIN_DAYS</code> (90) for rebuildable datasets. Never touches <code>clean/</code>, snapshots, flatfiles, or reference. No Healthcheck (bash, not <code>ingest.jobs</code>).</td>
           </tr>
           <tr>
+            <td class="job">rates_sync<br><span class="tag rest">rest</span></td>
+            <td class="when">08:20</td>
+            <td>Tue–Sat</td>
+            <td>Treasury par yield curve + inflation series via Massive <code>/fed/v1</code> (own budget, 0.2 rps — only a <code>--full</code> rebuild pages). Clean <code>treasury_yields</code> / <code>inflation</code>. Daily run is 2 requests; history already walked back to 1962.</td>
+          </tr>
+          <tr>
+            <td class="job">ibkr_executions</td>
+            <td class="when">18:30</td>
+            <td>Mon–Fri</td>
+            <td>Broker fills via the IBKR Flex Web Service (read-only reporting, no gateway). Clean <code>ibkr_executions</code>; a day with no fills exits cleanly. Token expires ~yearly — see <a href="box-operations.html">box operations</a>.</td>
+          </tr>
+          <tr>
             <td class="job">eod_dayaggs_rest</td>
             <td class="when">not scheduled</td>
             <td>—</td>

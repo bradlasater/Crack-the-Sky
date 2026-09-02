@@ -22,7 +22,9 @@ if [ ! -x "$REPO/venv/bin/python" ]; then
     python3 -m venv "$REPO/venv"
 fi
 "$REPO/venv/bin/pip" install --upgrade pip >/dev/null
-"$REPO/venv/bin/pip" install -r "$REPO/requirements.txt"
+# Editable install: deps come from requirements.txt via pyproject [project],
+# and imports stop depending on the current working directory.
+"$REPO/venv/bin/pip" install -e "$REPO"
 
 echo "==> [3/5] Checking .env"
 if [ ! -f "$REPO/.env" ]; then

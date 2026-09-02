@@ -1,9 +1,12 @@
 .env
+.DS_Store
 data/
 logs/
 venv/
+.ansible-venv/
 __pycache__/
 *.pyc
 *.jsonl.gz
+*.egg-info/
 venv
 .env.example.bak

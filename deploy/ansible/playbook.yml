@@ -11,8 +11,8 @@
     repo_dir: "{{ ansible_facts['env']['HOME'] }}/crack-the-sky"
     repo_url: git@github.com:bradlasater/Crack-the-Sky.git
     data_root: /data/massive
-    runner_dir: "{{ ansible_facts["env"]["HOME"] }}/actions-runner"
-    user_unit_dir: "{{ ansible_facts["env"]["HOME"] }}/.config/systemd/user"
+    runner_dir: "{{ ansible_facts['env']['HOME'] }}/actions-runner"
+    user_unit_dir: "{{ ansible_facts['env']['HOME'] }}/.config/systemd/user"
   handlers:
     - name: daemon-reload user units
       ansible.builtin.command: systemctl --user daemon-reload
@@ -60,7 +60,7 @@
         cmd: crontab {{ repo_dir }}/deploy/crontab
 
     - name: Linger state
-      ansible.builtin.command: loginctl show-user {{ ansible_facts["env"]["USER"] }} -p Linger --value
+      ansible.builtin.command: loginctl show-user {{ ansible_facts['env']['USER'] }} -p Linger --value
       register: linger_state
       changed_when: false
 

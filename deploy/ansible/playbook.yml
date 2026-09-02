@@ -8,7 +8,7 @@
   hosts: headless
   gather_facts: true
   vars:
-    repo_dir: "{{ ansible_facts["env"]["HOME"] }}/crack-the-sky"
+    repo_dir: "{{ ansible_facts['env']['HOME'] }}/crack-the-sky"
     repo_url: git@github.com:bradlasater/Crack-the-Sky.git
     data_root: /data/massive
     runner_dir: "{{ ansible_facts["env"]["HOME"] }}/actions-runner"

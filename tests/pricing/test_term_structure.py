@@ -232,3 +232,67 @@ def test_term_structure_slopes_with_expiry() -> None:
     assert by_expiry["2026-09-25"] == pytest.approx(VOL, abs=1e-5)
     assert by_expiry["2026-11-20"] == pytest.approx(0.24, abs=1e-5)
     assert not math.isclose(by_expiry["2026-09-25"], by_expiry["2026-11-20"])
+
+
+# ---------------------------------------------------------------------------
+# ATM must be a strike with both legs
+# ---------------------------------------------------------------------------
+
+def test_atm_skips_a_nearer_one_sided_strike() -> None:
+    """Day bars hold only contracts that traded, so the nearest strike is
+    often call-only or put-only. Picking it would average a single leg and
+    call the result an ATM point."""
+    bars = _chain_bars(strikes=[7650.0, 7700.0])
+    # A call-only strike nearer the forward than any paired strike.
+    bars.append({"ticker": _sym("SPXW", EXPIRY, "call", 7695.0),
+                 "close": float(price(F, 7695.0, T, R, VOL, "call", q=R)),
+                 "window_end_ns": 1})
+    row = ts.build_rows(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate)[0]
+    assert row["atm_strike"] == 7700.0, "one-sided 7695 must not win ATM"
+    assert row["call_iv"] is not None and row["put_iv"] is not None
+
+
+def test_both_legs_present_on_every_row() -> None:
+    """The dataset documents a two-leg ATM point; prices must never be null."""
+    bars = _chain_bars(strikes=[7600.0, 7650.0, 7700.0])
+    bars.append({"ticker": _sym("SPXW", EXPIRY, "put", 7702.0),
+                 "close": float(price(F, 7702.0, T, R, VOL, "put", q=R)),
+                 "window_end_ns": 1})
+    for row in ts.build_rows(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate):
+        assert row["call_price"] is not None
+        assert row["put_price"] is not None
+
+
+# ---------------------------------------------------------------------------
+# Re-running a date must not double-count
+# ---------------------------------------------------------------------------
+
+def test_second_write_replaces_rather_than_appends(tmp_path) -> None:
+    """write_clean is append-only, so a retry would leave two files and a
+    whole-partition read would return every key twice."""
+    from ingest.common.config import Settings
+
+    settings = Settings(massive_api_key="k", data_root=tmp_path,
+                        log_root=tmp_path / "logs")
+    rows = ts.build_rows(_chain_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate)
+    ts.write_rows(settings, DAY, rows)
+    ts.write_rows(settings, DAY, rows)
+
+    part = tmp_path / "clean" / ts.DATASET / f"dt={DAY.isoformat()}"
+    assert len(list(part.glob("*.parquet"))) == 1, "a rerun must not add a file"
+
+
+def test_replaced_output_is_moved_not_deleted(tmp_path) -> None:
+    """The prior file stays recoverable, as on the flat-file path."""
+    from ingest.common.config import Settings
+
+    settings = Settings(massive_api_key="k", data_root=tmp_path,
+                        log_root=tmp_path / "logs")
+    rows = ts.build_rows(_chain_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate)
+    first = ts.write_rows(settings, DAY, rows)
+    ts.write_rows(settings, DAY, rows)
+
+    quarantined = list(
+        (tmp_path / "_quarantine").rglob(f"{first.name}")
+    )
+    assert quarantined and quarantined[0].is_file()

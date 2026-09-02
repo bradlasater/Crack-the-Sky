@@ -2,7 +2,7 @@
 
 ``coverage_audit`` answers "did today work". Nothing answered "is the history
 complete", and the difference is not academic: 19 trading days between
-2026-02-15 and 2026-04-04 sat missing from the archive while every daily
+2023-02-15 and 2023-04-04 sat missing from the archive while every daily
 check passed, because the daily check only ever looks at T-1. They surfaced
 only when someone went looking by hand.
 
@@ -23,8 +23,10 @@ calendar the repo otherwise does not have.
 Run: ``python -m ingest.jobs.history_audit [--start YYYY-MM-DD]
 [--end YYYY-MM-DD] [--offline]``
 
-``run_job`` gates on the *run* date, not the audited range, so add ``--force``
-to audit from a weekend.
+``run_job`` gates on the *run* date, which for this job is incidental -- the
+subject is the archive, not today. ``--date`` therefore defaults to the
+previous trading day, so the weekly Saturday cron line gates on Friday's
+session and no ``--force`` is needed.
 """
 
 from __future__ import annotations

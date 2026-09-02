@@ -169,9 +169,17 @@ def build_rows(
             r = _rate_for_expiry(expiry)
 
             strikes = legs.get(fwd["expiration_date"], {})
-            if not strikes:
+            # Only strikes quoting BOTH legs are eligible. Day bars hold just
+            # the contracts that traded, so the strike nearest the forward is
+            # often one-sided; taking it would yield an "ATM point" averaging
+            # a single leg, which is not what this dataset claims to be. A
+            # paired strike always exists here -- forward_from_parity emits an
+            # expiry only when it found one -- so this narrows the choice
+            # rather than discarding expiries.
+            paired = {k: v for k, v in strikes.items() if "call" in v and "put" in v}
+            if not paired:
                 continue
-            K = min(strikes, key=lambda k: abs(k - F))
+            K = min(paired, key=lambda k: abs(k - F))
             call_px = strikes[K].get("call")
             put_px = strikes[K].get("put")
 
@@ -214,6 +222,26 @@ def read_day_bars(settings: Settings, d: date) -> list[dict[str, Any]]:
             pq.read_table(path, columns=["ticker", "close", "window_end_ns"]).to_pylist()
         )
     return rows
+
+
+def write_rows(settings: Settings, d: date, rows: list[dict[str, Any]]) -> Path:
+    """Write one session's rows, replacing this job's previous output.
+
+    ``write_clean`` adds a NEW timestamped file, so any second run for a date
+    -- a manual retry, or ``build_term_structure.py --force`` -- would leave
+    two files in the partition and a whole-partition read would return every
+    ``(date, root, expiry)`` key twice. That silent doubling is exactly what
+    ``--replace`` exists to prevent on the flat-file path.
+
+    Snapshot what is there, write, then quarantine only the snapshot. The
+    ordering matters: quarantining first and writing second would leave the
+    partition with nothing at all if the write failed.
+    """
+    prior = landing.clean_files(DATASET, d, JOB, settings.data_root)
+    path = landing.write_clean(DATASET, d, rows, job=JOB, data_root=settings.data_root)
+    if prior:
+        landing.quarantine_prior(DATASET, d, JOB, settings.data_root, only=prior)
+    return path
 
 
 def build_for_date(
@@ -261,8 +289,7 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger):
           + "  ".join(f"{k}={v}" for k, v in sorted(by_root.items())), file=sys.stderr)
 
     if not args.dry_run:
-        path = landing.write_clean(DATASET, d, rows, job=JOB,
-                                   data_root=settings.data_root)
+        path = write_rows(settings, d, rows)
         print(f"PASS  wrote {path}", file=sys.stderr)
     return {"rows": len(rows), "priced": len(priced), "roots": len(by_root)}
 

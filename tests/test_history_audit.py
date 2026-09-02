@@ -210,17 +210,60 @@ def test_corrupt_calendar_is_ignored_not_fatal(tmp_path: Path) -> None:
 # Exit status
 # ---------------------------------------------------------------------------
 
-def test_gaps_raise_so_the_job_exits_nonzero(tmp_path: Path) -> None:
-    """Healthchecks and CI only notice a non-zero exit."""
-    day = date(2023, 2, 15)
-    s3 = _S3(sessions={day.isoformat()})
-    statuses, _ = ha.audit_range(
-        _settings(tmp_path), day, day, _logger(), s3_factory=lambda: s3,
-    )
-    bad = [s for s in statuses if s.verdict in ha.BAD]
-    assert bad, "precondition: this range has a gap"
+def _args(**kw):
+    """Namespace shaped like the one run_job hands to _main_fn."""
+    from types import SimpleNamespace
+
+    base = {"date": "2023-02-16", "start": "2023-02-15", "end": "2023-02-15",
+            "offline": False, "dry_run": True}
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_main_fn_raises_on_a_gap_so_the_job_exits_nonzero(tmp_path, monkeypatch) -> None:
+    """Healthchecks and CI only ever notice a non-zero exit.
+
+    Driving _main_fn rather than raising the error inline is the whole point:
+    if the job stopped raising, an inline test would still pass while the
+    monitored run went green straight through a hole in the archive.
+    """
+    gap = ha.DayStatus(date(2023, 2, 15), ha.GAP,
+                       dict.fromkeys(ha.CLEAN_DATASETS, False))
+    monkeypatch.setattr(ha, "audit_range", lambda *a, **k: ([gap], {}))
+    with pytest.raises(ha.HistoryGapError) as exc:
+        ha._main_fn(_args(), _settings(tmp_path), _logger())
+    assert "2023-02-15" in str(exc.value)
+
+
+def test_main_fn_raises_on_a_partial_day_too(tmp_path, monkeypatch) -> None:
+    partial = ha.DayStatus(date(2023, 2, 15), ha.PARTIAL,
+                           {"option_trades": True, "option_minute_bars": False,
+                            "option_day_bars": False})
+    monkeypatch.setattr(ha, "audit_range", lambda *a, **k: ([partial], {}))
     with pytest.raises(ha.HistoryGapError):
-        raise ha.HistoryGapError(f"{len(bad)} session day(s) missing")
+        ha._main_fn(_args(), _settings(tmp_path), _logger())
+
+
+def test_main_fn_is_quiet_when_the_archive_is_whole(tmp_path, monkeypatch) -> None:
+    """A holiday is not a gap and must not fail the run."""
+    days = [
+        ha.DayStatus(date(2023, 2, 15), ha.OK, dict.fromkeys(ha.CLEAN_DATASETS, True)),
+        ha.DayStatus(date(2023, 2, 20), ha.HOLIDAY,
+                     dict.fromkeys(ha.CLEAN_DATASETS, False)),
+    ]
+    monkeypatch.setattr(ha, "audit_range", lambda *a, **k: (days, {}))
+    summary = ha._main_fn(_args(), _settings(tmp_path), _logger())
+    assert summary["gaps"] == 0
+    assert summary["sessions"] == 1, "a holiday is not a session"
+
+
+def test_unknown_does_not_fail_the_run(tmp_path, monkeypatch) -> None:
+    """An unreachable vendor is reported, not treated as a missing day."""
+    unknown = ha.DayStatus(date(2023, 2, 15), ha.UNKNOWN,
+                           dict.fromkeys(ha.CLEAN_DATASETS, False))
+    monkeypatch.setattr(ha, "audit_range", lambda *a, **k: ([unknown], {}))
+    summary = ha._main_fn(_args(), _settings(tmp_path), _logger())
+    assert summary["unknown"] == 1 and summary["gaps"] == 0
 
 
 def test_render_lists_every_problem_day(tmp_path: Path) -> None:

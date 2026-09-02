@@ -32,11 +32,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ingest.common import landing  # noqa: E402
 from ingest.common.config import Settings  # noqa: E402
 from ingest.jobs import OPTION_ROOTS  # noqa: E402
 from ingest.jobs.history_audit import load_calendar  # noqa: E402
-from pricing.term_structure import DATASET, build_for_date  # noqa: E402
+from pricing.term_structure import DATASET, build_for_date, write_rows  # noqa: E402
 
 
 def already_built(settings: Settings, d: date) -> bool:
@@ -93,8 +92,10 @@ def main(argv: list[str] | None = None) -> int:
             bad.append(iso)
             print(f"[ts] {iso} EMPTY", file=sys.stderr, flush=True)
             continue
-        landing.write_clean(DATASET, d, rows, job="term_structure",
-                            data_root=settings.data_root)
+        # write_rows replaces this job's prior output for the date, so a
+        # --force rebuild cannot leave two files in the partition and have a
+        # whole-partition read return every (date, root, expiry) key twice.
+        write_rows(settings, d, rows)
         ok += 1
         if ok % 100 == 0:
             print(f"[ts] ({i}/{len(sessions)}) {iso}  ok={ok} skipped={skipped} "

@@ -93,9 +93,14 @@
             <td>Parquet under <code>DATA_ROOT</code>. Docstring leftover only.</td>
           </tr>
           <tr>
-            <td>VIX / VVIX ingest</td>
+            <td>VIX options ingest</td>
             <td><span class="badge shipped">built</span></td>
-            <td>VIX and VIXW <em>options</em> are captured: roots in <code>OPTION_ROOTS</code>, swept by <code>snapshot_sweep</code>, kept by the flat-file filter, and re-filtered across the whole history. The VIX <em>index level</em> is still a 403, so the per-expiry parity forward is the VX future of that expiry — which is the right object for a term structure. VVIX remains unbuilt.</td>
+            <td>VIX and VIXW <em>options</em> are captured: roots in <code>OPTION_ROOTS</code>, swept by <code>snapshot_sweep</code>, kept by the flat-file filter, and re-filtered across the whole history. The VIX <em>index level</em> is still a 403, so the per-expiry parity forward is the VX future of that expiry — which is the right object for a term structure.</td>
+          </tr>
+          <tr>
+            <td>VVIX ingest</td>
+            <td><span class="badge missing">not built</span></td>
+            <td>No capture, no root, nothing downstream. Split out from the VIX row because that half shipped and this half did not, and one row cannot carry both badges honestly.</td>
           </tr>
           <tr>
             <td>pandas</td>

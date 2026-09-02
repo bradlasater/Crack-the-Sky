@@ -11,10 +11,10 @@ Python 3.11+, no pandas (`pyarrow`, `numpy`, `scipy`, `requests`, `websockets`,
 
 ## What it captures
 
-- **Full-chain option snapshots, every minute** — IV, greeks, open interest,
-  underlying price, for SPY and SPX/SPXW. This is the crown jewel: no vendor
-  endpoint can reproduce a historical snapshot, so it is swept live or lost
-  forever.
+- **Full-chain option snapshots, every minute** — IV, greeks, and open interest
+  for SPY and SPX/SPXW, plus underlying price for SPY (SPX spot is recovered
+  from put-call parity). Historical snapshots cannot be reproduced, so they
+  are swept live or lost forever.
 - **Delayed option minute bars** over websocket during the session.
 - **Trades** on a liquid watchlist, polled every 5 minutes.
 - **S3 flat files** (trades / minute aggs / day aggs) pulled the next morning —

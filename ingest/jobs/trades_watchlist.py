@@ -39,10 +39,10 @@ import json
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date
+from datetime import date, datetime, time
 from typing import Any
 
-from ingest.common import landing, ratelimit
+from ingest.common import landing, market_gate, ratelimit
 from ingest.common.cli import run_job
 from ingest.common.config import Settings
 from ingest.common.http_client import MassiveClient
@@ -121,7 +121,13 @@ def _load_poll_state(settings: Settings, run_date: date) -> tuple[int, dict[str,
             str(k): [int(v[0]), int(v[1])] for k, v in dict(data["tickers"]).items()
         }
         return int(data["run"]), tickers
-    except (FileNotFoundError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+    except Exception:  # noqa: BLE001 - see below
+        # Deliberately broad. The contract this file has with the job is
+        # "never cause a skip", and there are more ways to be malformed than
+        # to be well-formed: a top-level list raises AttributeError on .get,
+        # a truncated ticker value raises IndexError on v[1], a non-numeric
+        # one raises ValueError. Enumerating them invites the next shape to
+        # crash the job over an optimisation hint.
         return 0, {}
 
 
@@ -136,14 +142,46 @@ def _save_poll_state(
     tmp.replace(path)
 
 
+# The last trades slot of the day is "0-30/5 16", so any run at or after this
+# is the closing one. It ignores backoff and sweeps every ticker.
+#
+# Without this, a quiet ticker could fall due after the final run and have its
+# closing trades left for the next morning -- where they would land in the
+# *next* session's partition, because dt= is the fetch date. That mis-filing
+# already happens for an unrelated reason (a contract's first-ever poll has no
+# cursor and returns its whole history: 455 rows of 2026-09-02 trades landed
+# in the 2026-09-03 partition with no backoff in production at all), so this
+# does not fix the partitioning. What it does buy is a property worth having:
+# backoff cannot make the close *worse* than it already was.
+#
+# Cost is one full sweep a day -- ~9,100 requests, ~150s at the current rate.
+CLOSING_SWEEP_AFTER_ET = time(16, 25)
+
+
+def _now_et() -> datetime:
+    """Indirection so tests can pin the clock (see _is_closing_run)."""
+    return market_gate.now_et()
+
+
+def _is_closing_run(now: datetime) -> bool:
+    """True for the day's final trades slot, which never backs off."""
+    return now.time() >= CLOSING_SWEEP_AFTER_ET
+
+
 def _due_tickers(
-    tickers: list[str], run_index: int, state: dict[str, list[int]]
+    tickers: list[str],
+    run_index: int,
+    state: dict[str, list[int]],
+    closing: bool = False,
 ) -> list[str]:
     """Tickers to poll this run: everything unknown, plus everything due.
 
     A ticker absent from ``state`` has never been seen -- a new contract in
-    the watchlist, or a wiped state file -- and is always polled.
+    the watchlist, or a wiped state file -- and is always polled. On the
+    closing run every ticker is due, whatever the ladder says.
     """
+    if closing:
+        return list(tickers)
     return [t for t in tickers if t not in state or state[t][1] <= run_index]
 
 
@@ -185,7 +223,8 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger):
     cursors = _load_cursors(settings)
     prev_run, poll_state = _load_poll_state(settings, run_date)
     run_index = prev_run + 1
-    due = _due_tickers(tickers, run_index, poll_state)
+    closing = _is_closing_run(_now_et())
+    due = _due_tickers(tickers, run_index, poll_state, closing=closing)
 
     client = MassiveClient(settings, priority=ratelimit.LOW)
     records: list[dict[str, Any]] = []
@@ -219,14 +258,20 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger):
         polled=len(due),
         skipped=len(tickers) - len(due),
         backoff_max=BACKOFF_MAX,
+        closing_sweep=closing,
         workers=workers,
     )
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix=JOB) as pool:
         list(pool.map(work, due))
 
     # Contracts that have rolled off the watchlist must not accumulate in the
-    # state file forever.
-    poll_state = {t: v for t, v in poll_state.items() if t in set(tickers)}
+    # state file forever. Skipped entirely under --limit: `tickers` was
+    # truncated above, so pruning against it would delete the backoff state
+    # for every contract the limited run never looked at, and the next real
+    # run would poll all of them at once.
+    if args.limit is None:
+        keep = set(tickers)
+        poll_state = {t: v for t, v in poll_state.items() if t in keep}
 
     for err in errors[:20]:
         logger.log("ticker_error", **err)

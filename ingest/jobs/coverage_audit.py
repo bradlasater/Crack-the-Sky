@@ -72,9 +72,11 @@ MAX_SWEEP_GAP_S = 180
 # and the two deliberate singletons are asserted separately.
 SWEEP_WINDOW_OPEN_ET = time(9, 30)
 # Continuous cadence runs to close + 30 min (crontab "0-30 16"). This is
-# deliberately *not* market_gate.option_capture_end_et (close + 20): that is
-# the websocket job's deadline, and borrowing it here understated the
-# expected count by ten sweeps a day.
+# deliberately *not* market_gate.option_capture_end_et (close + 35): that is
+# the websocket job's deadline, sized for when the delayed feed *delivers* the
+# last bar, and has nothing to do with when the sweep cron stops firing. The
+# two were briefly the same number, which is how borrowing it here once
+# understated the expected count by ten sweeps a day.
 SWEEP_TAIL = timedelta(minutes=30)
 # A stamp is the moment the sweep *wrote*, not the moment cron fired it, and a
 # full two-chain sweep takes ~14s. Without this the 16:30 sweep lands at

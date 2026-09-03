@@ -236,12 +236,28 @@ def test_missing_poll_state_polls_everything(tmp_path: Path) -> None:
     assert job._load_poll_state(s, date(2026, 9, 4)) == (0, {})
 
 
-def _run_slot(monkeypatch, settings, tape: dict[str, list[dict]], tickers: list[str]):
-    """Run one full _main_fn slot against a fake tape; return (result, polled)."""
+def _midsession(hour: int = 11, minute: int = 0):
+    """A datetime inside the session, before the closing sweep threshold."""
+    from datetime import datetime
+
+    from ingest.common import market_gate
+
+    return datetime(2026, 9, 4, hour, minute, tzinfo=market_gate.ET)
+
+
+def _run_slot(monkeypatch, settings, tape: dict[str, list[dict]], tickers: list[str],
+              now=None):
+    """Run one full _main_fn slot against a fake tape; return (result, polled).
+
+    The clock is pinned: these tests are about the ladder, and a suite that
+    behaves differently when CI happens to run after 16:25 ET is worse than
+    useless.
+    """
     import argparse
 
     from ingest.common.logging_utils import JsonlLogger
 
+    monkeypatch.setattr(job, "_now_et", lambda: now or _midsession())
     client = _FakeClient(tape)
     monkeypatch.setattr(
         job, "compute_watchlist", lambda *a, **k: [{"ticker": t} for t in tickers]
@@ -340,6 +356,7 @@ def test_failed_polls_are_retried_next_slot_not_treated_as_silence(
             yield  # pragma: no cover
 
     s = _settings(tmp_path)
+    monkeypatch.setattr(job, "_now_et", _midsession)
     monkeypatch.setattr(
         job, "compute_watchlist", lambda *a, **k: [{"ticker": "O:ERR"}]
     )
@@ -351,3 +368,81 @@ def test_failed_polls_are_retried_next_slot_not_treated_as_silence(
         res = job._main_fn(args, s, JsonlLogger(path=None, echo=False))
         assert res["polled"] == 1, "an erroring ticker was backed off"
         assert res["errors"] == 1
+
+
+def test_closing_run_sweeps_every_ticker_regardless_of_backoff(
+    monkeypatch, tmp_path
+) -> None:
+    """Backoff must not leave a quiet ticker unpolled at the close.
+
+    dt= partitions by fetch date, so a ticker that falls due after the final
+    16:30 slot would have its closing trades written into the *next* session's
+    partition. The closing sweep is what keeps backoff from making that worse.
+    """
+    s = _settings(tmp_path)
+    tickers = ["O:HOT", "O:COLD"]
+    tape = {"O:HOT": [_trade(1)], "O:COLD": []}
+
+    # Ride the ladder down mid-session until O:COLD is genuinely being skipped.
+    skipped_at_least_once = False
+    for slot in range(6):
+        tape["O:HOT"] = [_trade(slot + 1)]
+        _res, polled = _run_slot(monkeypatch, s, tape, tickers)
+        if "O:COLD" not in polled:
+            skipped_at_least_once = True
+    assert skipped_at_least_once, "precondition: O:COLD should have backed off"
+
+    # The closing run ignores the ladder entirely.
+    res, polled = _run_slot(monkeypatch, s, tape, tickers, now=_midsession(16, 30))
+    assert sorted(polled) == ["O:COLD", "O:HOT"]
+    assert res["skipped"] == 0
+
+
+def test_closing_run_threshold() -> None:
+    assert job._is_closing_run(_midsession(16, 30)) is True
+    assert job._is_closing_run(_midsession(16, 25)) is True
+    assert job._is_closing_run(_midsession(16, 24)) is False
+    assert job._is_closing_run(_midsession(9, 30)) is False
+
+
+def test_limited_run_does_not_wipe_state_for_unpolled_tickers(
+    monkeypatch, tmp_path
+) -> None:
+    """--limit is a smoke-test switch; it must not cost the next real run."""
+    import argparse
+    from datetime import date
+
+    from ingest.common.logging_utils import JsonlLogger
+
+    s = _settings(tmp_path)
+    all_tickers = ["O:A", "O:B", "O:C"]
+    _run_slot(monkeypatch, s, {}, all_tickers)
+    before = job._load_poll_state(s, date(2026, 9, 4))[1]
+    assert set(before) == {"O:A", "O:B", "O:C"}
+
+    monkeypatch.setattr(job, "_now_et", _midsession)
+    monkeypatch.setattr(
+        job, "compute_watchlist", lambda *a, **k: [{"ticker": t} for t in all_tickers]
+    )
+    monkeypatch.setattr(job, "MassiveClient", lambda *a, **k: _FakeClient({}))
+    job._main_fn(
+        argparse.Namespace(date="2026-09-04", limit=1, dry_run=False,
+                           force=True, underlying=None),
+        s, JsonlLogger(path=None, echo=False),
+    )
+    after = job._load_poll_state(s, date(2026, 9, 4))[1]
+    assert set(after) == {"O:A", "O:B", "O:C"}, "a --limit run pruned live state"
+
+
+def test_malformed_but_valid_json_state_polls_everything(tmp_path: Path) -> None:
+    """Valid JSON in the wrong shape must not crash the job."""
+    from datetime import date
+
+    s = _settings(tmp_path)
+    path = landing.meta_path(job.POLL_STATE_NAME, data_root=tmp_path)
+    for payload in ('[1, 2, 3]', '"a string"',
+                    '{"date": "2026-09-04", "run": 1, "tickers": {"O:A": [1]}}',
+                    '{"date": "2026-09-04", "run": 1, "tickers": {"O:A": "nope"}}',
+                    '{"date": "2026-09-04", "run": "x", "tickers": {}}'):
+        path.write_text(payload, encoding="utf-8")
+        assert job._load_poll_state(s, date(2026, 9, 4)) == (0, {}), payload

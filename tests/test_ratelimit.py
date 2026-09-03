@@ -62,6 +62,21 @@ def test_default_bucket_is_shared() -> None:
 # multiple of the configured ceiling -- and the vendor meters the box, not the
 # process.
 
+def _freeze_time(monkeypatch) -> None:
+    """Deterministic clock for bucket tests: fake sleep advances fake time.
+
+    The advance needs a floor: a computed wait can be smaller than one ULP
+    of the current timestamp (1000.002 + 4.7e-14 rounds back to 1000.002),
+    which would spin the bucket's retry loop forever. Real sleeps can't do
+    this -- the OS rounds up to microseconds.
+    """
+    now = [1000.0]
+    monkeypatch.setattr(ratelimit.time, "time", lambda: now[0])
+    monkeypatch.setattr(
+        ratelimit.time, "sleep", lambda s: now.__setitem__(0, now[0] + max(s, 1e-9))
+    )
+
+
 def test_shared_bucket_state_is_visible_to_another_instance(tmp_path, monkeypatch) -> None:
     """Two bucket objects on one file draw from the same tokens.
 
@@ -71,11 +86,7 @@ def test_shared_bucket_state_is_visible_to_another_instance(tmp_path, monkeypatc
     advances the fake clock, so the waiting acquire below still completes,
     instantly and deterministically.
     """
-    now = [1000.0]
-    monkeypatch.setattr(ratelimit.time, "time", lambda: now[0])
-    monkeypatch.setattr(
-        ratelimit.time, "sleep", lambda s: now.__setitem__(0, now[0] + s)
-    )
+    _freeze_time(monkeypatch)
     path = tmp_path / "ratelimit.json"
     a = ratelimit.SharedTokenBucket(path, rate=5.0, burst=10.0)
     b = ratelimit.SharedTokenBucket(path, rate=5.0, burst=10.0)
@@ -343,33 +354,41 @@ def test_a_waiting_normal_caller_registers_a_claim(tmp_path, kind) -> None:
     done.wait(timeout=5)
 
 
-def test_low_priority_is_not_throttled_when_nothing_competes(tmp_path) -> None:
+def test_low_priority_is_not_throttled_when_nothing_competes(tmp_path, monkeypatch) -> None:
     """Yielding must cost nothing while the sweep is idle.
 
     The reserve plus claim is chosen over giving low priority its own smaller
     rate precisely so trades polling keeps the full budget outside the moments
     a sweep is actually waiting.
 
-    Measured *relative* to normal priority, not against a wall-clock bound:
-    an absolute bound flakes on slow CI disks (each shared acquire is an
-    open/flock/write, ~30ms under load -> 100 acquires > the old 1.5s bound).
-    A slow machine slows both priorities equally, while the reserve mechanism
-    -- if it ever throttled low priority on its own -- would show up as a
-    multiplier.
+    Fake clock, and the assertion sums the *returned* wait times: neither the
+    absolute wall clock (flaked on slow CI disks -- each shared acquire is an
+    open/flock/write) nor a relative wall-clock comparison (still scheduling-
+    dependent: flaked at 5-7x on CI) survives a shared runner. With time
+    frozen, ``waited`` is pure arithmetic: each starved acquire waits exactly
+    the token deficit over the rate.
     """
-    def time_acquires(priority: str) -> float:
+    _freeze_time(monkeypatch)
+
+    def total_wait(priority: str) -> float:
         bucket = ratelimit.SharedTokenBucket(
             tmp_path / f"rl-{priority}.json", rate=500.0, burst=20.0
         )
-        start = time.monotonic()
-        for _ in range(100):
-            bucket.acquire(priority=priority)
-        return time.monotonic() - start
+        return sum(bucket.acquire(priority=priority) for _ in range(100))
 
-    low = time_acquires(ratelimit.LOW)
-    normal = time_acquires(ratelimit.NORMAL)
-    assert low < normal * 2.0, (
-        f"low priority throttled with no contention: {low:.2f}s vs normal {normal:.2f}s"
+    low = total_wait(ratelimit.LOW)
+    normal = total_wait(ratelimit.NORMAL)
+    # 100 tokens = 20 burst + 80 refills at 500/s -> 0.16s for normal. Low
+    # stops at the 7-token reserve, so 7 of its burst tokens arrive via
+    # refill instead: the reserve costs exactly floor/rate = 14ms more.
+    # Deterministic under the fake clock; the 1us tolerance covers the
+    # min-step floor in _freeze_time, which perturbs sub-ULP waits by ~1e-9
+    # each. Any real throttling would show up in milliseconds.
+    floor_tokens = 20.0 * ratelimit.RESERVE_FRACTION
+    assert low - normal == pytest.approx(floor_tokens / 500.0, abs=1e-6), (
+        f"low priority throttled with no contention: waited {low:.3f}s "
+        f"vs normal {normal:.3f}s (reserve cost should be "
+        f"{floor_tokens / 500.0:.3f}s)"
     )
 
 

@@ -6,7 +6,7 @@
   <title>Crack the Sky — pricing</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;family=Newsreader:opsz,wght@6..72,500;6..72,600&amp;display=swap" rel="stylesheet">
   <link rel="stylesheet" href="site.css">
 </head>
 <body id="top">
@@ -30,7 +30,15 @@
           </ol>
         </li>
         <li><a href="marketdata.html">marketdata</a></li>
-        <li><a href="pricing.html" class="active">pricing</a></li>
+        <li>
+          <a href="pricing.html" class="active">pricing</a>
+          <ol class="sub">
+            <li><a href="pricing.html#pricing-conventions">GreeksConventions</a></li>
+            <li><a href="pricing.html#pricing-catalog">Named catalog</a></li>
+            <li><a href="pricing.html#pricing-euro-american">European vs American</a></li>
+            <li><a href="pricing.html#pricing-iv-invert">IV invert</a></li>
+          </ol>
+        </li>
         <li><a href="warehouse-math.html">Warehouse → math</a></li>
         <li><a href="canary.html">Daily canary</a></li>
         <li><a href="conventions.html">Desk conventions</a></li>
@@ -57,25 +65,25 @@
         explicitly.
       </p>
       <dl class="notes">
-        <dt>GreeksConventions</dt>
+        <dt id="pricing-conventions">GreeksConventions</dt>
         <dd>
           Defaults: vega <strong>per 1.00 vol</strong>, theta <strong>per year</strong>
           of calendar time, spot delta/gamma. Dual (∂/∂K) is always also
           populated. Tests that read a Greek must name the convention.
         </dd>
-        <dt>Named catalog</dt>
+        <dt id="pricing-catalog">Named catalog</dt>
         <dd>
           price; 1st <code>delta, dual_delta, vega, theta, rho, rho_dividend</code>;
           2nd <code>gamma, dual_gamma, vanna, volga, charm, veta, vera</code>;
           3rd <code>speed, zomma, color, ultima</code>; elasticity.
         </dd>
-        <dt>European vs American</dt>
+        <dt id="pricing-euro-american">European vs American</dt>
         <dd>
           <code>Engine</code> protocol: <code>EuropeanBSM</code> closed-form;
           <code>AmericanCRR</code> tree with bump-and-revalue Greeks.
           Style comes from the contract (SPY American, SPX/SPXW European).
         </dd>
-        <dt>IV invert</dt>
+        <dt id="pricing-iv-invert">IV invert</dt>
         <dd>
           Newton with bounds, Brent fallback. Price outside discounted
           no-arbitrage bounds → <code>ValueError</code>.

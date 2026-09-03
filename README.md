@@ -84,6 +84,5 @@ sed "s|/home/brad-lasater|$HOME|g" deploy/crontab | crontab -
 
 ## Security
 
-`.env` is gitignored — never commit it. Keep this repo **private**: it
-documents endpoints, plan tier, and box layout. All keys are read-only
+`.env` is gitignored — never commit it. All keys are read-only
 market-data credentials, sent only to the vendor hosts over TLS.

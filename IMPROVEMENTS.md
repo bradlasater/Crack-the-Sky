@@ -108,12 +108,6 @@ conservative audit pass. Grouped by area, roughly highest-value first.
 
 ## Docs / site
 
-- Rates-warehouse drift: `docs/warehouse-math.html:64` says "no rates
-  warehouse" and `docs/conventions.html:81` says "not built", while
-  `docs/not-built.html:68` says it IS built and used by every IV inversion. The
-  code is in between (curve fallback exists, but the CLI still requires `--r`).
-  Decide: make `--r` optional (default None → curve) and update the pages, or
-  fix the not-built wording.
 - `pricing/from_market.py:146` — `expiry_instant` docstring omits VIX/VIXW
   settlement conventions.
 - `docs/404.html` uses relative asset paths; if it's ever served as a

@@ -204,3 +204,14 @@ def test_resolve_r_fails_loudly_without_a_curve(tmp_path, monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="rates_sync|Treasury curve"):
         resolve_r(q, None, 30 / 365)
+
+
+def test_cli_r_is_optional_and_defaults_to_the_curve(tmp_path, monkeypatch) -> None:
+    """--r was required=True while the code already had the curve fallback,
+    making that path unreachable from the CLI. Omitted, it must parse fine
+    (no argparse SystemExit) and fail only on the empty data root here."""
+    from pricing.from_market import main
+
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path))
+    rc = main(["--date", "2026-09-01", "--data-root", str(tmp_path)])
+    assert rc == 1, "expected the fail-loud empty-chain path, not a parse error"

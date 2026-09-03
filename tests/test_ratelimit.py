@@ -328,16 +328,28 @@ def test_low_priority_is_not_throttled_when_nothing_competes(tmp_path) -> None:
     The reserve plus claim is chosen over giving low priority its own smaller
     rate precisely so trades polling keeps the full budget outside the moments
     a sweep is actually waiting.
+
+    Measured *relative* to normal priority, not against a wall-clock bound:
+    an absolute bound flakes on slow CI disks (each shared acquire is an
+    open/flock/write, ~30ms under load -> 100 acquires > the old 1.5s bound).
+    A slow machine slows both priorities equally, while the reserve mechanism
+    -- if it ever throttled low priority on its own -- would show up as a
+    multiplier.
     """
-    bucket = ratelimit.SharedTokenBucket(tmp_path / "rl.json", rate=500.0, burst=20.0)
-    start = time.monotonic()
-    for _ in range(100):
-        bucket.acquire(priority=ratelimit.LOW)
-    elapsed = time.monotonic() - start
-    # 100 requests at 500/s from a 20-token burst is ~0.16s. The bound is
-    # loose because it is guarding against the reserve turning this into
-    # multiple seconds, not against a slow disk.
-    assert elapsed < 1.5, f"low priority throttled with no contention: {elapsed:.2f}s"
+    def time_acquires(priority: str) -> float:
+        bucket = ratelimit.SharedTokenBucket(
+            tmp_path / f"rl-{priority}.json", rate=500.0, burst=20.0
+        )
+        start = time.monotonic()
+        for _ in range(100):
+            bucket.acquire(priority=priority)
+        return time.monotonic() - start
+
+    low = time_acquires(ratelimit.LOW)
+    normal = time_acquires(ratelimit.NORMAL)
+    assert low < normal * 2.0, (
+        f"low priority throttled with no contention: {low:.2f}s vs normal {normal:.2f}s"
+    )
 
 
 def test_a_stale_claim_cannot_wedge_low_priority(tmp_path) -> None:

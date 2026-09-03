@@ -217,9 +217,17 @@ def test_normal_wins_the_tokens_while_low_priority_saturates(tmp_path, kind, mon
     """
     monkeypatch.setattr(ratelimit, "NORMAL_CLAIM_S", float("inf"))
     bucket = _bucket(kind, tmp_path, rate=200.0, burst=10.0)
-    for _ in range(10):
-        bucket.acquire(priority=ratelimit.NORMAL)  # drain the burst
-    assert bucket.acquire(priority=ratelimit.NORMAL) > 0.0  # waited -> claim set
+    # Drain until an acquire actually waits -- that wait is what stamps the
+    # claim. A fixed burst count is not enough: at 200/s the refill can keep
+    # pace with a slow drain loop (shared variant on a slow CI disk takes
+    # ~ms per acquire, i.e. a full token per 10 acquires), so the "guaranteed
+    # wait" never happens. The loop outpaces the refill by 5x+, so this
+    # terminates quickly on any machine.
+    for _ in range(50):
+        if bucket.acquire(priority=ratelimit.NORMAL) > 0.0:
+            break  # waited -> claim set
+    else:
+        raise AssertionError("drain loop never outpaced the refill; no claim set")
 
     granted = {"low": 0}
     stop = threading.Event()

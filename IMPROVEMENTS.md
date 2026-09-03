@@ -66,6 +66,13 @@ conservative audit pass. Grouped by area, roughly highest-value first.
 - `ingest/jobs/trades_watchlist.py:161` — `trades_cursor.json` grows
   unboundedly; tickers that rotate off the watchlist keep cursors forever.
   Prune to the current watchlist at save time.
+- `scripts/backfill.sh` — date payloads can run independently, but each process
+  currently performs an unlocked read-modify-write of the shared
+  `_meta/flatfile_manifest.json`; make manifest updates concurrency-safe first,
+  then use a 4–8-way parallel backfill (e.g. `xargs -P`, staying inside the
+  S3/rate budget) to reduce multi-year backfill wall time.
+  day-to-day ingest is vendor-rate-bound (40 rps shared bucket), not
+  compute-bound — parallelism only pays for backfills, not the live jobs.
 
 ## Robustness / consistency
 

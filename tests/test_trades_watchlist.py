@@ -162,3 +162,192 @@ def test_one_failing_ticker_does_not_lose_the_others() -> None:
 
     assert len(errors) == 1
     assert cursors == {"O:SPY1": 5, "O:SPY2": 7}
+
+
+# ---------------------------------------------------------------------------
+# Adaptive backoff
+#
+# The watchlist is ~9,100 tickers but a median slot has trades in ~850 of
+# them, so the job spent 248s of a 300s slot on requests that returned
+# nothing. Backoff skips persistently silent tickers. The property that makes
+# that safe -- skipping never drops a trade, because the cursor is untouched
+# -- is what most of these tests are actually about.
+# ---------------------------------------------------------------------------
+
+def test_backoff_ladder_is_linear_to_the_cap() -> None:
+    # A ticker that just traded, or has been quiet once, is polled next slot.
+    assert job._next_due(0, 10) == [0, 11]
+    assert job._next_due(1, 10) == [1, 11]
+    # Then the gap widens with the silence, capped so nothing is ever
+    # forgotten for longer than BACKOFF_MAX slots.
+    assert job._next_due(2, 10) == [2, 12]
+    assert job._next_due(3, 10) == [3, 13]
+    assert job._next_due(99, 10) == [99, 10 + job.BACKOFF_MAX]
+
+
+def test_unknown_tickers_are_always_polled() -> None:
+    """A new contract in the watchlist must not inherit anyone's silence."""
+    state = {"O:OLD": [5, 100]}
+    due = job._due_tickers(["O:OLD", "O:NEW"], run_index=1, state=state)
+    assert due == ["O:NEW"]
+
+
+def test_due_tickers_polls_when_the_slot_arrives() -> None:
+    state = {"O:A": [3, 12], "O:B": [3, 13]}
+    assert job._due_tickers(["O:A", "O:B"], 12, state) == ["O:A"]
+    assert job._due_tickers(["O:A", "O:B"], 13, state) == ["O:A", "O:B"]
+
+
+def test_poll_state_round_trips(tmp_path: Path) -> None:
+    from datetime import date
+
+    s = _settings(tmp_path)
+    day = date(2026, 9, 4)
+    job._save_poll_state(s, day, 7, {"O:SPY1": [2, 9]})
+    assert job._load_poll_state(s, day) == (7, {"O:SPY1": [2, 9]})
+
+
+def test_poll_state_from_another_session_is_discarded(tmp_path: Path) -> None:
+    """The open is the worst possible moment to inherit yesterday's silence."""
+    from datetime import date
+
+    s = _settings(tmp_path)
+    job._save_poll_state(s, date(2026, 9, 3), 80, {"O:SPY1": [9, 84]})
+    assert job._load_poll_state(s, date(2026, 9, 4)) == (0, {})
+
+
+def test_corrupt_poll_state_polls_everything(tmp_path: Path) -> None:
+    """This file is an optimisation hint; its failure mode must be more work."""
+    from datetime import date
+
+    s = _settings(tmp_path)
+    landing.meta_path(job.POLL_STATE_NAME, data_root=tmp_path).write_text(
+        "{not json", encoding="utf-8"
+    )
+    run, state = job._load_poll_state(s, date(2026, 9, 4))
+    assert (run, state) == (0, {})
+    assert job._due_tickers(["O:A", "O:B"], run + 1, state) == ["O:A", "O:B"]
+
+
+def test_missing_poll_state_polls_everything(tmp_path: Path) -> None:
+    from datetime import date
+
+    s = _settings(tmp_path)
+    assert job._load_poll_state(s, date(2026, 9, 4)) == (0, {})
+
+
+def _run_slot(monkeypatch, settings, tape: dict[str, list[dict]], tickers: list[str]):
+    """Run one full _main_fn slot against a fake tape; return (result, polled)."""
+    import argparse
+
+    from ingest.common.logging_utils import JsonlLogger
+
+    client = _FakeClient(tape)
+    monkeypatch.setattr(
+        job, "compute_watchlist", lambda *a, **k: [{"ticker": t} for t in tickers]
+    )
+    monkeypatch.setattr(job, "MassiveClient", lambda *a, **k: client)
+    args = argparse.Namespace(
+        date="2026-09-04", limit=None, dry_run=False, force=True, underlying=None
+    )
+    result = job._main_fn(args, settings, JsonlLogger(path=None, echo=False))
+    return result, [t for t, _ in client.seen]
+
+
+def test_silent_tickers_are_skipped_after_the_ladder_ramps(monkeypatch, tmp_path) -> None:
+    """The whole point: stop spending the slot on tickers with nothing to say."""
+    s = _settings(tmp_path)
+    tickers = ["O:HOT", "O:COLD"]
+    # O:HOT trades every slot; O:COLD never does.
+    tape = {"O:HOT": [_trade(1)], "O:COLD": []}
+
+    polled_per_slot = []
+    for slot in range(6):
+        tape["O:HOT"] = [_trade(slot + 1)]
+        _res, polled = _run_slot(monkeypatch, s, tape, tickers)
+        polled_per_slot.append(sorted(polled))
+
+    # The hot ticker is polled in every single slot.
+    assert all("O:HOT" in p for p in polled_per_slot)
+    # The cold one ramps out: polled at first, then progressively skipped.
+    cold = [("O:COLD" in p) for p in polled_per_slot]
+    assert cold[0] is True
+    assert cold.count(False) >= 2, f"cold ticker never backed off: {cold}"
+
+
+def test_backoff_delays_a_trade_but_never_drops_it(monkeypatch, tmp_path) -> None:
+    """The safety property the whole design rests on.
+
+    A skipped poll does not advance the cursor, so when the ticker is finally
+    polled it still asks for everything since the last trade actually seen.
+    """
+    s = _settings(tmp_path)
+    tickers = ["O:QUIET"]
+    tape: dict[str, list[dict]] = {"O:QUIET": []}
+
+    # Several empty slots drive O:QUIET down the ladder.
+    for _ in range(5):
+        _run_slot(monkeypatch, s, tape, tickers)
+
+    # It now trades while backed off.
+    tape["O:QUIET"] = [_trade(4242)]
+    seen_rows = 0
+    for _ in range(job.BACKOFF_MAX + 1):
+        res, _polled = _run_slot(monkeypatch, s, tape, tickers)
+        seen_rows += res["rows"]
+
+    # Delayed by at most the cap, but delivered -- and the cursor advanced.
+    assert seen_rows == 1, "a trade was dropped by backoff"
+    cursors = json.loads(
+        landing.meta_path(job.CURSOR_NAME, data_root=tmp_path).read_text()
+    )
+    assert cursors["O:QUIET"] == 4242
+
+
+def test_disabling_backoff_polls_everything(monkeypatch, tmp_path) -> None:
+    """TRADES_BACKOFF_MAX=1 must restore the pre-2026-09 behaviour exactly."""
+    monkeypatch.setattr(job, "BACKOFF_MAX", 1)
+    s = _settings(tmp_path)
+    tickers = ["O:A", "O:B", "O:C"]
+    for _ in range(5):
+        _res, polled = _run_slot(monkeypatch, s, {}, tickers)
+        assert sorted(polled) == tickers
+
+
+def test_state_prunes_tickers_that_left_the_watchlist(monkeypatch, tmp_path) -> None:
+    from datetime import date
+
+    s = _settings(tmp_path)
+    _run_slot(monkeypatch, s, {}, ["O:A", "O:B"])
+    _run_slot(monkeypatch, s, {}, ["O:A"])
+    _run, state = job._load_poll_state(s, date(2026, 9, 4))
+    assert set(state) == {"O:A"}
+
+
+def test_failed_polls_are_retried_next_slot_not_treated_as_silence(
+    monkeypatch, tmp_path
+) -> None:
+    """An upstream error is not evidence that a ticker has nothing to say."""
+    import argparse
+
+    from ingest.common.logging_utils import JsonlLogger
+
+    class _Boom(_FakeClient):
+        def paginate(self, path, params=None, limit=1000):
+            ticker = path.rsplit("/", 1)[-1]
+            self.seen.append((ticker, None))
+            raise RuntimeError("upstream exploded")
+            yield  # pragma: no cover
+
+    s = _settings(tmp_path)
+    monkeypatch.setattr(
+        job, "compute_watchlist", lambda *a, **k: [{"ticker": "O:ERR"}]
+    )
+    args = argparse.Namespace(
+        date="2026-09-04", limit=None, dry_run=False, force=True, underlying=None
+    )
+    for _ in range(4):
+        monkeypatch.setattr(job, "MassiveClient", lambda *a, **k: _Boom({}))
+        res = job._main_fn(args, s, JsonlLogger(path=None, echo=False))
+        assert res["polled"] == 1, "an erroring ticker was backed off"
+        assert res["errors"] == 1

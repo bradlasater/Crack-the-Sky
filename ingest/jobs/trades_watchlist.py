@@ -15,6 +15,20 @@ supposed to avoid. Tickers are therefore polled through a thread pool whose
 total outbound rate is bounded by the shared token bucket in
 ``ingest.common.ratelimit``, not by the pool size.
 
+Adaptive polling: the watchlist is ~9,100 tickers but a median five-minute
+slot only has trades in ~850 of them (measured 2026-09-03), so ~90% of every
+run's requests returned nothing while the job sat pinned against the shared
+40 rps bucket -- 248s of a 300s slot, with six overruns and nine skipped
+slots that day. Tickers that keep coming back empty are therefore polled less
+often, on the ladder in :data:`BACKOFF_MAX` below.
+
+The safety property that makes this cheap: skipping a poll does not touch the
+ticker's cursor, so the next poll still asks for everything since the last
+trade actually seen. Backoff can only ever delay a trade's *arrival*, never
+drop it -- and ``_meta/trades_poll_state.json`` is a pure optimisation hint
+that can be deleted at any time, costing one expensive run and nothing else.
+The cursor file remains the only correctness-critical state.
+
 This job is a same-day convenience. The ``trades_v1`` flat file pulled the
 next morning is the authoritative record and is strictly more complete.
 """
@@ -25,6 +39,7 @@ import json
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date
 from typing import Any
 
 from ingest.common import landing, ratelimit
@@ -37,7 +52,18 @@ from ingest.jobs import compute_watchlist, run_date_from_args
 JOB = "trades_watchlist"
 TRADES_PATH = "/v3/trades"
 CURSOR_NAME = "trades_cursor.json"
+POLL_STATE_NAME = "trades_poll_state.json"
 DEFAULT_CONCURRENCY = int(os.environ.get("TRADES_CONCURRENCY", "8"))
+
+# Longest gap, in five-minute slots, between polls of a persistently silent
+# ticker. The ladder is linear up to this cap: a ticker that has come back
+# empty ``n`` times in a row is polled every ``min(n, BACKOFF_MAX)`` slots, so
+# one quiet slot costs nothing and only a sustained silence earns a real skip.
+#
+# 4 slots = 20 minutes of same-day latency on the least active contracts,
+# against a ~3x cut in requests. Set TRADES_BACKOFF_MAX=1 to disable entirely
+# (every ticker every slot, the pre-2026-09 behaviour).
+BACKOFF_MAX = max(1, int(os.environ.get("TRADES_BACKOFF_MAX", "4")))
 
 
 def _trade_record(ticker: str, trade: dict[str, Any]) -> dict[str, Any]:
@@ -76,6 +102,56 @@ def _save_cursors(settings: Settings, cursors: dict[str, int]) -> None:
     tmp.replace(path)
 
 
+def _load_poll_state(settings: Settings, run_date: date) -> tuple[int, dict[str, list[int]]]:
+    """Read ``_meta/trades_poll_state.json`` as ``(run_index, {ticker: [silent, due]})``.
+
+    Anything unreadable, or written for a different session, yields empty
+    state. That is deliberate: the failure mode of this file must always be
+    "poll everything", never "skip something". A fresh session in particular
+    must not inherit yesterday's silence counters -- the open is exactly when
+    the whole book goes live again and precisely the wrong moment to be
+    skipping three quarters of it.
+    """
+    path = landing.meta_path(POLL_STATE_NAME, data_root=settings.data_root)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("date") != run_date.isoformat():
+            return 0, {}
+        tickers = {
+            str(k): [int(v[0]), int(v[1])] for k, v in dict(data["tickers"]).items()
+        }
+        return int(data["run"]), tickers
+    except (FileNotFoundError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return 0, {}
+
+
+def _save_poll_state(
+    settings: Settings, run_date: date, run_index: int, state: dict[str, list[int]]
+) -> None:
+    """Persist the backoff bookkeeping (write temp, replace)."""
+    path = landing.meta_path(POLL_STATE_NAME, data_root=settings.data_root)
+    tmp = path.with_suffix(".tmp")
+    payload = {"date": run_date.isoformat(), "run": run_index, "tickers": state}
+    tmp.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def _due_tickers(
+    tickers: list[str], run_index: int, state: dict[str, list[int]]
+) -> list[str]:
+    """Tickers to poll this run: everything unknown, plus everything due.
+
+    A ticker absent from ``state`` has never been seen -- a new contract in
+    the watchlist, or a wiped state file -- and is always polled.
+    """
+    return [t for t in tickers if t not in state or state[t][1] <= run_index]
+
+
+def _next_due(silent: int, run_index: int) -> list[int]:
+    """``[silent, due]`` after a poll that saw ``silent`` empties in a row."""
+    return [silent, run_index + min(max(silent, 1), BACKOFF_MAX)]
+
+
 def _poll_ticker(
     client: MassiveClient, ticker: str, cursor: int | None
 ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]], int | None]:
@@ -107,12 +183,16 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger):
         tickers = tickers[: args.limit]
 
     cursors = _load_cursors(settings)
+    prev_run, poll_state = _load_poll_state(settings, run_date)
+    run_index = prev_run + 1
+    due = _due_tickers(tickers, run_index, poll_state)
+
     client = MassiveClient(settings, priority=ratelimit.LOW)
     records: list[dict[str, Any]] = []
     raw_trades: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     merge_lock = threading.Lock()
-    workers = max(1, min(DEFAULT_CONCURRENCY, len(tickers)))
+    workers = max(1, min(DEFAULT_CONCURRENCY, len(due))) if due else 1
 
     def work(ticker: str) -> None:
         try:
@@ -120,24 +200,40 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger):
         except Exception as exc:  # noqa: BLE001 - one bad ticker must not kill the run
             with merge_lock:
                 errors.append({"ticker": ticker, "error": f"{type(exc).__name__}: {exc}"})
+                # A failed poll is not evidence of silence. Retry next slot.
+                poll_state[ticker] = [0, run_index + 1]
             return
-        # Cursors and the record buffers are shared; merge under the lock or
-        # concurrent writers corrupt _meta/trades_cursor.json.
+        # Cursors, the record buffers and the backoff state are shared; merge
+        # under the lock or concurrent writers corrupt _meta/trades_cursor.json.
         with merge_lock:
             raw_trades.extend(raw)
             records.extend(recs)
             if max_ts is not None:
                 cursors[name] = max_ts
+            silent = 0 if recs else poll_state.get(name, [0, 0])[0] + 1
+            poll_state[name] = _next_due(silent, run_index)
 
-    logger.log("poll_start", tickers=len(tickers), workers=workers)
+    logger.log(
+        "poll_start",
+        tickers=len(tickers),
+        polled=len(due),
+        skipped=len(tickers) - len(due),
+        backoff_max=BACKOFF_MAX,
+        workers=workers,
+    )
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix=JOB) as pool:
-        list(pool.map(work, tickers))
+        list(pool.map(work, due))
+
+    # Contracts that have rolled off the watchlist must not accumulate in the
+    # state file forever.
+    poll_state = {t: v for t, v in poll_state.items() if t in set(tickers)}
 
     for err in errors[:20]:
         logger.log("ticker_error", **err)
     logger.log(
         "poll_done",
         tickers=len(tickers),
+        polled=len(due),
         rows=len(records),
         errors=len(errors),
     )
@@ -159,8 +255,15 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger):
                 clean_path=str(clean_path),
             )
         _save_cursors(settings, cursors)
+        _save_poll_state(settings, run_date, run_index, poll_state)
         logger.log("cursors_saved", tickers=len(cursors))
-    return {"rows": len(records), "tickers": len(tickers), "errors": len(errors)}
+    return {
+        "rows": len(records),
+        "tickers": len(tickers),
+        "polled": len(due),
+        "skipped": len(tickers) - len(due),
+        "errors": len(errors),
+    }
 
 
 def main(argv: list[str] | None = None) -> None:

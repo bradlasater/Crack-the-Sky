@@ -126,7 +126,7 @@
       <h3 id="ingest-constraints">Massive / Polygon constraints that affect design</h3>
       <ul>
         <li>One delayed-options websocket slot. Wildcards <code>AM.O:SPY*</code> ACK and deliver nothing; subscribe explicit <code>AM.O:&lt;ticker&gt;</code> in chunks of 3,000.</li>
-        <li>No <code>X-RateLimit-*</code> headers; 429s happen under burst. Shared token bucket (<code>MASSIVE_MAX_RPS</code> default 40) plus retries.</li>
+        <li>No <code>X-RateLimit-*</code> headers; 429s happen under burst, not under sustained pacing (probed to 100 rps clean, 2026-09-03). Shared cross-process token bucket: sustained <code>MASSIVE_MAX_RPS</code> default 60, <code>MASSIVE_BURST</code> held at 40, plus retries.</li>
         <li>Auth is <code>?apiKey=</code>; pagination <code>next_url</code> omits the key — the client re-appends it.</li>
         <li>SPXW weeklies list under <code>underlying_ticker=SPX</code> / snapshot path <code>I:SPX</code>. Querying SPXW as an underlying returns 0 rows.</li>
         <li>Same-day SPY equity minute aggs 403 → <code>underlying_bars</code> is T-1. Intraday SPY lives on the option snapshot’s <code>underlying_price</code>.</li>

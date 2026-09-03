@@ -61,9 +61,13 @@ LOG=/data/massive/logs/cron.log
 25 09 * * 1-5    cd $REPO && bash scripts/cronjob.sh ws_minute_bars $PY -m ingest.jobs.ws_minute_bars >> $LOG 2>&1
 
 # --- same-day trades: every 5 min ------------------------------------------
-# ~8,000 tickers once SPX is correctly banded; polled through a thread pool
+# ~9,100 tickers once SPX is correctly banded; polled through a thread pool
 # (TRADES_CONCURRENCY, default 8) bounded by the shared token bucket. Cold
 # start is the slow run; later runs only fetch past each ticker's cursor.
+# A median slot only has trades in ~850 of them, so tickers that keep coming
+# back empty are polled every 2nd-4th slot (TRADES_BACKOFF_MAX, default 4;
+# set 1 to disable). Skipping never advances a cursor, so it delays a trade's
+# arrival and cannot drop one.
 30-55/5 9 * * 1-5  cd $REPO && bash scripts/cronjob.sh trades_watchlist $PY -m ingest.jobs.trades_watchlist >> $LOG 2>&1
 */5 10-15 * * 1-5  cd $REPO && bash scripts/cronjob.sh trades_watchlist $PY -m ingest.jobs.trades_watchlist >> $LOG 2>&1
 0-30/5 16 * * 1-5  cd $REPO && bash scripts/cronjob.sh trades_watchlist $PY -m ingest.jobs.trades_watchlist >> $LOG 2>&1

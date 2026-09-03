@@ -380,11 +380,15 @@ def test_low_priority_is_not_throttled_when_nothing_competes(tmp_path, monkeypat
     normal = total_wait(ratelimit.NORMAL)
     # 100 tokens = 20 burst + 80 refills at 500/s -> 0.16s for normal. Low
     # stops at the 7-token reserve, so 7 of its burst tokens arrive via
-    # refill instead: by design it costs exactly floor/rate = 14ms more,
-    # and not a millisecond beyond it.
-    assert low == pytest.approx(normal, abs=0.02), (
+    # refill instead: the reserve costs exactly floor/rate = 14ms more.
+    # Deterministic under the fake clock; the 1us tolerance covers the
+    # min-step floor in _freeze_time, which perturbs sub-ULP waits by ~1e-9
+    # each. Any real throttling would show up in milliseconds.
+    floor_tokens = 20.0 * ratelimit.RESERVE_FRACTION
+    assert low - normal == pytest.approx(floor_tokens / 500.0, abs=1e-6), (
         f"low priority throttled with no contention: waited {low:.3f}s "
-        f"vs normal {normal:.3f}s"
+        f"vs normal {normal:.3f}s (reserve cost should be "
+        f"{floor_tokens / 500.0:.3f}s)"
     )
 
 

@@ -341,8 +341,14 @@ class HourlyJsonlWriter(threading.Thread):
                 # lost record, and keep draining instead; main() turns a
                 # nonzero count into a failed run.
                 self.errors += 1
-                self.logger.log("ws_writer_error",
-                                error=f"{type(exc).__name__}: {exc}")
+                try:
+                    self.logger.log("ws_writer_error",
+                                    error=f"{type(exc).__name__}: {exc}")
+                except Exception:  # noqa: BLE001 - the writer must not die
+                    # The recovery log writes+flushes too; the same disk-full
+                    # that triggered this handler can raise here. The record
+                    # is already counted -- never let logging kill the thread.
+                    pass
             finally:
                 self.queue.task_done()
 
@@ -373,7 +379,12 @@ async def _auth_and_subscribe(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
-        raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+        try:
+            raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+        except TimeoutError:
+            # Silent server: break so the shared ws_auth_timeout log below
+            # runs -- otherwise _capture misreports this as a heartbeat loss.
+            break
         markers = describe_events(raw)
         logger.log("ws_status", markers=markers)
         try:

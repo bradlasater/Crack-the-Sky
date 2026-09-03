@@ -483,3 +483,67 @@ def test_auth_deadline_is_total_not_per_frame(tmp_path, monkeypatch):
 
     elapsed = asyncio.run(asyncio.wait_for(run(), timeout=10))
     assert elapsed < wsjob.AUTH_TIMEOUT_S * 1.5
+
+
+def test_writer_survives_a_failing_error_log(tmp_path, monkeypatch):
+    """The recovery log writes+flushes too, so the same disk-full that
+    triggered the handler can raise from logger.log itself. That must not
+    kill the writer thread either: the record is already counted, and an
+    undrained queue would hang stop() forever."""
+    logger = JsonlLogger(path=None, echo=False)
+    writer = wsjob.HourlyJsonlWriter(tmp_path, date(2026, 9, 1), logger)
+
+    def always_fail(self, hour):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(wsjob.HourlyJsonlWriter, "_open", always_fail)
+    orig_log = logger.log
+
+    def exploding_log(event, **kw):
+        if event == "ws_writer_error":
+            raise OSError("disk full")
+        orig_log(event, **kw)
+
+    monkeypatch.setattr(logger, "log", exploding_log)
+    writer.start()
+    writer.queue.put({"sym": "O:SPY1", "v": 1, "s": 1, "e": 2})
+    writer.queue.put({"sym": "O:SPY2", "v": 2, "s": 1, "e": 2})
+    writer.stop()
+    writer.join(timeout=10)
+    assert not writer.is_alive(), "a failing error log must not kill the writer"
+    assert writer.errors == 2
+
+
+def test_silent_server_logs_ws_auth_timeout(tmp_path, monkeypatch):
+    """A server that sends nothing trips wait_for inside the auth loop. That
+    timeout must go through the dedicated ws_auth_timeout log before raising;
+    an uncaught wait_for bypassed it and _capture then misreported the auth
+    failure as a 90s heartbeat loss."""
+    from websockets.asyncio.client import connect
+    from websockets.asyncio.server import serve
+
+    monkeypatch.setattr(wsjob, "AUTH_TIMEOUT_S", 0.3)
+
+    async def handler(ws):
+        async for _raw in ws:  # receive auth, answer with silence
+            continue
+
+    events: list[str] = []
+
+    class StubLogger:
+        def log(self, event, **kw):
+            events.append(event)
+
+    async def run() -> None:
+        server = await serve(handler, "127.0.0.1", 0)
+        try:
+            port = server.sockets[0].getsockname()[1]
+            settings = _settings(tmp_path, ws_url=f"ws://127.0.0.1:{port}")
+            async with connect(settings.ws_delayed_url) as ws:
+                with pytest.raises(TimeoutError):
+                    await wsjob._auth_and_subscribe(ws, settings, StubLogger(), [])
+        finally:
+            server.close()
+
+    asyncio.run(asyncio.wait_for(run(), timeout=10))
+    assert "ws_auth_timeout" in events

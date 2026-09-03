@@ -31,7 +31,15 @@
         </li>
         <li><a href="marketdata.html">marketdata</a></li>
         <li><a href="pricing.html">pricing</a></li>
-        <li><a href="warehouse-math.html" class="active">Warehouse → math</a></li>
+        <li>
+          <a href="warehouse-math.html" class="active">Warehouse → math</a>
+          <ol class="sub">
+            <li><a href="warehouse-math.html#whm-cli">CLI usage</a></li>
+            <li><a href="warehouse-math.html#whm-asof-load">As-of load</a></li>
+            <li><a href="warehouse-math.html#whm-own-iv">Own IV</a></li>
+            <li><a href="warehouse-math.html#whm-own-greeks">Own greeks</a></li>
+          </ol>
+        </li>
         <li><a href="canary.html">Daily canary</a></li>
         <li><a href="conventions.html">Desk conventions</a></li>
         <li><a href="not-built.html">Not built</a></li>
@@ -51,12 +59,23 @@
         <div class="meta"><a href="index.html">← overview</a></div>
       </header>
 
+      <h2 id="whm-cli">CLI usage</h2>
       <p>
         <code>python -m pricing.from_market --date YYYY-MM-DD --asof-ns N --r 0.04</code>
       </p>
+
+      <h2 id="whm-asof-load">As-of load</h2>
       <ul>
         <li>Loads last <code>option_snapshots</code> and <code>forwards</code> at or before that instant.</li>
+      </ul>
+
+      <h2 id="whm-own-iv">Own IV</h2>
+      <ul>
         <li>Inverts <strong>own</strong> IV from last/close (no NBBO mid).</li>
+      </ul>
+
+      <h2 id="whm-own-greeks">Own greeks</h2>
+      <ul>
         <li>Computes <strong>own</strong> Greeks. SPX/SPXW → European BSM; SPY → American CRR (default 51 tree steps on the chain).</li>
         <li><code>--spy-atm-pct</code> CRR-prices only ATM SPY and European-prices the rest. <code>--max-rows</code> caps American CRR rows only so an SPX-first concat cannot starve SPY.</li>
         <li>Vendor <code>greeks_*</code> / <code>implied_volatility</code> copied as diagnostics with signed diffs (own − vendor). Theta × 365 and vega × 100 for unit alignment. Never inputs.</li>

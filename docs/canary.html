@@ -32,7 +32,14 @@
         <li><a href="marketdata.html">marketdata</a></li>
         <li><a href="pricing.html">pricing</a></li>
         <li><a href="warehouse-math.html">Warehouse → math</a></li>
-        <li><a href="canary.html" class="active">Daily canary</a></li>
+        <li>
+          <a href="canary.html" class="active">Daily canary</a>
+          <ol class="sub">
+            <li><a href="canary.html#canary-drift-check">What drift_check does</a></li>
+            <li><a href="canary.html#canary-pass-fail">Identity-first pass/fail</a></li>
+            <li><a href="canary.html#canary-alert-path">Alert path</a></li>
+          </ol>
+        </li>
         <li><a href="conventions.html">Desk conventions</a></li>
         <li><a href="not-built.html">Not built</a></li>
         <li><a href="formula-stubs.html">Formula stubs</a></li>
@@ -51,11 +58,14 @@
         <div class="meta"><a href="index.html">← overview</a></div>
       </header>
 
+      <h2 id="canary-drift-check">What drift_check does</h2>
       <p>
         <code>python -m pricing.drift_check</code> at <strong>17:00 ET</strong>
         Mon–Fri, after the 16:35 EOD snapshot. As-of is the last snapshot at or
         before <strong>16:40 ET</strong>.
       </p>
+
+      <h2 id="canary-pass-fail">Identity-first pass/fail</h2>
       <p>
         Pass/fail is <strong>identity-first</strong> on ATM names
         (<code>|K/F − 1| ≤ 5%</code>):
@@ -71,6 +81,7 @@
         enough vendor-comparable ATM names. Still fail-loud on no snapshots,
         schema errors, foreign roots, empty allowlisted root, filesystem errors.
       </p>
+      <h2 id="canary-alert-path">Alert path</h2>
       <p>
         Cron bounds: <code>--spy-atm-pct 0.05</code>, <code>--max-rows 400</code>
         (CRR rows only). <code>--r</code> from <code>DRIFT_CHECK_R</code>

@@ -62,7 +62,13 @@ def _fetch_day_bar(
             params={"adjusted": "true", "sort": "asc", "limit": 50000},
         )
     except requests.HTTPError as exc:
-        if exc.response is not None and exc.response.status_code == 404:
+        # MassiveHTTPError carries ``status_code`` but never sets ``response``,
+        # so a response-only check never matches and the first 404 killed the
+        # whole sweep instead of skipping the contract that did not trade.
+        status = getattr(exc, "status_code", None)
+        if status is None and exc.response is not None:
+            status = exc.response.status_code
+        if status == 404:
             return None
         raise
     return body.get("results") or []

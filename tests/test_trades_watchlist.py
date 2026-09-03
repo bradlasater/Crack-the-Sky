@@ -7,12 +7,16 @@ merge semantics without touching the network.
 
 from __future__ import annotations
 
+import argparse
 import json
 import threading
 from pathlib import Path
 
+import pytest
+
 from ingest.common import landing
 from ingest.common.config import Settings
+from ingest.common.logging_utils import JsonlLogger
 from ingest.jobs import trades_watchlist as job
 
 
@@ -101,6 +105,25 @@ def test_load_cursors_tolerates_corruption(tmp_path: Path) -> None:
     assert job._load_cursors(settings) == {}
 
 
+def test_load_cursors_tolerates_wrong_json_shape(tmp_path: Path) -> None:
+    """Valid JSON that is not an object must not crash the job every run."""
+    settings = _settings(tmp_path)
+    landing.meta_path(job.CURSOR_NAME, data_root=tmp_path).write_text(
+        '["O:SPY1"]', encoding="utf-8"
+    )
+    assert job._load_cursors(settings) == {}
+
+
+def test_load_cursors_drops_non_integer_values(tmp_path: Path) -> None:
+    """Bad entries are dropped (re-poll, duplicates at worst); good ones keep."""
+    settings = _settings(tmp_path)
+    landing.meta_path(job.CURSOR_NAME, data_root=tmp_path).write_text(
+        json.dumps({"O:SPY1": 10, "O:SPY2": "not-a-ts", "O:SPY3": None}),
+        encoding="utf-8",
+    )
+    assert job._load_cursors(settings) == {"O:SPY1": 10}
+
+
 # ---------------------------------------------------------------------------
 # Concurrent merge
 # ---------------------------------------------------------------------------
@@ -162,3 +185,55 @@ def test_one_failing_ticker_does_not_lose_the_others() -> None:
 
     assert len(errors) == 1
     assert cursors == {"O:SPY1": 5, "O:SPY2": 7}
+
+
+# ---------------------------------------------------------------------------
+# Run-level failure semantics (drives _main_fn with a stubbed watchlist/client)
+# ---------------------------------------------------------------------------
+
+def _args(**over) -> argparse.Namespace:
+    return argparse.Namespace(
+        date=None, limit=None, dry_run=False, underlying=None, **over
+    )
+
+
+def test_run_fails_when_every_ticker_errors(tmp_path: Path, monkeypatch) -> None:
+    """A 100% error rate is an outage (lost entitlement, broken endpoint) and
+    must fail the run -- rows=0 with a green check is how it would hide."""
+    monkeypatch.setattr(job, "compute_watchlist",
+                        lambda *a, **k: [{"ticker": "O:SPY1"}, {"ticker": "O:SPY2"}])
+
+    class _BrokenClient:
+        def __init__(self, *a, **k) -> None:
+            pass
+
+        def paginate(self, path, params=None, limit=1000):
+            raise RuntimeError("upstream exploded")
+
+    monkeypatch.setattr(job, "MassiveClient", _BrokenClient)
+    logger = JsonlLogger(path=None, echo=False)
+    with pytest.raises(RuntimeError, match="every ticker poll failed"):
+        job._main_fn(_args(), _settings(tmp_path), logger)
+
+
+def test_partial_failure_still_lands_good_tickers(tmp_path: Path, monkeypatch) -> None:
+    """One bad ticker must not fail the run or drop the good ticker's cursor."""
+    monkeypatch.setattr(job, "compute_watchlist",
+                        lambda *a, **k: [{"ticker": "O:SPY1"}, {"ticker": "BOOM"}])
+
+    class _FlakyClient:
+        def __init__(self, *a, **k) -> None:
+            pass
+
+        def paginate(self, path, params=None, limit=1000):
+            if path.endswith("BOOM"):
+                raise RuntimeError("upstream exploded")
+            return iter([_trade(42)])
+
+    monkeypatch.setattr(job, "MassiveClient", _FlakyClient)
+    settings = _settings(tmp_path)
+    logger = JsonlLogger(path=None, echo=False)
+    summary = job._main_fn(_args(), settings, logger)
+    assert summary["rows"] == 1
+    assert summary["errors"] == 1
+    assert job._load_cursors(settings) == {"O:SPY1": 42}

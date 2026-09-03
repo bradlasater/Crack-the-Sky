@@ -64,6 +64,7 @@ DEFAULT_UNDERLYINGS = ["SPY", "SPX"]  # SPXW contracts share the O:SPX prefix
 SUBSCRIBE_CHUNK_SIZE = 3000  # tickers per subscribe message (<< 1MB limit)
 WINDOW_START = dtime(9, 25)  # ET
 HEARTBEAT_TIMEOUT_S = 90
+AUTH_TIMEOUT_S = 30  # longest wait for auth_success after connecting
 STATS_INTERVAL_S = 300  # periodic ws_stats log cadence
 # Slug suffix for the liveness check pinged on every stats tick.
 #
@@ -330,6 +331,13 @@ class HourlyJsonlWriter(threading.Thread):
                 self.rows_written += 1
                 if self.rows_written % 1000 == 0:
                     self._fh.flush()
+            except Exception as exc:  # noqa: BLE001 - the writer must not die
+                # An escaping exception kills this daemon thread: every later
+                # record would be silently dropped, and stop() would hang on
+                # queue.join() waiting for items nobody drains. Log and keep
+                # draining instead.
+                self.logger.log("ws_writer_error",
+                                error=f"{type(exc).__name__}: {exc}")
             finally:
                 self.queue.task_done()
 
@@ -346,13 +354,16 @@ async def _auth_and_subscribe(
     """Authenticate then send every chunked subscribe message; True on success.
 
     Expects an ``auth_success`` status event; ``auth_failed`` is fatal
-    (returns False so the job exits instead of hammering the API). Each
+    (returns False so the job exits instead of hammering the API). A server
+    that keeps talking but never confirms auth within ``AUTH_TIMEOUT_S`` is a
+    *transient* failure: TimeoutError is raised so the supervisor recycles
+    the connection rather than exiting on a mislabelled auth error. Each
     subscribe message stays well under the 1MB server frame limit.
     """
     await ws.send(json.dumps({"action": "auth", "params": settings.massive_api_key}))
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + AUTH_TIMEOUT_S
     while time.monotonic() < deadline:
-        raw = await asyncio.wait_for(ws.recv(), timeout=30)
+        raw = await asyncio.wait_for(ws.recv(), timeout=AUTH_TIMEOUT_S)
         markers = describe_events(raw)
         logger.log("ws_status", markers=markers)
         try:
@@ -377,8 +388,8 @@ async def _auth_and_subscribe(
             if status == "auth_failed":
                 logger.log("ws_auth_failed", message=ev.get("message"))
                 return False
-    logger.log("ws_auth_timeout")
-    return False
+    logger.log("ws_auth_timeout", timeout_s=AUTH_TIMEOUT_S)
+    raise TimeoutError(f"auth not confirmed within {AUTH_TIMEOUT_S}s")
 
 
 async def _read_loop(

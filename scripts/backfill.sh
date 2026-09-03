@@ -42,7 +42,20 @@ if [[ "$START" < "$EARLIEST" ]]; then
     START="$EARLIEST"
 fi
 
-free_gb() { df -BG --output=avail "$DATA_ROOT" | tail -1 | tr -dc '0-9'; }
+# date(1) does the day arithmetic below; catch typos and reversed ranges here
+# instead of silently processing zero dates and reporting "done".
+for v in "$START" "$END"; do
+    date -I -d "$v" >/dev/null 2>&1 || {
+        echo "[backfill] invalid date: $v (want YYYY-MM-DD)" >&2; exit 2; }
+done
+if [[ "$START" > "$END" ]]; then
+    echo "[backfill] START $START is after END $END" >&2
+    exit 2
+fi
+
+# An unreadable/missing DATA_ROOT reads as 0 free, so the loop aborts with
+# the clear low-space message instead of dying on an empty string comparison.
+free_gb() { df -BG --output=avail "$DATA_ROOT" 2>/dev/null | tail -1 | tr -dc '0-9' || true; }
 
 manifest_has_date() {
     # True when the manifest already has entries for all 3 datasets on $1.
@@ -62,12 +75,13 @@ if [ "$ORDER" = "newest" ]; then
 fi
 
 total=${#dates[@]}
-echo "[backfill] $total dates, $ORDER-first, min free ${MIN_FREE_GB}GB, $(free_gb)GB available"
+avail="$(free_gb)"; avail="${avail:-0}"
+echo "[backfill] $total dates, $ORDER-first, min free ${MIN_FREE_GB}GB, ${avail}GB available"
 
 i=0
 for d in "${dates[@]}"; do
     i=$((i + 1))
-    avail="$(free_gb)"
+    avail="$(free_gb)"; avail="${avail:-0}"
     if [ "$avail" -lt "$MIN_FREE_GB" ]; then
         echo "[backfill] ABORT: only ${avail}GB free on $DATA_ROOT (min ${MIN_FREE_GB}GB)" >&2
         echo "[backfill] resume with the same command once space is reclaimed" >&2

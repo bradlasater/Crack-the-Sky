@@ -1,9 +1,10 @@
-"""underlying_bars: SPY 1-minute aggregates for a trading date.
+"""underlying_bars: 1-minute aggregates for a trading date (SPY by default).
 
-Fetches ``/v2/aggs/ticker/SPY/range/1/minute/{date}/{date}`` (adjusted,
-sorted, limit 50000) and lands raw JSONL plus a clean
-``underlying_minute_bars`` parquet partition. Bar timestamps are stored
-exactly as delivered (``t`` = ms epoch -> ``start_ms``).
+Fetches ``/v2/aggs/ticker/{ticker}/range/1/minute/{date}/{date}`` (adjusted,
+sorted, limit 50000) per underlying (``--underlying`` widens the default) and
+lands raw JSONL plus a clean ``underlying_minute_bars`` parquet partition.
+Bar timestamps are stored exactly as delivered (``t`` = ms epoch ->
+``start_ms``).
 
 NOTE (tier entitlement): same-day SPY minute aggs are 403 on the Options
 Developer plan ("plan doesn't include this data timeframe"); T-1 works. The
@@ -22,7 +23,7 @@ from ingest.common.cli import run_job
 from ingest.common.config import Settings
 from ingest.common.http_client import MassiveClient
 from ingest.common.logging_utils import JsonlLogger
-from ingest.jobs import run_date_from_args, strip_flag
+from ingest.jobs import parse_underlyings, run_date_from_args, strip_flag
 
 JOB = "underlying_bars"
 DEFAULT_TICKERS = ["SPY"]
@@ -47,7 +48,7 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger):
     run_date = run_date_from_args(args)
     client = MassiveClient(settings, priority=ratelimit.LOW)
     totals = {"rows": 0}
-    for ticker in DEFAULT_TICKERS:
+    for ticker in parse_underlyings(args.underlying, DEFAULT_TICKERS):
         body = client.get(
             f"/v2/aggs/ticker/{ticker}/range/1/minute/{run_date}/{run_date}",
             params={"adjusted": "true", "sort": "asc", "limit": 50000},
@@ -84,7 +85,8 @@ def main(argv: list[str] | None = None) -> None:
     """
     argv, prev = strip_flag(list(sys.argv[1:] if argv is None else argv),
                             "--prev-trading-day")
-    if prev and "--date" not in argv:
+    # "--date=X" is a single argv token; see flatfile_pull.main.
+    if prev and not any(a == "--date" or a.startswith("--date=") for a in argv):
         argv += ["--date", market_gate.previous_trading_day(market_gate.today_et()).isoformat()]
     run_job(JOB, _main_fn, argv)
 

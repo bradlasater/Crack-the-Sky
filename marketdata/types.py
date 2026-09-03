@@ -85,8 +85,8 @@ def quotes_from_snapshot_rows(rows: Any) -> list[Quote]:
     """
     if hasattr(rows, "to_pylist"):  # pyarrow.Table / RecordBatch
         rows = rows.to_pylist()
-    # Imported here to keep types importable without the parser cycle... there
-    # is no cycle if opra imports Contract from here; this helper needs parse.
+    # Local import: opra imports Contract from this module, so a top-level
+    # import here would be a cycle.
     from marketdata.opra import parse_opra
 
     out: list[Quote] = []

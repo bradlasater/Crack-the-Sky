@@ -198,6 +198,93 @@ def test_capture_reconnects_and_resubscribes(tmp_path, monkeypatch):
     assert stats["distinct_symbols"] >= 1
 
 
+def test_auth_failed_is_fatal_no_reconnect(tmp_path, monkeypatch):
+    """auth_failed means the key is wrong; retrying would just hammer the API."""
+    from websockets.asyncio.server import serve
+
+    monkeypatch.setattr(wsjob, "BACKOFF_MIN_S", 0.05)
+
+    connections = 0
+
+    async def handler(ws):
+        nonlocal connections
+        connections += 1
+        async for raw in ws:
+            if json.loads(raw).get("action") == "auth":
+                await ws.send(json.dumps(
+                    [{"ev": "status", "status": "auth_failed", "message": "bad key"}]))
+
+    async def run():
+        server = await serve(handler, "127.0.0.1", 0)
+        try:
+            port = server.sockets[0].getsockname()[1]
+            settings = _settings(tmp_path, ws_url=f"ws://127.0.0.1:{port}")
+            logger = JsonlLogger(echo=False)
+            writer = wsjob.HourlyJsonlWriter(tmp_path, market_gate.today_et(), logger)
+            writer.start()
+            try:
+                deadline = market_gate.now_et() + timedelta(seconds=5)
+                await wsjob._capture(settings, logger, market_gate.today_et(),
+                                     deadline, writer, ["AM.O:SPY1"])
+            finally:
+                writer.stop()
+                writer.join(timeout=10)
+                logger.close()
+        finally:
+            server.close()
+
+    with pytest.raises(wsjob._FatalAuth):
+        asyncio.run(asyncio.wait_for(run(), timeout=15))
+    assert connections == 1
+
+
+def test_auth_timeout_recycles_instead_of_exiting(tmp_path, monkeypatch):
+    """A server that talks but never confirms auth is transient, not fatal:
+    the supervisor must recycle the connection rather than exit 1."""
+    from websockets.asyncio.server import serve
+
+    monkeypatch.setattr(wsjob, "AUTH_TIMEOUT_S", 0.4)
+    monkeypatch.setattr(wsjob, "BACKOFF_MIN_S", 0.05)
+    monkeypatch.setattr(wsjob, "BACKOFF_MAX_S", 0.2)
+
+    connections = 0
+
+    async def handler(ws):
+        nonlocal connections
+        connections += 1
+        async for raw in ws:
+            if json.loads(raw).get("action") == "auth":
+                # Chatty, but never auth_success: the auth wait must exhaust
+                # its deadline and raise, not fall through as "auth_failed".
+                for _ in range(20):
+                    await ws.send(json.dumps(
+                        [{"ev": "status", "status": "connected"}]))
+                    await asyncio.sleep(0.02)
+
+    async def run() -> dict:
+        server = await serve(handler, "127.0.0.1", 0)
+        try:
+            port = server.sockets[0].getsockname()[1]
+            settings = _settings(tmp_path, ws_url=f"ws://127.0.0.1:{port}")
+            logger = JsonlLogger(echo=False)
+            writer = wsjob.HourlyJsonlWriter(tmp_path, market_gate.today_et(), logger)
+            writer.start()
+            try:
+                deadline = market_gate.now_et() + timedelta(seconds=3)
+                return await wsjob._capture(settings, logger, market_gate.today_et(),
+                                            deadline, writer, ["AM.O:SPY1"])
+            finally:
+                writer.stop()
+                writer.join(timeout=10)
+                logger.close()
+        finally:
+            server.close()
+
+    stats = asyncio.run(asyncio.wait_for(run(), timeout=20))
+    assert stats["connects"] >= 2, "auth timeout must recycle the connection"
+    assert stats["reconnects"] >= 1
+
+
 # ---------------------------------------------------------------------------
 # Reading the capture back
 # ---------------------------------------------------------------------------
@@ -277,3 +364,27 @@ def _read_lines(path):
     opener = gzip.open if path.suffix == ".gz" else open
     with opener(path, "rt", encoding="utf-8") as fh:
         return [line for line in fh if line.strip()]
+
+
+def test_writer_survives_a_write_error(tmp_path, monkeypatch):
+    """A failed open/write must not kill the writer thread: it would silently
+    drop every later record, and stop() would hang forever on queue.join()."""
+    logger = JsonlLogger(path=None, echo=False)
+    writer = wsjob.HourlyJsonlWriter(tmp_path, date(2026, 9, 1), logger)
+    orig_open = wsjob.HourlyJsonlWriter._open
+    attempts = {"n": 0}
+
+    def flaky_open(self, hour):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise OSError("disk full")
+        orig_open(self, hour)
+
+    monkeypatch.setattr(wsjob.HourlyJsonlWriter, "_open", flaky_open)
+    writer.start()
+    writer.queue.put({"sym": "O:SPY1", "v": 1, "s": 1, "e": 2})  # hits the failure
+    writer.queue.put({"sym": "O:SPY2", "v": 2, "s": 1, "e": 2})  # lands after recovery
+    writer.stop()
+    writer.join(timeout=10)
+    assert not writer.is_alive(), "writer must keep draining after an error"
+    assert writer.rows_written == 1

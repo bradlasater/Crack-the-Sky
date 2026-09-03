@@ -7,6 +7,7 @@ cannot contaminate them.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
@@ -302,7 +303,9 @@ def _bump_greeks(
     zomma = (gamma_at(sig=sigma + hs) - gamma_at(sig=sigma - hs)) / (2.0 * hs)
     vera = (rho_at(sigma + hs) - rho_at(sigma - hs)) / (2.0 * hs)
     ultima = (vega_at(sig=sigma + hs) - 2.0 * vega + vega_at(sig=sigma - hs)) / (hs**2)
-    elasticity = float("inf") if px == 0.0 else delta * S / px
+    # Keep the sign at a zero price, as bsm.raw_greeks does: a zero-priced
+    # put tends to -inf, not +inf.
+    elasticity = math.copysign(float("inf"), delta) if px == 0.0 else delta * S / px
 
     return {
         "price": px,

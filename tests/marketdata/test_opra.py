@@ -68,6 +68,8 @@ def test_foreign_roots_rejected(ticker: str) -> None:
         "SPY260831C00420000",
         "O:SPY260831X00420000",
         "O:SPY260831C",
+        "O:SPY260831C0042000",    # strike is not the OCC 8 digits
+        "O:SPY260831C004200000",
         "O:SPY269931C00420000",
         "O:SPY260832C00420000",
     ],

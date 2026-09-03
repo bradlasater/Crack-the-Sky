@@ -581,7 +581,7 @@ def greeks_asof(
             )
             S, T, _cp, F_passed = _spot_t_cp(qte, fwd, rate)
             q_out = (
-                float(resolve_q(S, T, r, F=F_passed))
+                float(resolve_q(S, T, rate, F=F_passed))
                 if F_passed is not None
                 else 0.0
             )
@@ -693,7 +693,8 @@ def main(argv: list[str] | None = None) -> int:
         "--r",
         type=float,
         required=True,
-        help="continuous risk-free rate (no rates warehouse on this feed)",
+        help="continuous risk-free rate (the CLI pins a rate explicitly; "
+             "greeks_asof with r=None uses the landed Treasury curve)",
     )
     parser.add_argument(
         "--roots",

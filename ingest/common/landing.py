@@ -94,7 +94,12 @@ def write_raw_text(
     day = dt.isoformat() if isinstance(dt, date) else str(dt)
     out_dir = _data_root(data_root) / "raw" / dataset / f"dt={day}"
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{job}-{_epoch_ms()}.{ext.lstrip('.')}"
+    ext = ext.lstrip(".")
+    # Nudge the stamp on a same-millisecond collision rather than overwrite:
+    # the raw zone is the record of truth and is never rewritten.
+    stamp = _epoch_ms()
+    while (path := out_dir / f"{job}-{stamp}.{ext}").exists():
+        stamp += 1
     payload = text if isinstance(text, bytes) else text.encode("utf-8")
     with open(path, "wb") as fh:
         fh.write(payload)

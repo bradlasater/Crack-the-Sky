@@ -61,3 +61,27 @@ def test_deep_otm_short_put_excepted_from_tight_match() -> None:
     amer = crr_price(S, K, T, r, sig, "put", q=0.0, n_steps=201, american=True)
     assert euro >= 0.0 and amer >= 0.0
     assert euro < 0.05 and amer < 0.05
+
+
+def test_zero_price_elasticity_keeps_the_put_sign(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same rule as bsm.raw_greeks: a zero-priced put tends to -inf, not +inf.
+
+    A real tree prices a deep-OTM put to exactly 0 with an exactly-0 bumped
+    delta (both bumps are also 0), which carries no sign. Stub the pricer so
+    the center value is 0 while the down-bump is positive: delta < 0 must
+    then yield -inf.
+    """
+    import pricing.engine as eng_mod
+
+    def zero_at_center(S_, K_, T_, r_, sigma_, call_put, *, q, n_steps, american):  # noqa: ANN001, ANN202
+        return 0.0 if S_ >= 100.0 else 0.5 * (100.0 - S_)
+
+    monkeypatch.setattr(eng_mod, "crr_price", zero_at_center)
+    cat = eng_mod.AmericanCRR(n_steps=21).greeks(
+        100.0, 50.0, 0.5, 0.05, 0.2, "put", q=0.0, conventions=CONV
+    )
+    assert cat.price == 0.0
+    assert cat.delta < 0.0
+    assert cat.elasticity == -float("inf")

@@ -358,3 +358,25 @@ def test_growth_uses_the_busiest_day_not_the_mean(tmp_path: Path) -> None:
     per_day, sampled = audit.daily_snapshot_growth(_settings(tmp_path), RUN_DATE)
     assert per_day == 1_000_000
     assert sampled == 2
+
+
+# ---------------------------------------------------------------------------
+# main() argv handling
+# ---------------------------------------------------------------------------
+
+def test_main_keeps_an_equals_style_date(monkeypatch) -> None:
+    """argparse accepts ``--date=X``; a bare "--date" membership test misses
+    that form and the appended default would silently audit the wrong day."""
+    seen: dict = {}
+    monkeypatch.setattr(audit, "run_job",
+                        lambda job, fn, argv: seen.setdefault("argv", argv))
+    audit.main(["--date=2026-08-28"])
+    assert seen["argv"] == ["--date=2026-08-28"]
+
+
+def test_main_defaults_date_to_the_previous_trading_day(monkeypatch) -> None:
+    seen: dict = {}
+    monkeypatch.setattr(audit, "run_job",
+                        lambda job, fn, argv: seen.setdefault("argv", argv))
+    audit.main([])
+    assert seen["argv"][0] == "--date"

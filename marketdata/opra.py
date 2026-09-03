@@ -64,7 +64,7 @@ _TICKER_RE = re.compile(
     r"^O:(?P<root>SPXW|SPY|SPX|VIXW|VIX)"
     r"(?P<yy>\d{2})(?P<mm>\d{2})(?P<dd>\d{2})"
     r"(?P<cp>[CP])"
-    r"(?P<strike>\d+)$"
+    r"(?P<strike>\d{8})$"
 )
 _ANY_ROOT_RE = re.compile(r"^O:([A-Z]+)\d{6}[CP]\d+$")
 

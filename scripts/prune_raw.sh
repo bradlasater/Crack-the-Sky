@@ -56,6 +56,18 @@ for arg in "$@"; do
   esac
 done
 
+# These knobs feed deletion cutoffs. A non-numeric value crashes date(1)
+# mid-run; a negative one moves the cutoff into the future and condemns
+# everything. Reject anything that is not a non-negative integer up front.
+for knob in RETAIN_DAYS QUARANTINE_RETAIN_DAYS FLATFILE_RETAIN_DAYS; do
+  case "${!knob}" in
+    ''|*[!0-9]*)
+      echo "prune_raw: $knob must be a non-negative integer (got '${!knob}')" >&2
+      exit 2
+      ;;
+  esac
+done
+
 # dataset:required flat-file dataset in the manifest ("-" = no requirement)
 PRUNABLE=(
   "option_trades:trades_v1"
@@ -105,6 +117,12 @@ for entry in "${PRUNABLE[@]}"; do
   for part in "$root"/dt=*; do
     [ -d "$part" ] || continue
     day="$(basename "$part")"; day="${day#dt=}"
+    # Only real date partitions. underlying_day_bars has no manifest gate, so
+    # a malformed dt= name here would be pruned on string comparison alone.
+    case "$day" in
+      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
+      *) continue ;;
+    esac
     [[ "$day" < "$cutoff" ]] || continue
     if ! manifest_ok "$need" "$day"; then
       log "msg\":\"kept\",\"dataset\":\"$ds\",\"date\":\"$day\",\"reason\":\"no $need in manifest\""

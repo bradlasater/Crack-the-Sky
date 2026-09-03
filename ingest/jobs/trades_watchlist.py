@@ -59,13 +59,28 @@ def _trade_record(ticker: str, trade: dict[str, Any]) -> dict[str, Any]:
 
 
 def _load_cursors(settings: Settings) -> dict[str, int]:
-    """Read ``_meta/trades_cursor.json`` (empty dict when missing/corrupt)."""
+    """Read ``_meta/trades_cursor.json`` (empty dict when missing/corrupt).
+
+    "Corrupt" includes valid JSON of the wrong shape: a list, or values that
+    are not integer timestamps. Loading is the first thing the job does, so an
+    exception here fails every run until the file is removed by hand -- bad
+    entries are dropped instead, and the affected tickers simply re-poll from
+    scratch (duplicates, never gaps: the cursor only ever moves forward).
+    """
     path = landing.meta_path(CURSOR_NAME, data_root=settings.data_root)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
-    return {str(k): int(v) for k, v in data.items()}
+    if not isinstance(data, dict):
+        return {}
+    cursors: dict[str, int] = {}
+    for k, v in data.items():
+        try:
+            cursors[str(k)] = int(v)
+        except (TypeError, ValueError):
+            continue
+    return cursors
 
 
 def _save_cursors(settings: Settings, cursors: dict[str, int]) -> None:
@@ -141,6 +156,15 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger):
         rows=len(records),
         errors=len(errors),
     )
+
+    # A quiet tape yields rows=0 and is fine; a run where EVERY ticker errored
+    # is an outage (lost entitlement, broken endpoint), and must not report
+    # success. One bad ticker still must not kill the run -- only 100%.
+    if tickers and len(errors) == len(tickers):
+        raise RuntimeError(
+            f"every ticker poll failed ({len(errors)}/{len(tickers)}); "
+            f"first: {errors[0]['error']}"
+        )
 
     if not args.dry_run:
         if records:

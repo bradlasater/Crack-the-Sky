@@ -45,7 +45,11 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger):
     if not args.dry_run:
         raw_path = landing.write_raw("holidays", run_date, raw_results, job=JOB)
         meta = landing.meta_path("holidays.json")
-        meta.write_text(json.dumps(records, indent=2) + "\n", encoding="utf-8")
+        # Atomic, like rates_sync's cursor: every job's market gate reads this
+        # file, so a crash mid-write must not leave it truncated.
+        tmp = meta.with_suffix(".tmp")
+        tmp.write_text(json.dumps(records, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(meta)
         logger.log(
             "holidays_synced",
             rows=len(records),

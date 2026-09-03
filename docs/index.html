@@ -6,7 +6,7 @@
   <title>Crack the Sky — system overview</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;family=Newsreader:opsz,wght@6..72,500;6..72,600&amp;display=swap" rel="stylesheet">
   <link rel="stylesheet" href="site.css">
 </head>
 <body id="top">
@@ -16,7 +16,14 @@
       <div class="toc-kicker">Crack the Sky</div>
       <div class="toc-title">System handbook</div>
       <ol>
-        <li><a href="index.html" class="active">Overview</a></li>
+        <li>
+          <a href="index.html" class="active">Overview</a>
+          <ol class="sub">
+            <li><a href="index.html#index-slide">The whole system on one slide</a></li>
+            <li><a href="index.html#index-glance">Warehouse → math at a glance</a></li>
+            <li><a href="index.html#index-sections">Sections</a></li>
+          </ol>
+        </li>
         <li><a href="repo-layout.html">Repo layout</a></li>
         <li><a href="data-flow.html">Data flow</a></li>
         <li>
@@ -74,7 +81,7 @@
         derivations here. No pandas lecture, no secrets, no API keys.
       </p>
 
-      <h2>The whole system on one slide</h2>
+      <h2 id="index-slide">The whole system on one slide</h2>
       <div class="diagram" aria-label="System overview">
         <svg viewBox="0 0 1180 320" xmlns="http://www.w3.org/2000/svg" role="img">
           <title>Sources into ingest into the warehouse into math into the canary</title>
@@ -153,7 +160,7 @@
         </div>
       </div>
 
-      <h2>Warehouse → math at a glance</h2>
+      <h2 id="index-glance">Warehouse → math at a glance</h2>
       <div class="flow" aria-label="Warehouse to canary">
         <div class="step">
           <div class="n">1 parquet</div>
@@ -178,7 +185,7 @@
       </div>
       <p class="flow-caption">python -m pricing.from_market &nbsp;→&nbsp; python -m pricing.drift_check</p>
 
-      <h2>Sections</h2>
+      <h2 id="index-sections">Sections</h2>
       <div class="cards">
         <a class="card" href="repo-layout.html">
           <div class="card-title">Repo layout</div>

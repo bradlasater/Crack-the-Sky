@@ -297,3 +297,26 @@ def test_json_payload_records_only_problem_days(tmp_path: Path) -> None:
         "missing": sorted(ha.CLEAN_DATASETS),
     }]
     assert json.dumps(payload)  # must be serialisable for _meta/
+
+
+# ---------------------------------------------------------------------------
+# main() argv handling
+# ---------------------------------------------------------------------------
+
+def test_main_keeps_an_equals_style_date(monkeypatch) -> None:
+    """argparse accepts ``--date=X``; a bare "--date" membership test misses
+    that form and the appended default would silently override the gate date."""
+    seen: dict = {}
+    monkeypatch.setattr(ha, "run_job",
+                        lambda job, fn, argv: seen.setdefault("argv", argv))
+    ha.main(["--date=2023-02-16", "--offline"])
+    # --offline is peeled off by main() itself; only --date passes through.
+    assert seen["argv"] == ["--date=2023-02-16"]
+
+
+def test_main_defaults_date_to_the_previous_trading_day(monkeypatch) -> None:
+    seen: dict = {}
+    monkeypatch.setattr(ha, "run_job",
+                        lambda job, fn, argv: seen.setdefault("argv", argv))
+    ha.main([])
+    assert seen["argv"][0] == "--date"

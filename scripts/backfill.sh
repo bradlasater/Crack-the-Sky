@@ -23,6 +23,16 @@ if [ $# -ne 2 ]; then
     exit 2
 fi
 START="$1"; END="$2"
+
+# Validate the original arguments before any clamping or comparison below:
+# date -d accepts relative/noncanonical input ('today', '2026-1-1'), but the
+# loop and the range check compare the given strings lexically, so require
+# the parsed date to round-trip to the exact YYYY-MM-DD input.
+for v in "$START" "$END"; do
+    [ "$(date -I -d "$v" 2>/dev/null)" = "$v" ] || {
+        echo "[backfill] invalid date: $v (want YYYY-MM-DD)" >&2; exit 2; }
+done
+
 PY="venv/bin/python"
 SLEEP_BETWEEN_DAYS="${BACKFILL_SLEEP_S:-2}"
 MIN_FREE_GB="${MIN_FREE_GB:-100}"
@@ -42,7 +52,17 @@ if [[ "$START" < "$EARLIEST" ]]; then
     START="$EARLIEST"
 fi
 
-free_gb() { df -BG --output=avail "$DATA_ROOT" | tail -1 | tr -dc '0-9'; }
+# Both dates were validated as canonical YYYY-MM-DD above, so a lexical
+# comparison is exact. Catch a reversed range here instead of silently
+# processing zero dates and reporting "done".
+if [[ "$START" > "$END" ]]; then
+    echo "[backfill] START $START is after END $END" >&2
+    exit 2
+fi
+
+# An unreadable/missing DATA_ROOT reads as 0 free, so the loop aborts with
+# the clear low-space message instead of dying on an empty string comparison.
+free_gb() { df -BG --output=avail "$DATA_ROOT" 2>/dev/null | tail -1 | tr -dc '0-9' || true; }
 
 manifest_has_date() {
     # True when the manifest already has entries for all 3 datasets on $1.
@@ -62,12 +82,13 @@ if [ "$ORDER" = "newest" ]; then
 fi
 
 total=${#dates[@]}
-echo "[backfill] $total dates, $ORDER-first, min free ${MIN_FREE_GB}GB, $(free_gb)GB available"
+avail="$(free_gb)"; avail="${avail:-0}"
+echo "[backfill] $total dates, $ORDER-first, min free ${MIN_FREE_GB}GB, ${avail}GB available"
 
 i=0
 for d in "${dates[@]}"; do
     i=$((i + 1))
-    avail="$(free_gb)"
+    avail="$(free_gb)"; avail="${avail:-0}"
     if [ "$avail" -lt "$MIN_FREE_GB" ]; then
         echo "[backfill] ABORT: only ${avail}GB free on $DATA_ROOT (min ${MIN_FREE_GB}GB)" >&2
         echo "[backfill] resume with the same command once space is reclaimed" >&2

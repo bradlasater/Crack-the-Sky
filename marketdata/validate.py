@@ -215,7 +215,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--roots",
         default=",".join(ALLOWED_ROOTS),
-        help="comma-separated OPRA roots to require (default SPY,SPX,SPXW)",
+        help="comma-separated OPRA roots to require (default: the full allowlist "
+        + ",".join(ALLOWED_ROOTS)
+        + ")",
     )
     parser.add_argument("--asof-ns", type=int, default=None)
     parser.add_argument(
@@ -230,7 +232,11 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(f"FAIL  roots  {exc}", file=sys.stderr)
         return 1
-    dt = date.fromisoformat(args.date)
+    try:
+        dt = date.fromisoformat(args.date)
+    except ValueError as exc:
+        print(f"FAIL  date  {exc}", file=sys.stderr)
+        return 1
 
     try:
         if args.dataset in ASOF_DATASETS:

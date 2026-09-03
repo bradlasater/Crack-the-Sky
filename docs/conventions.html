@@ -6,7 +6,7 @@
   <title>Crack the Sky — desk conventions</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;family=Newsreader:opsz,wght@6..72,500;6..72,600&amp;display=swap" rel="stylesheet">
   <link rel="stylesheet" href="site.css">
 </head>
 <body id="top">
@@ -33,7 +33,14 @@
         <li><a href="pricing.html">pricing</a></li>
         <li><a href="warehouse-math.html">Warehouse → math</a></li>
         <li><a href="canary.html">Daily canary</a></li>
-        <li><a href="conventions.html" class="active">Desk conventions</a></li>
+        <li>
+          <a href="conventions.html" class="active">Desk conventions</a>
+          <ol class="sub">
+            <li><a href="conventions.html#conventions-greeks">Greeks units</a></li>
+            <li><a href="conventions.html#conventions-inputs">Pricing inputs</a></li>
+            <li><a href="conventions.html#conventions-market-data">Market data</a></li>
+          </ol>
+        </li>
         <li><a href="not-built.html">Not built</a></li>
         <li><a href="formula-stubs.html">Formula stubs</a></li>
         <li><a href="knobs.html">Documented knobs</a></li>
@@ -51,6 +58,7 @@
         <div class="meta"><a href="index.html">← overview</a></div>
       </header>
 
+      <h2 id="conventions-greeks">Greeks units</h2>
       <table>
         <thead>
           <tr><th>Thing</th><th>This repo</th><th>Usual vendor / desk trap</th></tr>
@@ -67,6 +75,20 @@
             <td>per calendar day → × 365; trading-day would be / 252 (available on <code>GreeksConventions</code>, not the default)</td>
           </tr>
           <tr>
+            <td>Delta / gamma</td>
+            <td>spot (∂/∂S); dual always also filled</td>
+            <td>forward / dual-only reports</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2 id="conventions-inputs">Pricing inputs</h2>
+      <table>
+        <thead>
+          <tr><th>Thing</th><th>This repo</th><th>Usual vendor / desk trap</th></tr>
+        </thead>
+        <tbody>
+          <tr>
             <td>F</td>
             <td>put-call parity on the chain: undiscounted approximation <code>F = K + C − P</code> at min |C−P| (exact parity is <code>F = K + e<sup>rT</sup>(C − P)</code>). Matches <code>forward_from_parity</code>; ingest is unchanged.</td>
             <td>I:SPX print (not entitled)</td>
@@ -81,11 +103,15 @@
             <td>scalar <code>--r</code> / <code>DRIFT_CHECK_R=0.04</code></td>
             <td>a rates warehouse (not built)</td>
           </tr>
-          <tr>
-            <td>Delta / gamma</td>
-            <td>spot (∂/∂S); dual always also filled</td>
-            <td>forward / dual-only reports</td>
-          </tr>
+        </tbody>
+      </table>
+
+      <h2 id="conventions-market-data">Market data</h2>
+      <table>
+        <thead>
+          <tr><th>Thing</th><th>This repo</th><th>Usual vendor / desk trap</th></tr>
+        </thead>
+        <tbody>
           <tr>
             <td>Market price</td>
             <td>last trade else day close</td>

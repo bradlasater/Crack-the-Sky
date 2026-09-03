@@ -6,7 +6,7 @@
   <title>Crack the Sky — documented knobs</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;family=Newsreader:opsz,wght@6..72,500;6..72,600&amp;display=swap" rel="stylesheet">
   <link rel="stylesheet" href="site.css">
 </head>
 <body id="top">
@@ -36,7 +36,15 @@
         <li><a href="conventions.html">Desk conventions</a></li>
         <li><a href="not-built.html">Not built</a></li>
         <li><a href="formula-stubs.html">Formula stubs</a></li>
-        <li><a href="knobs.html" class="active">Documented knobs</a></li>
+        <li>
+          <a href="knobs.html" class="active">Documented knobs</a>
+          <ol class="sub">
+            <li><a href="knobs.html#knobs-credentials">Credentials and endpoints</a></li>
+            <li><a href="knobs.html#knobs-paths">Paths</a></li>
+            <li><a href="knobs.html#knobs-healthchecks">Healthchecks and canary</a></li>
+            <li><a href="knobs.html#knobs-code-tuning">Code-side knobs</a></li>
+          </ol>
+        </li>
         <li class="toc-sep"></li>
         <li><a href="box-operations.html">Box operations (off-repo)</a></li>
       </ol>
@@ -56,6 +64,7 @@
         the file. Do not commit <code>.env</code>. Where each value actually lives
         on the box: <a href="box-operations.html">box operations</a>.
       </p>
+      <h2 id="knobs-credentials">Credentials and endpoints</h2>
       <table>
         <thead>
           <tr><th>Name</th><th>Role</th></tr>
@@ -66,8 +75,26 @@
           <tr><td class="job">WS_DELAYED_URL</td><td>Default <code>wss://delayed.massive.com/options</code>.</td></tr>
           <tr><td class="job">MASSIVE_S3_ACCESS_KEY_ID<br>MASSIVE_S3_SECRET_ACCESS_KEY</td><td>Flat-file access keys (placeholders exit 3 on pull).</td></tr>
           <tr><td class="job">MASSIVE_S3_ENDPOINT<br>MASSIVE_S3_BUCKET</td><td>Flat-file endpoint and bucket (defaults <code>https://files.massive.com</code> / <code>flatfiles</code>).</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="knobs-paths">Paths</h2>
+      <table>
+        <thead>
+          <tr><th>Name</th><th>Role</th></tr>
+        </thead>
+        <tbody>
           <tr><td class="job">DATA_ROOT</td><td>Warehouse root. Default <code>/data/massive</code>.</td></tr>
           <tr><td class="job">LOG_ROOT</td><td>Logs. Default <code>DATA_ROOT/logs</code> (not the warehouse root). <code>Settings.load</code> in <code>ingest/common/config.py</code>.</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="knobs-healthchecks">Healthchecks and canary</h2>
+      <table>
+        <thead>
+          <tr><th>Name</th><th>Role</th></tr>
+        </thead>
+        <tbody>
           <tr><td class="job">HEALTHCHECKS_PING_KEY</td><td>Per-job checks. Without it, a dead job is silent.</td></tr>
           <tr><td class="job">HEALTHCHECKS_API_KEY</td><td>Management key used only by <code>scripts/setup_healthchecks.py</code> to create/update the checks. Not read at run time, and not the ping key.</td></tr>
           <tr><td class="job">HEALTHCHECKS_BASE</td><td>Ping root (hosted <code>https://hc-ping.com</code>; self-host <code>https://&lt;host&gt;/ping</code>).</td></tr>
@@ -75,6 +102,8 @@
           <tr><td class="job">DRIFT_ALERT_WEBHOOK</td><td>Optional FAIL POST. Healthchecks + exit 1 remain the alert.</td></tr>
         </tbody>
       </table>
+
+      <h2 id="knobs-code-tuning">Code-side knobs</h2>
       <p>
         Also in code, not in <code>.env.example</code>:
         <code>MASSIVE_MAX_RPS</code> / <code>MASSIVE_BURST</code> (40),

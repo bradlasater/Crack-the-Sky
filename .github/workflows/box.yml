@@ -57,8 +57,8 @@ jobs:
 
       - name: Offline gate
         run: |
-          venv/bin/ruff check ingest tests
-          venv/bin/python -m compileall -q ingest
+          venv/bin/ruff check ingest marketdata pricing tests scripts
+          venv/bin/python -m compileall -q ingest marketdata pricing
           venv/bin/python -m pytest tests/
 
       - name: Live entitlement probes

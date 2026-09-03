@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from ingest.common import landing
 from marketdata.opra import parse_opra
 from pricing.bsm import price as bsm_price
 from pricing.from_market import (
@@ -493,6 +494,41 @@ def test_cli_output_oserror_exits_1(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     )
     assert rc == 1
     assert not out.exists()
+
+
+def test_q_column_uses_the_resolved_rate_in_curve_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """r=None resolves the curve per contract; q must come from THAT rate.
+
+    ``resolve_q`` was handed the caller's ``r`` (None in curve mode) instead
+    of the resolved per-contract rate, so every row carrying a forward landed
+    with ``q = NaN`` -- in the drift canary's default configuration.
+    """
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path))
+    # 5.00% at the 1M tenor: the 21-day T sits on the flat short end, so the
+    # resolved rate equals the R the chain fixtures were built with.
+    landing.write_clean(
+        "treasury_yields",
+        DT,
+        [{"date": "2026-08-28", "yield_1_month": 5.00}],
+        job="rates_sync",
+        data_root=tmp_path,
+    )
+    last = _spy_last()
+    _write(
+        tmp_path,
+        snap=[_spy_snap(last)],
+        fwd=[forward_row(underlying="SPY", expiry=EXPIRY, forward=_spy_forward(), asof_ns=ASOF_NS)],
+        underlying="SPY",
+    )
+    row = greeks_asof(
+        DT, ASOF_NS, r=None, data_root=tmp_path, roots=("SPY",), crr_steps=21
+    ).to_pylist()[0]
+    assert row["r"] == pytest.approx(0.05)
+    assert math.isfinite(row["q"])
+    assert row["q"] == pytest.approx(0.01, rel=1e-6)
+    assert row["own_iv"] == pytest.approx(SIGMA, rel=1e-6)
 
 
 def test_max_rows_does_not_starve_spy_after_spx_file(tmp_path: Path) -> None:

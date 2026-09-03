@@ -1,7 +1,7 @@
-/* Crack the Sky handbook — shared dark theme for docs/*.html
-   (box-operations.html intentionally keeps its own simpler inline style.) */
+/* Crack the Sky handbook — shared dark theme for docs/*.html */
 
 :root {
+  color-scheme: dark;
   --bg: #0e1114;
   --bg-2: #161b20;
   --bg-3: #1c2328;
@@ -158,7 +158,7 @@ h1 {
   color: var(--muted);
   text-align: right;
 }
-h2, h3, section {
+h2, h3, section, dt {
   scroll-margin-top: 16px;
 }
 h2 {
@@ -341,6 +341,24 @@ td.when {
 .tag.ws { color: var(--ws); border-color: var(--copper-dim); }
 .tag.rest { color: var(--rest); border-color: #3d545c; }
 .tag.s3 { color: var(--s3); border-color: #5c3a3a; }
+.tag.ok { color: var(--ok); border-color: #3d5440; }
+.tag.warn { color: var(--warn); border-color: #5c4e2a; }
+.tag.gone { color: var(--bad); border-color: #5c3a3a; }
+
+pre {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 14px 16px;
+  overflow-x: auto;
+  margin: 12px 0 16px;
+  max-width: 72ch;
+}
+pre code {
+  font-size: 0.85rem;
+  line-height: 1.5;
+  white-space: pre;
+}
 
 .timeline-wrap {
   background: var(--bg-2);
@@ -443,6 +461,67 @@ footer {
   font-family: "IBM Plex Mono", monospace;
   font-size: 11px;
   color: var(--muted);
+}
+
+/* error pages (404.html) — standalone and centered, no TOC shell.
+   Generic so any future error page can reuse .errpage / .err-card. */
+.errpage {
+  max-width: none;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 48px var(--pad);
+}
+.err-card {
+  max-width: 560px;
+  text-align: center;
+}
+.err-code {
+  font-family: Newsreader, Georgia, serif;
+  font-weight: 500;
+  font-size: clamp(6rem, 20vw, 11rem);
+  line-height: 1;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+  margin: 14px 0 8px;
+  /* déjà-vu trail in pure CSS, so the page stands on its own with no artwork */
+  text-shadow:
+    -6px -5px 0 rgba(208, 140, 68, 0.38),
+    -12px -10px 0 rgba(208, 140, 68, 0.18),
+    -18px -15px 0 rgba(208, 140, 68, 0.08);
+}
+.err-title {
+  font-size: clamp(1.5rem, 3vw, 2rem);
+  margin-bottom: 12px;
+}
+.err-art {
+  display: block;
+  width: 100%;
+  max-width: 320px;
+  margin: 22px auto;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.err-lead {
+  color: var(--body);
+  margin: 0 auto 24px;
+}
+.err-home {
+  display: inline-block;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 13px;
+  color: var(--copper);
+  border: 1px solid var(--copper-dim);
+  border-radius: 3px;
+  padding: 8px 16px;
+}
+.err-home:hover {
+  background: var(--bg-2);
+  text-decoration: none;
+}
+.errpage footer {
+  margin-top: 40px;
 }
 
 @media (max-width: 980px) {

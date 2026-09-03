@@ -6,7 +6,7 @@
   <title>Crack the Sky — data flow</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;family=Newsreader:opsz,wght@6..72,500;6..72,600&amp;display=swap" rel="stylesheet">
   <link rel="stylesheet" href="site.css">
 </head>
 <body id="top">
@@ -18,7 +18,14 @@
       <ol>
         <li><a href="index.html">Overview</a></li>
         <li><a href="repo-layout.html">Repo layout</a></li>
-        <li><a href="data-flow.html" class="active">Data flow</a></li>
+        <li>
+          <a href="data-flow.html" class="active">Data flow</a>
+          <ol class="sub">
+            <li><a href="data-flow.html#flow-what-lands-where">What lands where</a></li>
+            <li><a href="data-flow.html#flow-irreplaceable-backfillable">Irreplaceable vs backfillable</a></li>
+            <li><a href="data-flow.html#flow-write-only">Write-only and derived</a></li>
+          </ol>
+        </li>
         <li>
           <a href="ingest.html">Ingest</a>
           <ol class="sub">
@@ -51,6 +58,7 @@
         <div class="meta"><a href="index.html">← overview</a></div>
       </header>
 
+      <h2 id="flow-what-lands-where">What lands where</h2>
       <p>
         Capture lands parquet under <code>DATA_ROOT</code>. Math never reads the
         vendor’s IV/greeks as inputs. The canary re-runs the same chain every
@@ -79,11 +87,16 @@
         </div>
       </div>
       <p class="flow-caption">python -m pricing.from_market &nbsp;→&nbsp; python -m pricing.drift_check</p>
+      <h2 id="flow-irreplaceable-backfillable">Irreplaceable vs backfillable</h2>
       <dl class="notes">
         <dt>Irreplaceable</dt>
         <dd><code>option_snapshots</code> (+ derived <code>forwards</code>). No historical snapshot endpoint. Sweep every minute.</dd>
         <dt>Backfillable</dt>
         <dd>trades, minute bars, day bars from S3. Flat file always wins at reconcile.</dd>
+      </dl>
+
+      <h2 id="flow-write-only">Write-only and derived</h2>
+      <dl class="notes">
         <dt>Write-only today</dt>
         <dd><code>contracts_expired</code>, <code>underlying_day_bars</code>. Captured; nothing in pricing/marketdata consumes them yet.</dd>
         <dt>Now consumed</dt>

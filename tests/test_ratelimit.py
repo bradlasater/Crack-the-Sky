@@ -214,7 +214,7 @@ def test_normal_wins_the_tokens_while_low_priority_saturates(tmp_path, kind, mon
     threads. A live claim parks low priority unconditionally, however the
     runner stalls -- so zero low-priority grants is exact, not a bound.
     """
-    monkeypatch.setattr(ratelimit, "NORMAL_CLAIM_S", 10.0)
+    monkeypatch.setattr(ratelimit, "NORMAL_CLAIM_S", float("inf"))
     bucket = _bucket(kind, tmp_path, rate=200.0, burst=10.0)
     for _ in range(10):
         bucket.acquire(priority=ratelimit.NORMAL)  # drain the burst

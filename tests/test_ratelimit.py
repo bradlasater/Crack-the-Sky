@@ -198,16 +198,28 @@ def _bucket(kind: str, tmp_path, rate: float, burst: float):
 
 
 @pytest.mark.parametrize("kind", ["in_process", "shared"])
-def test_normal_wins_the_tokens_while_low_priority_saturates(tmp_path, kind) -> None:
+def test_normal_wins_the_tokens_while_low_priority_saturates(tmp_path, kind, monkeypatch) -> None:
     """Under contention, the tokens go to normal priority.
 
-    Counted, not timed. Wall-clock bounds do not survive a shared CI runner:
-    with four threads contending on one flock the per-acquire cost swamps the
-    token rate, and a 1.16s run says nothing about whether priority worked.
-    The *share* of tokens each side wins is the property that matters, and it
-    holds whatever the machine is doing -- a slow box slows both sides.
+    Made deterministic after two wall-clock versions flaked on shared CI
+    runners. The race both times: a hog could only be parked by a *live*
+    claim, and the claim is stamped by a waiting normal caller -- so any
+    runner stall before the sweep's first wait (or longer than the 1s claim
+    between waits) let the hogs drain the refilled bucket, and the token
+    count became a function of scheduling.
+
+    Here the claim exists before the hogs start and outlasts the whole
+    sweep: drain the bucket, let one normal acquire wait (which stamps the
+    claim, the production mechanism), and only then release the saturating
+    threads. A live claim parks low priority unconditionally, however the
+    runner stalls -- so zero low-priority grants is exact, not a bound.
     """
+    monkeypatch.setattr(ratelimit, "NORMAL_CLAIM_S", 10.0)
     bucket = _bucket(kind, tmp_path, rate=200.0, burst=10.0)
+    for _ in range(10):
+        bucket.acquire(priority=ratelimit.NORMAL)  # drain the burst
+    assert bucket.acquire(priority=ratelimit.NORMAL) > 0.0  # waited -> claim set
+
     granted = {"low": 0}
     stop = threading.Event()
 
@@ -219,26 +231,27 @@ def test_normal_wins_the_tokens_while_low_priority_saturates(tmp_path, kind) -> 
     hogs = [threading.Thread(target=hog, daemon=True) for _ in range(4)]
     for h in hogs:
         h.start()
-    time.sleep(0.1)  # let them drain the bucket and start competing
 
     try:
-        before = granted["low"]
         needed = 60
         for _ in range(needed):
             bucket.acquire(priority=ratelimit.NORMAL)
-        low_during = granted["low"] - before
+        # Every normal wait re-stamps the 10s claim, so it never lapses
+        # mid-sweep: the hogs were parked for all 60 tokens.
+        assert granted["low"] == 0, (
+            f"low priority won {granted['low']} tokens behind a live claim"
+        )
     finally:
         stop.set()
+        # The parked hogs would otherwise wait out the 10s claim.
+        if kind == "in_process":
+            bucket._normal_claim = 0.0
+        else:
+            state = json.loads(bucket.path.read_text(encoding="utf-8"))
+            state["normal_claim"] = 0.0
+            bucket.path.write_text(json.dumps(state), encoding="utf-8")
         for h in hogs:
             h.join(timeout=2)
-
-    # Four saturating threads against one sweep: unenforced they take their
-    # share of every refill (measured 60-1800 tokens over this window),
-    # enforced they get 0. The allowance is for a low-priority acquire that
-    # was already past the claim check when the sweep started.
-    assert low_during <= needed * 0.1, (
-        f"low priority won {low_during} tokens while normal won {needed}"
-    )
 
 
 @pytest.mark.parametrize("kind", ["in_process", "shared"])

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import fcntl
 import json
 import threading
 import time
@@ -236,20 +237,28 @@ def test_normal_wins_the_tokens_while_low_priority_saturates(tmp_path, kind, mon
         needed = 60
         for _ in range(needed):
             bucket.acquire(priority=ratelimit.NORMAL)
-        # Every normal wait re-stamps the 10s claim, so it never lapses
-        # mid-sweep: the hogs were parked for all 60 tokens.
+        # Every normal wait re-stamps the infinite claim, so it can never
+        # lapse mid-sweep: the hogs were parked for all 60 tokens.
         assert granted["low"] == 0, (
             f"low priority won {granted['low']} tokens behind a live claim"
         )
     finally:
         stop.set()
-        # The parked hogs would otherwise wait out the 10s claim.
+        # The parked hogs would otherwise wait out the claim forever. The
+        # shared read-modify-write takes the same flock the bucket does:
+        # hogs are still polling and rewriting the state file, and a
+        # lockless read can land between truncate and write (CI flaked on
+        # exactly that: JSONDecodeError on an empty read).
         if kind == "in_process":
             bucket._normal_claim = 0.0
         else:
-            state = json.loads(bucket.path.read_text(encoding="utf-8"))
-            state["normal_claim"] = 0.0
-            bucket.path.write_text(json.dumps(state), encoding="utf-8")
+            with open(bucket.path, "r+", encoding="utf-8") as fh:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                state = json.loads(fh.read())
+                state["normal_claim"] = 0.0
+                fh.seek(0)
+                fh.truncate()
+                fh.write(json.dumps(state))
         for h in hogs:
             h.join(timeout=2)
 

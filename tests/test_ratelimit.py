@@ -62,12 +62,20 @@ def test_default_bucket_is_shared() -> None:
 # multiple of the configured ceiling -- and the vendor meters the box, not the
 # process.
 
-def test_shared_bucket_state_is_visible_to_another_instance(tmp_path) -> None:
-    """Two bucket objects on one file draw from the same tokens."""
-    # Refill has to be slow enough that it cannot outrun the draws below.
-    # At 1000/s a slower machine refills a whole token between acquires and
-    # the second bucket never has to wait -- which is a flaky test, not a
-    # working limiter.
+def test_shared_bucket_state_is_visible_to_another_instance(tmp_path, monkeypatch) -> None:
+    """Two bucket objects on one file draw from the same tokens.
+
+    Fake clock: with real time the drain loop's speed is machine-dependent,
+    and a slow CI disk lets the refill outpace the drain -- the second bucket
+    then never waits, which flaked on PR #29's 3.12 run. The fake sleep
+    advances the fake clock, so the waiting acquire below still completes,
+    instantly and deterministically.
+    """
+    now = [1000.0]
+    monkeypatch.setattr(ratelimit.time, "time", lambda: now[0])
+    monkeypatch.setattr(
+        ratelimit.time, "sleep", lambda s: now.__setitem__(0, now[0] + s)
+    )
     path = tmp_path / "ratelimit.json"
     a = ratelimit.SharedTokenBucket(path, rate=5.0, burst=10.0)
     b = ratelimit.SharedTokenBucket(path, rate=5.0, burst=10.0)
@@ -312,12 +320,25 @@ def test_a_waiting_normal_caller_registers_a_claim(tmp_path, kind) -> None:
         target=lambda: (bucket.acquire(priority=ratelimit.NORMAL), done.set()),
         daemon=True,
     ).start()
-    time.sleep(0.15)  # long enough for it to fail once and stamp the claim
 
-    if kind == "in_process":
-        claim = bucket._normal_claim
-    else:
-        claim = json.loads(bucket.path.read_text())["normal_claim"]
+    # Poll for the claim instead of sleeping a fixed 0.15s: thread start is
+    # not time-bounded on a loaded runner. A mid-write read of the shared
+    # file can come back empty or partial -- treat it as "not yet".
+    def _read_claim() -> float:
+        if kind == "in_process":
+            return bucket._normal_claim
+        try:
+            return json.loads(bucket.path.read_text(encoding="utf-8"))["normal_claim"]
+        except (json.JSONDecodeError, KeyError):
+            return 0.0
+
+    claim = 0.0
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        claim = _read_claim()
+        if claim > time.time():
+            break
+        time.sleep(0.01)
     assert claim > time.time(), "a waiting normal caller left no claim"
     done.wait(timeout=5)
 
@@ -328,16 +349,28 @@ def test_low_priority_is_not_throttled_when_nothing_competes(tmp_path) -> None:
     The reserve plus claim is chosen over giving low priority its own smaller
     rate precisely so trades polling keeps the full budget outside the moments
     a sweep is actually waiting.
+
+    Measured *relative* to normal priority, not against a wall-clock bound:
+    an absolute bound flakes on slow CI disks (each shared acquire is an
+    open/flock/write, ~30ms under load -> 100 acquires > the old 1.5s bound).
+    A slow machine slows both priorities equally, while the reserve mechanism
+    -- if it ever throttled low priority on its own -- would show up as a
+    multiplier.
     """
-    bucket = ratelimit.SharedTokenBucket(tmp_path / "rl.json", rate=500.0, burst=20.0)
-    start = time.monotonic()
-    for _ in range(100):
-        bucket.acquire(priority=ratelimit.LOW)
-    elapsed = time.monotonic() - start
-    # 100 requests at 500/s from a 20-token burst is ~0.16s. The bound is
-    # loose because it is guarding against the reserve turning this into
-    # multiple seconds, not against a slow disk.
-    assert elapsed < 1.5, f"low priority throttled with no contention: {elapsed:.2f}s"
+    def time_acquires(priority: str) -> float:
+        bucket = ratelimit.SharedTokenBucket(
+            tmp_path / f"rl-{priority}.json", rate=500.0, burst=20.0
+        )
+        start = time.monotonic()
+        for _ in range(100):
+            bucket.acquire(priority=priority)
+        return time.monotonic() - start
+
+    low = time_acquires(ratelimit.LOW)
+    normal = time_acquires(ratelimit.NORMAL)
+    assert low < normal * 2.0, (
+        f"low priority throttled with no contention: {low:.2f}s vs normal {normal:.2f}s"
+    )
 
 
 def test_a_stale_claim_cannot_wedge_low_priority(tmp_path) -> None:

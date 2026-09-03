@@ -34,7 +34,14 @@
         <li><a href="warehouse-math.html">Warehouse → math</a></li>
         <li><a href="canary.html">Daily canary</a></li>
         <li><a href="conventions.html">Desk conventions</a></li>
-        <li><a href="not-built.html" class="active">Not built</a></li>
+        <li>
+          <a href="not-built.html" class="active">Not built</a>
+          <ol class="sub">
+            <li><a href="not-built.html#nb-curves-calendars">Curves and calendars</a></li>
+            <li><a href="not-built.html#nb-market-data-pricing">Market data and pricing</a></li>
+            <li><a href="not-built.html#nb-infra-stack">Infra and stack</a></li>
+          </ol>
+        </li>
         <li><a href="formula-stubs.html">Formula stubs</a></li>
         <li><a href="knobs.html">Documented knobs</a></li>
         <li class="toc-sep"></li>
@@ -52,6 +59,8 @@
       </header>
 
       <p>Do not treat these as missing files in a half-landed feature — they are not in the tree.</p>
+
+      <h2 id="nb-curves-calendars">Curves and calendars</h2>
       <table>
         <thead>
           <tr><th>Item</th><th>Status</th><th>What exists instead</th></tr>
@@ -72,6 +81,15 @@
             <td><span class="badge missing">not built</span></td>
             <td>Pricing T is still ACT/365 and 252 is still a constant, not a calendar — nothing here is trading-day aware. A verified <em>historical</em> calendar does now exist as a by-product of <code>history_audit</code> (<code>_meta/trading_days.json</code>, every weekday since 2022-08-31 marked session or holiday against the vendor), so the input for trading-day theta is available even though nothing consumes it. The ingest gate still uses <code>_meta/holidays.json</code>, which only covers upcoming dates.</td>
           </tr>
+        </tbody>
+      </table>
+
+      <h2 id="nb-market-data-pricing">Market data and pricing</h2>
+      <table>
+        <thead>
+          <tr><th>Item</th><th>Status</th><th>What exists instead</th></tr>
+        </thead>
+        <tbody>
           <tr>
             <td>NBBO mid</td>
             <td><span class="badge forbidden">not entitled</span></td>
@@ -87,6 +105,12 @@
             <td><span class="badge forbidden">403</span></td>
             <td>Parity forwards on the option chain.</td>
           </tr>
+        </tbody>
+      </table>
+
+      <h2 id="nb-infra-stack">Infra and stack</h2>
+      <table>
+        <tbody>
           <tr>
             <td>ClickHouse</td>
             <td><span class="badge missing">not built</span></td>

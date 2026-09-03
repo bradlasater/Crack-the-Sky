@@ -79,8 +79,7 @@ schedule — rewriting the placeholder home path first, since cron does not
 expand `~`/`$HOME`:
 
 ```
-sed -i "s|/home/brad-lasater|$HOME|g" deploy/crontab
-crontab deploy/crontab
+sed "s|/home/brad-lasater|$HOME|g" deploy/crontab | crontab -
 ```
 
 ## Security

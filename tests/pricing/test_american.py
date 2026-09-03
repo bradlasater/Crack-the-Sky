@@ -85,3 +85,24 @@ def test_zero_price_elasticity_keeps_the_put_sign(
     assert cat.price == 0.0
     assert cat.delta < 0.0
     assert cat.elasticity == -float("inf")
+
+
+def test_zero_price_zero_delta_elasticity_uses_the_option_side(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real deep-OTM case: center and both bumped prices are all exactly
+    0.0, so delta is +0.0 and carries no sign. The sign must come from the
+    option side: put -> -inf, call -> +inf."""
+    import pricing.engine as eng_mod
+
+    def zero_everywhere(S_, K_, T_, r_, sigma_, call_put, *, q, n_steps, american):  # noqa: ANN001, ANN202
+        return 0.0
+
+    monkeypatch.setattr(eng_mod, "crr_price", zero_everywhere)
+    engine = eng_mod.AmericanCRR(n_steps=21)
+    put = engine.greeks(100.0, 50.0, 0.5, 0.05, 0.2, "put", q=0.0, conventions=CONV)
+    call = engine.greeks(100.0, 150.0, 0.5, 0.05, 0.2, "call", q=0.0, conventions=CONV)
+    assert put.price == 0.0 and put.delta == 0.0
+    assert put.elasticity == -float("inf")
+    assert call.price == 0.0 and call.delta == 0.0
+    assert call.elasticity == float("inf")

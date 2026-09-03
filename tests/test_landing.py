@@ -49,3 +49,27 @@ def test_write_raw_text_never_overwrites(tmp_path: Path, frozen_ms: None) -> Non
     assert first != second
     assert first.read_text(encoding="utf-8") == "<xml>first</xml>"
     assert second.read_text(encoding="utf-8") == "<xml>second</xml>"
+
+
+def test_write_raw_text_retries_on_a_preclaimed_path(
+    tmp_path: Path, frozen_ms: None
+) -> None:
+    """A path claimed between stamp selection and the open must nudge, not truncate.
+
+    The candidate is claimed with exclusive create ('xb'), so a FileExistsError
+    on the first candidate -- here from a file already on disk, standing in for
+    a concurrent writer -- retries with the next stamp and leaves the
+    pre-existing payload intact.
+    """
+    out_dir = tmp_path / "raw" / "flex_executions" / f"dt={DT.isoformat()}"
+    out_dir.mkdir(parents=True)
+    preclaimed = out_dir / "ibkr_executions-1788298047097.xml"
+    preclaimed.write_text("<xml>pre-existing</xml>", encoding="utf-8")
+
+    path = landing.write_raw_text("flex_executions", DT, "<xml>new</xml>",
+                                  job="ibkr_executions", ext="xml",
+                                  data_root=tmp_path)
+
+    assert path == out_dir / "ibkr_executions-1788298047098.xml"
+    assert path.read_text(encoding="utf-8") == "<xml>new</xml>"
+    assert preclaimed.read_text(encoding="utf-8") == "<xml>pre-existing</xml>"

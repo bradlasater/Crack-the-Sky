@@ -201,10 +201,18 @@ def test_garbage_retention_knobs_are_rejected(
     assert batch.exists()
 
 
-def test_malformed_partition_names_are_never_pruned(warehouse: Path) -> None:
+@pytest.mark.parametrize("name", ["dt=1", "dt=2023-99-99"])
+def test_malformed_partition_names_are_never_pruned(
+    warehouse: Path, name: str
+) -> None:
     """underlying_day_bars has no manifest gate, so the dt= name itself is
-    the only thing standing between a stray directory and deletion."""
-    part = warehouse / "raw" / "underlying_day_bars" / "dt=1"
+    the only thing standing between a stray directory and deletion.
+
+    dt=2023-99-99 passes the YYYY-MM-DD shape check and sorts before any
+    retention cutoff, so the script must round-trip the date through date(1)
+    -- a nonexistent calendar date must never be pruned.
+    """
+    part = warehouse / "raw" / "underlying_day_bars" / name
     part.mkdir(parents=True)
     (part / "x.parquet").write_bytes(b"x")
     assert str(part) not in _pruned_paths(_run(warehouse))

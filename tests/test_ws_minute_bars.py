@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import json
+import time
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -388,3 +389,97 @@ def test_writer_survives_a_write_error(tmp_path, monkeypatch):
     writer.join(timeout=10)
     assert not writer.is_alive(), "writer must keep draining after an error"
     assert writer.rows_written == 1
+    assert writer.errors == 1
+
+
+def test_writer_errors_fail_the_run(tmp_path, monkeypatch):
+    """A run that loses records to writer errors must report failure even
+    when later records land: rows_written > 0 alone used to make the terminal
+    ping green, hiding a partially lost capture."""
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(wsjob.Settings, "load", lambda: settings)
+    monkeypatch.setattr(wsjob, "select_tickers",
+                        lambda *a, **k: ["O:SPY1", "O:SPY2"])
+    pings: list[tuple] = []
+    monkeypatch.setattr(
+        wsjob, "ping",
+        lambda url, suffix="", autocreate=False, body=None:
+            pings.append((url, suffix, body)),
+    )
+
+    async def fake_capture(settings, logger, run_date, deadline, writer, chunks,
+                           liveness_url=None, liveness_autocreate=False):
+        writer.queue.put({"sym": "O:SPY1", "v": 1, "s": 1, "e": 2})  # hits the failure
+        writer.queue.put({"sym": "O:SPY2", "v": 2, "s": 1, "e": 2})  # lands after recovery
+        return {"connects": 1, "reconnects": 0, "frames": 2, "events": 2,
+                "distinct_symbols": 2}
+
+    monkeypatch.setattr(wsjob, "_capture", fake_capture)
+
+    orig_open = wsjob.HourlyJsonlWriter._open
+    attempts = {"n": 0}
+
+    def flaky_open(self, hour):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise OSError("disk full")
+        orig_open(self, hour)
+
+    monkeypatch.setattr(wsjob.HourlyJsonlWriter, "_open", flaky_open)
+
+    rc = wsjob.main(["--date", "2026-09-02", "--force", "--duration-minutes", "1"])
+
+    assert rc == 0  # terminal ping carries the failure, as the 0-rows path does
+    assert ("/start",) in [(s,) for _, s, _ in pings]
+    fails = [body for _, suffix, body in pings if suffix == "/fail"]
+    assert fails, "writer errors must fail the run's terminal ping"
+    assert "writer" in fails[-1]
+    assert not any(suffix == "" for _, suffix, _ in pings), "no green terminal ping"
+
+
+# ---------------------------------------------------------------------------
+# Auth deadline: the budget is total, not per frame
+# ---------------------------------------------------------------------------
+
+def test_auth_deadline_is_total_not_per_frame(tmp_path, monkeypatch):
+    """Each recv gets the *remaining* auth budget, not a fresh full timeout:
+    a server drip-feeding status frames near the deadline used to keep auth
+    alive for almost 2x AUTH_TIMEOUT_S, delaying reconnects."""
+    from websockets.asyncio.client import connect
+    from websockets.asyncio.server import serve
+    from websockets.exceptions import ConnectionClosed
+
+    monkeypatch.setattr(wsjob, "AUTH_TIMEOUT_S", 0.35)
+
+    async def handler(ws):
+        async for raw in ws:
+            if json.loads(raw).get("action") == "auth":
+                # Chatty but never auth_success: a frame lands well inside
+                # every per-frame window, so only a shared deadline can fire.
+                try:
+                    while True:
+                        await ws.send(json.dumps(
+                            [{"ev": "status", "status": "connected"}]))
+                        await asyncio.sleep(0.1)
+                except ConnectionClosed:
+                    return
+
+    async def run() -> float:
+        server = await serve(handler, "127.0.0.1", 0)
+        try:
+            port = server.sockets[0].getsockname()[1]
+            settings = _settings(tmp_path, ws_url=f"ws://127.0.0.1:{port}")
+            logger = JsonlLogger(echo=False)
+            try:
+                start = time.monotonic()
+                async with connect(settings.ws_delayed_url) as ws:
+                    with pytest.raises(TimeoutError):
+                        await wsjob._auth_and_subscribe(ws, settings, logger, [])
+                return time.monotonic() - start
+            finally:
+                logger.close()
+        finally:
+            server.close()
+
+    elapsed = asyncio.run(asyncio.wait_for(run(), timeout=10))
+    assert elapsed < wsjob.AUTH_TIMEOUT_S * 1.5

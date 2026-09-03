@@ -124,6 +124,28 @@ def test_load_cursors_drops_non_integer_values(tmp_path: Path) -> None:
     assert job._load_cursors(settings) == {"O:SPY1": 10}
 
 
+def test_load_cursors_drops_floats_and_bools(tmp_path: Path) -> None:
+    """A cursor must be a real JSON integer; floats (even integral ones) and
+    booleans (ints in Python) are dropped, not coerced."""
+    settings = _settings(tmp_path)
+    landing.meta_path(job.CURSOR_NAME, data_root=tmp_path).write_text(
+        '{"O:SPY1": 10, "O:SPY2": 10.0, "O:SPY3": 1.5, "O:SPY4": true, "O:SPY5": false}',
+        encoding="utf-8",
+    )
+    assert job._load_cursors(settings) == {"O:SPY1": 10}
+
+
+def test_load_cursors_drops_huge_exponent_without_raising(tmp_path: Path) -> None:
+    """1e1000 parses to inf; int(inf) would raise OverflowError and brick
+    every run -- the entry must be dropped instead."""
+    settings = _settings(tmp_path)
+    landing.meta_path(job.CURSOR_NAME, data_root=tmp_path).write_text(
+        '{"O:SPY1": 10, "O:SPY2": 1e1000}',
+        encoding="utf-8",
+    )
+    assert job._load_cursors(settings) == {"O:SPY1": 10}
+
+
 # ---------------------------------------------------------------------------
 # Concurrent merge
 # ---------------------------------------------------------------------------

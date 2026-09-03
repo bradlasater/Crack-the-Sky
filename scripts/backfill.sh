@@ -23,6 +23,16 @@ if [ $# -ne 2 ]; then
     exit 2
 fi
 START="$1"; END="$2"
+
+# Validate the original arguments before any clamping or comparison below:
+# date -d accepts relative/noncanonical input ('today', '2026-1-1'), but the
+# loop and the range check compare the given strings lexically, so require
+# the parsed date to round-trip to the exact YYYY-MM-DD input.
+for v in "$START" "$END"; do
+    [ "$(date -I -d "$v" 2>/dev/null)" = "$v" ] || {
+        echo "[backfill] invalid date: $v (want YYYY-MM-DD)" >&2; exit 2; }
+done
+
 PY="venv/bin/python"
 SLEEP_BETWEEN_DAYS="${BACKFILL_SLEEP_S:-2}"
 MIN_FREE_GB="${MIN_FREE_GB:-100}"
@@ -42,12 +52,9 @@ if [[ "$START" < "$EARLIEST" ]]; then
     START="$EARLIEST"
 fi
 
-# date(1) does the day arithmetic below; catch typos and reversed ranges here
-# instead of silently processing zero dates and reporting "done".
-for v in "$START" "$END"; do
-    date -I -d "$v" >/dev/null 2>&1 || {
-        echo "[backfill] invalid date: $v (want YYYY-MM-DD)" >&2; exit 2; }
-done
+# Both dates were validated as canonical YYYY-MM-DD above, so a lexical
+# comparison is exact. Catch a reversed range here instead of silently
+# processing zero dates and reporting "done".
 if [[ "$START" > "$END" ]]; then
     echo "[backfill] START $START is after END $END" >&2
     exit 2

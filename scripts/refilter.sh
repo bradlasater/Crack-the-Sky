@@ -27,8 +27,11 @@ free_gb() { df -BG --output=avail "$DATA_ROOT" 2>/dev/null | tail -1 | tr -dc '0
 
 # date(1) does the day arithmetic below; catch typos and reversed ranges here
 # instead of silently processing zero dates and reporting "complete".
+# date -d accepts relative/noncanonical input ('today', '2026-1-1'), but the
+# loop and the range check compare the given strings lexically, so require
+# the parsed date to round-trip to the exact YYYY-MM-DD input.
 for v in "$START" "$END"; do
-    date -I -d "$v" >/dev/null 2>&1 || {
+    [ "$(date -I -d "$v" 2>/dev/null)" = "$v" ] || {
         echo "[refilter] invalid date: $v (want YYYY-MM-DD)" >&2; exit 2; }
 done
 if [[ "$START" > "$END" ]]; then

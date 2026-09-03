@@ -76,10 +76,12 @@ def _load_cursors(settings: Settings) -> dict[str, int]:
         return {}
     cursors: dict[str, int] = {}
     for k, v in data.items():
-        try:
-            cursors[str(k)] = int(v)
-        except (TypeError, ValueError):
+        # Keep only real JSON integers: bools are ints in Python, and a huge
+        # exponent like 1e1000 parses to inf (int(inf) raises OverflowError,
+        # which would brick every run) -- drop all of those.
+        if isinstance(v, bool) or not isinstance(v, int):
             continue
+        cursors[str(k)] = v
     return cursors
 
 

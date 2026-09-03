@@ -117,12 +117,15 @@ for entry in "${PRUNABLE[@]}"; do
   for part in "$root"/dt=*; do
     [ -d "$part" ] || continue
     day="$(basename "$part")"; day="${day#dt=}"
-    # Only real date partitions. underlying_day_bars has no manifest gate, so
-    # a malformed dt= name here would be pruned on string comparison alone.
+    # Only real calendar dates. The shape check alone passes 2023-99-99,
+    # which sorts before any cutoff; underlying_day_bars has no manifest
+    # gate, so round-trip the date through date(1) before trusting the
+    # string comparison below.
     case "$day" in
       [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
       *) continue ;;
     esac
+    [ "$(date -I -d "$day" 2>/dev/null)" = "$day" ] || continue
     [[ "$day" < "$cutoff" ]] || continue
     if ! manifest_ok "$need" "$day"; then
       log "msg\":\"kept\",\"dataset\":\"$ds\",\"date\":\"$day\",\"reason\":\"no $need in manifest\""

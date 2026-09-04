@@ -458,7 +458,7 @@ def check_underlying_window(settings: Settings, d: date) -> list[Check]:
         elif total:
             checks.append(Check(f"{dataset}_window", WARN,
                                 detail + " -- still fetchable, backfill with "
-                                "scripts/backfill_underlying.sh", data))
+                                "scripts/backfill_underlying.py", data))
         else:
             checks.append(Check(f"{dataset}_window", PASS,
                                 f"complete back to {window_start.isoformat()}", data))

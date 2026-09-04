@@ -19,9 +19,15 @@ took about three hours instead of minutes.
 
 Resume-safe (existing partitions are skipped), quiet on weekends and holidays,
 and tolerant of 403 at the old edge -- that is the expected answer there, not
-an error. Healthchecks pings are suppressed, because these jobs own daily
-checks and several hundred backfill pings would bury the signal that today's
-scheduled run worked.
+an error.
+
+It pings its own Healthchecks entry (``massive-backfill-underlying``). The
+per-day work calls each job's ``_main_fn`` directly rather than through
+``cli.run_job``, so the daily ``underlying_bars`` / ``grouped_daily`` checks
+are untouched by a few hundred backfill iterations -- but this job still needs
+liveness of its own. Relying only on coverage_audit's ``*_window`` checks
+would mean a dead backfill stays invisible until a gap drifts within 30 days
+of expiry, which is exactly the outcome this whole thing exists to prevent.
 
     venv/bin/python scripts/backfill_underlying.py 2024-09-04 2026-09-02
 """
@@ -29,7 +35,6 @@ scheduled run worked.
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import time
 from datetime import date
@@ -37,14 +42,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# Before importing anything that builds Settings: an empty ping key makes
-# cli.healthcheck_url return (None, False), so no run here pings anything.
-os.environ["HEALTHCHECKS_PING_KEY"] = ""
-
+from ingest.common.cli import healthcheck_url, ping  # noqa: E402
 from ingest.common.config import Settings  # noqa: E402
+from ingest.common.http_client import NotEntitledError  # noqa: E402
 from ingest.common.logging_utils import JsonlLogger  # noqa: E402
 from ingest.jobs import grouped_daily, underlying_bars  # noqa: E402
 from ingest.jobs.flatfile_pull import manifest_dates  # noqa: E402
+
+# Attempts per dataset-day before a session is recorded as failed.
+ATTEMPTS = 3
+
+JOB = "backfill_underlying"
 
 JOBS = (
     ("underlying_minute_bars", underlying_bars, False),
@@ -100,6 +108,8 @@ def main(argv: list[str] | None = None) -> int:
 
     settings = Settings.load()
     logger = JsonlLogger(path=None, echo=False)
+    ping_url, autocreate = healthcheck_url(settings, JOB)
+    ping(ping_url, "/start", autocreate)
     done = dict.fromkeys((n for n, _, _ in jobs), 0)
     had = dict.fromkeys((n for n, _, _ in jobs), 0)
     unfetchable = dict.fromkeys((n for n, _, _ in jobs), 0)
@@ -130,24 +140,38 @@ def main(argv: list[str] | None = None) -> int:
             # The client retries 429 itself, but a long backfill still walks
             # into one occasionally; a transient throttle must not cost a
             # session that will be unfetchable in a few months.
-            for attempt in range(1, 4):
+            for attempt in range(1, ATTEMPTS + 1):
                 try:
                     if keep_all:
                         mod._main_fn(_args(day), settings, logger, False)
                     else:
                         mod._main_fn(_args(day), settings, logger)
-                    if _have(settings, dataset, day):
-                        done[dataset] += 1
-                    break
-                except PermissionError:
-                    # Past the entitlement window. Expected at the old edge.
+                except NotEntitledError:
+                    # 403: past the entitlement window. Expected at the old
+                    # edge, and specifically NOT a bare PermissionError --
+                    # EACCES on a parquet write must stay fatal rather than
+                    # be filed as "the vendor would not serve this".
                     unfetchable[dataset] += 1
                     break
                 except Exception as exc:  # noqa: BLE001 - one bad day must not stop the range
-                    if attempt == 3:
+                    if attempt == ATTEMPTS:
                         failed.append((dataset, day, f"{type(exc).__name__}: {exc}"))
-                    else:
-                        time.sleep(2 * attempt)
+                        break
+                    time.sleep(2 * attempt)
+                    continue
+
+                if _have(settings, dataset, day):
+                    done[dataset] += 1
+                    break
+                # Returned successfully and wrote nothing. Both jobs land no
+                # partition for an empty response, so this is indistinguishable
+                # here from a session the vendor served as empty -- and
+                # silently moving on would leave an expiring session missing
+                # while the run still exits 0. Retry, then say so.
+                if attempt == ATTEMPTS:
+                    failed.append((dataset, day, "no partition written"))
+                    break
+                time.sleep(2 * attempt)
         if worked:
             budget_used += 1
             if a.sleep:
@@ -171,7 +195,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  FAILED {dataset} {day}: {err}", flush=True)
     if len(failed) > 10:
         print(f"  ... {len(failed) - 10} more failures", flush=True)
-    return 1 if failed else 0
+
+    summary = " ".join(f"{k}:+{v}" for k, v in done.items())
+    if failed:
+        ping(ping_url, "/fail", autocreate,
+             body=f"{len(failed)} dataset-days failed; {summary}")
+        return 1
+    ping(ping_url, "", autocreate, body=summary)
+    return 0
 
 
 if __name__ == "__main__":

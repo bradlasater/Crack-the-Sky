@@ -182,6 +182,15 @@ def _scheduled_jobs() -> set[str]:
         m = re.search(r"(?:ingest\.jobs|pricing)\.(\w+)", line)
         if m:
             jobs.add(m.group(1))
+            continue
+        # Standalone Python entry points (scripts/<name>.py) are scheduled the
+        # same way and need monitoring the same way; only the module form was
+        # recognised, so such a job could be added with no check and this test
+        # would have said nothing. Shell jobs (prune) stay out: they are
+        # deliberately unmonitored and listed nowhere in JOBS.
+        m = re.search(r"scripts/(\w+)\.py", line)
+        if m:
+            jobs.add(m.group(1))
     return jobs
 
 

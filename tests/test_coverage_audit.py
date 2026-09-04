@@ -465,7 +465,11 @@ def test_a_hole_in_the_middle_warns_because_it_is_still_fetchable(tmp_path) -> N
     got = checks["underlying_minute_bars_window"]
     assert got.status == audit.WARN
     assert got.data["missing"] == 1 and got.data["expiring"] == 0
-    assert "backfill_underlying.sh" in got.detail
+    # Named exactly, because a remediation hint that points at a file which
+    # does not exist sends an operator to a failing command.
+    assert "scripts/backfill_underlying.py" in got.detail
+    assert (Path(__file__).resolve().parent.parent
+            / "scripts" / "backfill_underlying.py").is_file()
 
 
 def test_a_hole_about_to_expire_fails(tmp_path) -> None:

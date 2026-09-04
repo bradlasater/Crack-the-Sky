@@ -80,10 +80,11 @@
           This is a modelling assumption, not just an ingest limitation, and it
           propagates into every IV and greek derived from it:
           <ul>
-            <li>A traded price sits at the bid or the ask, so inverted IV carries a
-            bid-ask bounce of about half the spread in vol terms. It alternates with
-            trade direction rather than averaging out, and it is worst in the wide OTM
-            wings the skew is made of.</li>
+            <li>A trade may print at the bid, at the ask, or inside the spread, so
+            inverted IV carries an offset from the mid that is <em>unknown</em> without
+            NBBO — bounded in the worst case by about half the spread in vol terms, and
+            not safe to assume averages out over a series. The bound is widest exactly
+            where spreads are widest: the OTM wings the skew is made of.</li>
             <li>No spread means no width-based liquidity screen. Volume and open
             interest are the substitutes the snapshot carries.</li>
             <li>A last trade can be arbitrarily stale. Its timestamp lives in

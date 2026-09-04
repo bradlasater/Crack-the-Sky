@@ -25,11 +25,13 @@ Three things here are load-bearing on this data feed:
   warehouse, and that assumption propagates into every IV and every greek
   computed from one. Three consequences worth holding onto:
 
-  - A traded price sits at the bid or the ask, not between them, so inverted
-    IV carries a bid-ask bounce of roughly half the spread in vol terms. It is
-    not symmetric noise around the mid: it alternates with trade direction,
-    and it is worst exactly where spreads are widest, in the OTM wings the
-    skew is made of.
+  - A traded price may print anywhere in the spread -- at the bid, at the ask,
+    or inside it -- so inverted IV carries an unknown offset from the mid,
+    bounded in the worst case by roughly half the spread in vol terms. Without
+    NBBO that offset cannot be measured or corrected for, only bounded, and
+    the bound is widest exactly where spreads are widest: the OTM wings the
+    skew is made of. Treat it as noise of unknown sign whose scale grows with
+    illiquidity, not as a symmetric error that averages out over a series.
   - The usual liquidity screen -- discard quotes wider than some threshold --
     is unavailable, because there is no width to measure. Volume and open
     interest are the substitutes the snapshot does carry.

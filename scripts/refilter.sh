@@ -23,7 +23,21 @@ MIN_FREE_GB="${MIN_FREE_GB:-80}"
 DATA_ROOT="$(grep -E '^DATA_ROOT=' .env 2>/dev/null | cut -d= -f2 || true)"
 DATA_ROOT="${DATA_ROOT:-/data/massive}"
 
-free_gb() { df -BG --output=avail "$DATA_ROOT" | tail -1 | tr -dc '0-9'; }
+free_gb() { df -BG --output=avail "$DATA_ROOT" 2>/dev/null | tail -1 | tr -dc '0-9' || true; }
+
+# date(1) does the day arithmetic below; catch typos and reversed ranges here
+# instead of silently processing zero dates and reporting "complete".
+# date -d accepts relative/noncanonical input ('today', '2026-1-1'), but the
+# loop and the range check compare the given strings lexically, so require
+# the parsed date to round-trip to the exact YYYY-MM-DD input.
+for v in "$START" "$END"; do
+    [ "$(date -I -d "$v" 2>/dev/null)" = "$v" ] || {
+        echo "[refilter] invalid date: $v (want YYYY-MM-DD)" >&2; exit 2; }
+done
+if [[ "$START" > "$END" ]]; then
+    echo "[refilter] START $START is after END $END" >&2
+    exit 2
+fi
 
 # Newest first: if this is interrupted, the recent history a 5-45 DTE model
 # actually uses is already done.
@@ -34,10 +48,11 @@ mapfile -t dates < <(printf '%s\n' "${dates[@]}" | sort -r)
 
 total=${#dates[@]}; i=0; done_n=0; skip_n=0
 failed=()
-echo "[refilter] $total dates, newest first, ${MIN_FREE_GB}GB floor, $(free_gb)GB free"
+avail="$(free_gb)"; avail="${avail:-0}"
+echo "[refilter] $total dates, newest first, ${MIN_FREE_GB}GB floor, ${avail}GB free"
 for d in "${dates[@]}"; do
     i=$((i+1))
-    avail="$(free_gb)"
+    avail="$(free_gb)"; avail="${avail:-0}"
     if [ "$avail" -lt "$MIN_FREE_GB" ]; then
         echo "[refilter] ABORT: ${avail}GB free < ${MIN_FREE_GB}GB" >&2; exit 1
     fi

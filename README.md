@@ -75,10 +75,14 @@ multi-page, one file per section). Machine state the repo can't declare
 
 On the box: `bash scripts/bootstrap.sh`, fill in `.env` from `.env.example`,
 probe the plan with `venv/bin/python -m ingest.entitlements`, then install the
-schedule with `crontab deploy/crontab`.
+schedule — rewriting the placeholder home path first, since cron does not
+expand `~`/`$HOME`:
+
+```
+sed "s|/home/brad-lasater|$HOME|g" deploy/crontab | crontab -
+```
 
 ## Security
 
-`.env` is gitignored — never commit it. Keep this repo **private**: it
-documents endpoints, plan tier, and box layout. All keys are read-only
+`.env` is gitignored — never commit it. All keys are read-only
 market-data credentials, sent only to the vendor hosts over TLS.

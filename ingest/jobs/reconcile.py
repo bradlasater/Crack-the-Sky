@@ -7,7 +7,9 @@ JSONL, falling back to any clean ``option_minute_bars`` rows with
 row counts, distinct tickers and total volume are logged as a delta summary.
 
 The flat file always wins: the date's clean ``option_minute_bars`` partition
-is rewritten to contain exactly the flat-file rows (``src='flatfile'``).
+is rewritten to contain exactly the flat-file rows (``src='flatfile'``). The
+replacement file is written before the superseded ones are moved aside to
+``_quarantine/refilter/`` -- never deleted, and never removed first.
 
 Missing flat-file data for the date is not an error: the job logs a clear
 message and exits 0 (e.g. S3 creds not yet fixed, or flatfile_pull skipped).
@@ -19,7 +21,6 @@ yesterday); pass ``--date`` explicitly to reconcile an older day.
 from __future__ import annotations
 
 import gzip
-import shutil
 import sys
 from datetime import date
 from pathlib import Path
@@ -120,10 +121,14 @@ def _main(args: Any, settings: Settings, logger: JsonlLogger) -> dict[str, Any]:
         return {"rows": len(ff_records), "reconciled": False, **summary}
 
     # Flat file always wins: rewrite the partition with only flatfile rows.
+    # Write the replacement FIRST, then move the old files aside: the other
+    # order (delete, then write) leaves the partition with no data at all when
+    # the write fails -- disk exhaustion mid-rewrite does exactly that -- and a
+    # delete is not recoverable. Same pattern as landing.quarantine_prior.
     part_dir = data_root / "clean" / CLEAN_DATASET / f"dt={d.isoformat()}"
-    if part_dir.is_dir():
-        shutil.rmtree(part_dir)
+    prior = sorted(part_dir.glob("*.parquet")) if part_dir.is_dir() else []
     out = landing.write_clean(CLEAN_DATASET, d, ff_records, job=JOB, data_root=data_root)
+    landing.quarantine_prior(CLEAN_DATASET, d, JOB, data_root, only=prior)
     logger.log("reconcile_overwritten", date=d.isoformat(), path=str(out),
                rows=len(ff_records))
     return {"rows": len(ff_records), "reconciled": True, **summary}
@@ -132,7 +137,10 @@ def _main(args: Any, settings: Settings, logger: JsonlLogger) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     """Entry point; defaults --date to the previous trading day, then run_job."""
     argv = list(argv) if argv is not None else sys.argv[1:]
-    if "--date" not in argv:
+    # argparse also accepts ``--date=X``; a bare "--date" membership test
+    # misses that form, and the appended default would silently override the
+    # date the caller asked to reconcile.
+    if not any(a == "--date" or a.startswith("--date=") for a in argv):
         prev = previous_trading_day(market_gate.today_et())
         argv += ["--date", prev.isoformat()]
     return run_job(JOB, _main, argv)  # run_job exits; return is for tests

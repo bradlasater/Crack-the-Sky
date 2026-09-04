@@ -144,24 +144,26 @@ def test_handbook_in_page_anchors_resolve() -> None:
 
 
 def test_pages_link_site_css() -> None:
-    """Every page except box-operations.html shares the handbook stylesheet."""
-    missing = [
-        name
-        for name, text in _doc_pages().items()
-        if name != "box-operations.html" and 'href="site.css"' not in text
-    ]
+    """Every handbook page shares the handbook stylesheet."""
+    missing = [name for name, text in _doc_pages().items() if 'href="site.css"' not in text]
     assert not missing, f"pages not linking site.css: {missing}"
 
 
-def test_box_operations_uses_inline_style_not_site_css() -> None:
-    """box-operations.html intentionally carries its own inline style.
+def test_pages_use_shared_shell() -> None:
+    """Every handbook page links site.css and carries the shared nav.toc.
 
-    If it ever links site.css, the exception above stops being deliberate
-    and both tests should be revisited together.
+    404.html is a standalone error page: it must still link site.css but is
+    exempt from the nav requirement.
     """
-    text = (DOCS_DIR / "box-operations.html").read_text()
-    assert 'href="site.css"' not in text
-    assert "<style" in text
+    missing_css = []
+    missing_nav = []
+    for name, text in _doc_pages().items():
+        if 'href="site.css"' not in text:
+            missing_css.append(name)
+        if name != "404.html" and 'class="toc"' not in text:
+            missing_nav.append(name)
+    assert not missing_css, f"pages not linking site.css: {missing_css}"
+    assert not missing_nav, f"pages without nav.toc: {missing_nav}"
 
 
 # ---------------------------------------------------------------------------

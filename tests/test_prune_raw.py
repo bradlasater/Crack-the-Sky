@@ -168,3 +168,52 @@ def test_flatfile_datasets_are_aged_independently(warehouse: Path) -> None:
     pruned = _pruned_paths(_run(warehouse, "--flatfiles"))
     assert str(trades) in pruned
     assert str(aggs) not in pruned
+
+
+# ---------------------------------------------------------------------------
+# Destructive-command guards
+# ---------------------------------------------------------------------------
+
+def _run_no_check(data_root: Path, *args: str, **env: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["bash", str(SCRIPT), *args],
+        capture_output=True, text=True, check=False,
+        env={**os.environ, "DATA_ROOT": str(data_root), **env},
+    )
+
+
+@pytest.mark.parametrize(
+    "knob", ["RETAIN_DAYS", "QUARANTINE_RETAIN_DAYS", "FLATFILE_RETAIN_DAYS"]
+)
+@pytest.mark.parametrize("value", ["-30", "abc"])
+def test_garbage_retention_knobs_are_rejected(
+    warehouse: Path, knob: str, value: str
+) -> None:
+    """A bad knob must fail before any deletion, not move the cutoff.
+
+    A negative retention would push the cutoff into the future and condemn
+    every partition; a non-numeric one would crash date(1) mid-run.
+    """
+    batch = _quarantine_batch(warehouse, "refilter/option_trades/dt=2023-01-03", 90)
+    proc = _run_no_check(warehouse, "--apply", **{knob: value})
+    assert proc.returncode == 2
+    assert knob in proc.stderr
+    assert batch.exists()
+
+
+@pytest.mark.parametrize("name", ["dt=1", "dt=2023-99-99"])
+def test_malformed_partition_names_are_never_pruned(
+    warehouse: Path, name: str
+) -> None:
+    """underlying_day_bars has no manifest gate, so the dt= name itself is
+    the only thing standing between a stray directory and deletion.
+
+    dt=2023-99-99 passes the YYYY-MM-DD shape check and sorts before any
+    retention cutoff, so the script must round-trip the date through date(1)
+    -- a nonexistent calendar date must never be pruned.
+    """
+    part = warehouse / "raw" / "underlying_day_bars" / name
+    part.mkdir(parents=True)
+    (part / "x.parquet").write_bytes(b"x")
+    assert str(part) not in _pruned_paths(_run(warehouse))
+    assert part.exists()

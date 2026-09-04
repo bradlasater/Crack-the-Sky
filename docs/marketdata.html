@@ -6,7 +6,7 @@
   <title>Crack the Sky — marketdata</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;family=Newsreader:opsz,wght@6..72,500;6..72,600&amp;display=swap" rel="stylesheet">
   <link rel="stylesheet" href="site.css">
 </head>
 <body id="top">
@@ -29,7 +29,16 @@
             <li><a href="ingest.html#ingest-entitlements">Entitlements</a></li>
           </ol>
         </li>
-        <li><a href="marketdata.html" class="active">marketdata</a></li>
+        <li>
+          <a href="marketdata.html" class="active">marketdata</a>
+          <ol class="sub">
+            <li><a href="marketdata.html#md-opra-allowlist">OPRA allowlist</a></li>
+            <li><a href="marketdata.html#md-contract">Contract</a></li>
+            <li><a href="marketdata.html#md-quote">Quote</a></li>
+            <li><a href="marketdata.html#md-asof">As-of</a></li>
+            <li><a href="marketdata.html#md-fail-loud">Fail-loud</a></li>
+          </ol>
+        </li>
         <li><a href="pricing.html">pricing</a></li>
         <li><a href="warehouse-math.html">Warehouse → math</a></li>
         <li><a href="canary.html">Daily canary</a></li>
@@ -58,7 +67,7 @@
         (same as <code>python -m marketdata</code>).
       </p>
       <dl class="notes">
-        <dt>OPRA allowlist</dt>
+        <dt id="md-opra-allowlist">OPRA allowlist</dt>
         <dd>
           Allowlist is exactly <code>SPY</code>, <code>SPX</code>, <code>SPXW</code>.
           The parser alternation is longest-first (<code>SPXW</code> before
@@ -67,26 +76,26 @@
           SPYL/SPYS/SPYG; <code>parse_opra</code> does not.
           Raises <code>OPRAParseError</code> — never a partial.
         </dd>
-        <dt>Contract</dt>
+        <dt id="md-contract">Contract</dt>
         <dd>
           Exercise style and multiplier live on the dataclass: SPY American,
           SPX/SPXW European, multiplier 100. Settlement instants:
           SPY/SPXW 16:00 ET, SPX monthlies 09:30 ET (AM-settled).
         </dd>
-        <dt>Quote</dt>
+        <dt id="md-quote">Quote</dt>
         <dd>
           Snapshot-derived. Vendor IV/greeks copied as diagnostics
           (<code>vendor_*</code>). <code>market_price</code> = last if present,
           else day close. Pricing must ignore vendor columns.
         </dd>
-        <dt>As-of</dt>
+        <dt id="md-asof">As-of</dt>
         <dd>
           Snapshots/contracts/forwards are written many times a day.
           <code>read_partition</code> refuses those datasets (double-count).
           <code>read_asof</code> takes the last file per underlying at or before
           <code>asof_ns</code> (filename epoch-ms). Absence is an error.
         </dd>
-        <dt>Fail-loud</dt>
+        <dt id="md-fail-loud">Fail-loud</dt>
         <dd>
           Extra or missing parquet columns → <code>SchemaError</code>.
           Validate fails on foreign roots, mixed underlyings vs a SPY-only

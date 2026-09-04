@@ -64,6 +64,7 @@ DEFAULT_UNDERLYINGS = ["SPY", "SPX"]  # SPXW contracts share the O:SPX prefix
 SUBSCRIBE_CHUNK_SIZE = 3000  # tickers per subscribe message (<< 1MB limit)
 WINDOW_START = dtime(9, 25)  # ET
 HEARTBEAT_TIMEOUT_S = 90
+AUTH_TIMEOUT_S = 30  # longest wait for auth_success after connecting
 STATS_INTERVAL_S = 300  # periodic ws_stats log cadence
 # Slug suffix for the liveness check pinged on every stats tick.
 #
@@ -285,6 +286,9 @@ class HourlyJsonlWriter(threading.Thread):
         self.logger = logger
         self.queue: queue.Queue[dict[str, Any] | None] = queue.Queue()
         self.rows_written = 0
+        # Records lost to per-item write errors. Only this thread mutates it;
+        # main() reads it after stop()/join(), so no lock is needed.
+        self.errors = 0
         self._fh: Any = None
         self._path: Path | None = None
         self._hour: int | None = None
@@ -330,6 +334,21 @@ class HourlyJsonlWriter(threading.Thread):
                 self.rows_written += 1
                 if self.rows_written % 1000 == 0:
                     self._fh.flush()
+            except Exception as exc:  # noqa: BLE001 - the writer must not die
+                # An escaping exception kills this daemon thread: every later
+                # record would be silently dropped, and stop() would hang on
+                # queue.join() waiting for items nobody drains. Log, count the
+                # lost record, and keep draining instead; main() turns a
+                # nonzero count into a failed run.
+                self.errors += 1
+                try:
+                    self.logger.log("ws_writer_error",
+                                    error=f"{type(exc).__name__}: {exc}")
+                except Exception:  # noqa: BLE001 - the writer must not die
+                    # The recovery log writes+flushes too; the same disk-full
+                    # that triggered this handler can raise here. The record
+                    # is already counted -- never let logging kill the thread.
+                    pass
             finally:
                 self.queue.task_done()
 
@@ -346,13 +365,26 @@ async def _auth_and_subscribe(
     """Authenticate then send every chunked subscribe message; True on success.
 
     Expects an ``auth_success`` status event; ``auth_failed`` is fatal
-    (returns False so the job exits instead of hammering the API). Each
-    subscribe message stays well under the 1MB server frame limit.
+    (returns False so the job exits instead of hammering the API). A server
+    that keeps talking but never confirms auth within ``AUTH_TIMEOUT_S`` is a
+    *transient* failure: TimeoutError is raised so the supervisor recycles
+    the connection rather than exiting on a mislabelled auth error. Each
+    receive gets only the time *remaining* until the deadline -- a server
+    drip-feeding status frames must not renew the full timeout per frame.
+    Each subscribe message stays well under the 1MB server frame limit.
     """
     await ws.send(json.dumps({"action": "auth", "params": settings.massive_api_key}))
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        raw = await asyncio.wait_for(ws.recv(), timeout=30)
+    deadline = time.monotonic() + AUTH_TIMEOUT_S
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+        except TimeoutError:
+            # Silent server: break so the shared ws_auth_timeout log below
+            # runs -- otherwise _capture misreports this as a heartbeat loss.
+            break
         markers = describe_events(raw)
         logger.log("ws_status", markers=markers)
         try:
@@ -377,8 +409,8 @@ async def _auth_and_subscribe(
             if status == "auth_failed":
                 logger.log("ws_auth_failed", message=ev.get("message"))
                 return False
-    logger.log("ws_auth_timeout")
-    return False
+    logger.log("ws_auth_timeout", timeout_s=AUTH_TIMEOUT_S)
+    raise TimeoutError(f"auth not confirmed within {AUTH_TIMEOUT_S}s")
 
 
 async def _read_loop(
@@ -608,9 +640,15 @@ def main(argv: list[str] | None = None) -> int:
         logger.log("job_end", job=JOB, rows=writer.rows_written, duration_s=duration_s,
                    **stats)
         # A capture window that ends with zero rows is a failure, not a
-        # success: the subscription ACKed and nothing arrived.
+        # success: the subscription ACKed and nothing arrived. So is any
+        # record lost to a writer error: with later records landing, a green
+        # ping would make a partially lost capture indistinguishable from a
+        # clean run.
         if writer.rows_written == 0:
             settle(False, f"captured 0 rows in {duration_s}s; stats={stats}")
+        elif writer.errors:
+            settle(False, f"lost {writer.errors} record(s) to writer errors; "
+                          f"rows={writer.rows_written} in {duration_s}s; stats={stats}")
         else:
             settle(True, f"ok: rows={writer.rows_written} in {duration_s}s; stats={stats}")
         return 0

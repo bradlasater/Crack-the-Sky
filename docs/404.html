@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Crack the Sky — 404, page not found</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;family=Newsreader:opsz,wght@6..72,500;6..72,600&amp;display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="site.css">
+</head>
+<body id="top">
+  <a class="skip" href="#main">Skip to content</a>
+  <main class="errpage" id="main">
+    <div class="err-card">
+      <div class="kicker">Crack the Sky · error 404</div>
+      <div class="err-code" aria-hidden="true">404</div>
+      <h1 class="err-title">Absence is an error.</h1>
+      <!-- Optional artwork: drop the "deja" image at docs/assets/deja.png
+           (a deja.jpg works too — the handler below tries it once) and it
+           shows up here automatically. Until the file exists, onerror hides
+           the <img> and the pure-CSS 404 above carries the page. -->
+      <img class="err-art" src="assets/deja.png" alt="Déjà vu — the same page, again"
+           onerror="if (this.dataset.tried) { this.remove(); } else { this.dataset.tried = '1'; this.src = 'assets/deja.jpg'; }">
+      <p class="err-lead">
+        This URL was never captured — not
+        <span class="badge forbidden">403 / not entitled</span>, not
+        <span class="badge missing">not built</span>, just not here.
+        The index lists every page that exists.
+      </p>
+      <p><a class="err-home" href="index.html">← back to the handbook index</a></p>
+      <footer>
+        docs/404.html — Crack the Sky handbook. Do not commit .env.
+      </footer>
+    </div>
+  </main>
+</body>
+</html>

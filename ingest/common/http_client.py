@@ -143,7 +143,15 @@ class MassiveClient:
         raise last_exc
 
     def _sleep(self, attempt: int, why: str) -> None:  # noqa: D401
-        """Exponential backoff before retry ``attempt`` (base 1s, x2)."""
+        """Exponential backoff before retry ``attempt`` (base 1s, x2).
+
+        Nothing follows the final attempt, so it skips the backoff: sleeping
+        2**(MAX_TRIES-1) seconds before raising an error that is already
+        decided only delays the caller's own retry/fail path (a 32s stall
+        against snapshot_sweep's 60s budget).
+        """
+        if attempt >= MAX_TRIES:
+            return
         delay = BACKOFF_BASE_S * (2 ** (attempt - 1))
         log.warning("retry %d/%d in %.1fs (%s)", attempt, MAX_TRIES, delay, why)
         time.sleep(delay)

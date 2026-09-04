@@ -112,6 +112,21 @@ def test_cli_ok_on_clean_spy(tmp_path) -> None:
     assert rc == 0
 
 
+def test_cli_bad_date_fails_cleanly(tmp_path) -> None:
+    """A malformed --date is a FAIL with exit 1, not a traceback."""
+    rc = main(
+        [
+            "--dataset",
+            "option_snapshots",
+            "--date",
+            "2026-13-40",
+            "--data-root",
+            str(tmp_path),
+        ]
+    )
+    assert rc == 1
+
+
 # ---------------------------------------------------------------------------
 # --roots narrows the allowlist; it must never extend it
 # ---------------------------------------------------------------------------

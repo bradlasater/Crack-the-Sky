@@ -98,6 +98,20 @@ def test_get_raises_after_retries_exhausted(client: MassiveClient) -> None:
     assert len(client.session.calls) == http_client.MAX_TRIES
 
 
+def test_no_backoff_after_the_final_attempt(
+    client: MassiveClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The last failure raises at once; no retry follows, so no sleep either."""
+    sleeps: list[float] = []
+    monkeypatch.setattr(http_client.time, "sleep", sleeps.append)
+    client.session = FakeSession([FakeResponse(503, {})] * http_client.MAX_TRIES)
+    with pytest.raises(requests.HTTPError):
+        client.get("/x")
+    assert sleeps == [
+        http_client.BACKOFF_BASE_S * (2 ** i) for i in range(http_client.MAX_TRIES - 1)
+    ]
+
+
 def test_get_403_raises_permission_error_with_hint(client: MassiveClient) -> None:
     client.session = FakeSession([
         FakeResponse(403, {"status": "NOT_AUTHORIZED", "message": "not entitled"})

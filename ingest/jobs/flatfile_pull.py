@@ -529,7 +529,9 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(argv) if argv is not None else sys.argv[1:]
     argv, force_download = strip_flag(argv, "--force-download")
     argv, replace = strip_flag(argv, "--replace")
-    if "--date" not in argv:
+    # "--date=X" is a single argv token; a bare-membership check misses it and
+    # the appended default then wins (argparse keeps the last --date).
+    if not any(a == "--date" or a.startswith("--date=") for a in argv):
         # Resolve against DATA_ROOT without requiring full Settings (the
         # market gate only needs the holidays cache location).
         prev = previous_trading_day(market_gate.today_et())

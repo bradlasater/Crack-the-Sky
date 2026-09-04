@@ -419,3 +419,35 @@ def test_quarantine_only_moves_the_named_files(tmp_path: Path) -> None:
             (tmp_path / "clean" / "option_day_bars" / "dt=2026-08-28").glob("*.parquet")]
     assert left == [new.name]
     assert all(m.is_file() for m in moved)
+
+
+# ---------------------------------------------------------------------------
+# Default --date injection
+# ---------------------------------------------------------------------------
+
+def test_date_equals_form_is_not_overridden(monkeypatch) -> None:
+    """``--date=2026-01-05`` is a single argv token, so a bare
+    ``"--date" not in argv`` check misses it -- and since argparse keeps the
+    *last* --date, the appended previous-trading-day default silently won over
+    the explicit backfill date.
+    """
+    from ingest.jobs import flatfile_pull as job
+
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(
+        job, "run_job", lambda name, fn, argv: seen.setdefault("argv", argv)
+    )
+    job.main(["--date=2026-01-05"])
+    assert seen["argv"] == ["--date=2026-01-05"]
+
+
+def test_default_date_is_injected_when_absent(monkeypatch) -> None:
+    from ingest.jobs import flatfile_pull as job
+
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(
+        job, "run_job", lambda name, fn, argv: seen.setdefault("argv", argv)
+    )
+    job.main([])
+    assert seen["argv"][0] == "--date"
+    date.fromisoformat(seen["argv"][1])

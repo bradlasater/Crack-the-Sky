@@ -7,12 +7,16 @@ merge semantics without touching the network.
 
 from __future__ import annotations
 
+import argparse
 import json
 import threading
 from pathlib import Path
 
+import pytest
+
 from ingest.common import landing
 from ingest.common.config import Settings
+from ingest.common.logging_utils import JsonlLogger
 from ingest.jobs import trades_watchlist as job
 
 
@@ -99,6 +103,47 @@ def test_load_cursors_tolerates_corruption(tmp_path: Path) -> None:
         "{not json", encoding="utf-8"
     )
     assert job._load_cursors(settings) == {}
+
+
+def test_load_cursors_tolerates_wrong_json_shape(tmp_path: Path) -> None:
+    """Valid JSON that is not an object must not crash the job every run."""
+    settings = _settings(tmp_path)
+    landing.meta_path(job.CURSOR_NAME, data_root=tmp_path).write_text(
+        '["O:SPY1"]', encoding="utf-8"
+    )
+    assert job._load_cursors(settings) == {}
+
+
+def test_load_cursors_drops_non_integer_values(tmp_path: Path) -> None:
+    """Bad entries are dropped (re-poll, duplicates at worst); good ones keep."""
+    settings = _settings(tmp_path)
+    landing.meta_path(job.CURSOR_NAME, data_root=tmp_path).write_text(
+        json.dumps({"O:SPY1": 10, "O:SPY2": "not-a-ts", "O:SPY3": None}),
+        encoding="utf-8",
+    )
+    assert job._load_cursors(settings) == {"O:SPY1": 10}
+
+
+def test_load_cursors_drops_floats_and_bools(tmp_path: Path) -> None:
+    """A cursor must be a real JSON integer; floats (even integral ones) and
+    booleans (ints in Python) are dropped, not coerced."""
+    settings = _settings(tmp_path)
+    landing.meta_path(job.CURSOR_NAME, data_root=tmp_path).write_text(
+        '{"O:SPY1": 10, "O:SPY2": 10.0, "O:SPY3": 1.5, "O:SPY4": true, "O:SPY5": false}',
+        encoding="utf-8",
+    )
+    assert job._load_cursors(settings) == {"O:SPY1": 10}
+
+
+def test_load_cursors_drops_huge_exponent_without_raising(tmp_path: Path) -> None:
+    """1e1000 parses to inf; int(inf) would raise OverflowError and brick
+    every run -- the entry must be dropped instead."""
+    settings = _settings(tmp_path)
+    landing.meta_path(job.CURSOR_NAME, data_root=tmp_path).write_text(
+        '{"O:SPY1": 10, "O:SPY2": 1e1000}',
+        encoding="utf-8",
+    )
+    assert job._load_cursors(settings) == {"O:SPY1": 10}
 
 
 # ---------------------------------------------------------------------------
@@ -352,21 +397,27 @@ def test_failed_polls_are_retried_next_slot_not_treated_as_silence(
         def paginate(self, path, params=None, limit=1000):
             ticker = path.rsplit("/", 1)[-1]
             self.seen.append((ticker, None))
-            raise RuntimeError("upstream exploded")
-            yield  # pragma: no cover
+            if ticker == "O:ERR":
+                raise RuntimeError("upstream exploded")
+            yield from super().paginate(path, params, limit)
 
     s = _settings(tmp_path)
     monkeypatch.setattr(job, "_now_et", _midsession)
     monkeypatch.setattr(
-        job, "compute_watchlist", lambda *a, **k: [{"ticker": "O:ERR"}]
+        job,
+        "compute_watchlist",
+        lambda *a, **k: [{"ticker": "O:ERR"}, {"ticker": "O:OK"}],
     )
     args = argparse.Namespace(
         date="2026-09-04", limit=None, dry_run=False, force=True, underlying=None
     )
     for _ in range(4):
-        monkeypatch.setattr(job, "MassiveClient", lambda *a, **k: _Boom({}))
+        client = _Boom({"O:OK": []})
+        monkeypatch.setattr(job, "MassiveClient", lambda *a, **k: client)
         res = job._main_fn(args, s, JsonlLogger(path=None, echo=False))
-        assert res["polled"] == 1, "an erroring ticker was backed off"
+        assert any(ticker == "O:ERR" for ticker, _ in client.seen), (
+            "an erroring ticker was backed off"
+        )
         assert res["errors"] == 1
 
 
@@ -446,3 +497,53 @@ def test_malformed_but_valid_json_state_polls_everything(tmp_path: Path) -> None
                     '{"date": "2026-09-04", "run": "x", "tickers": {}}'):
         path.write_text(payload, encoding="utf-8")
         assert job._load_poll_state(s, date(2026, 9, 4)) == (0, {}), payload
+
+# Run-level failure semantics (drives _main_fn with a stubbed watchlist/client)
+# ---------------------------------------------------------------------------
+
+def _args(**over) -> argparse.Namespace:
+    return argparse.Namespace(
+        date=None, limit=None, dry_run=False, underlying=None, **over
+    )
+
+
+def test_run_fails_when_every_ticker_errors(tmp_path: Path, monkeypatch) -> None:
+    """A 100% error rate is an outage (lost entitlement, broken endpoint) and
+    must fail the run -- rows=0 with a green check is how it would hide."""
+    monkeypatch.setattr(job, "compute_watchlist",
+                        lambda *a, **k: [{"ticker": "O:SPY1"}, {"ticker": "O:SPY2"}])
+
+    class _BrokenClient:
+        def __init__(self, *a, **k) -> None:
+            pass
+
+        def paginate(self, path, params=None, limit=1000):
+            raise RuntimeError("upstream exploded")
+
+    monkeypatch.setattr(job, "MassiveClient", _BrokenClient)
+    logger = JsonlLogger(path=None, echo=False)
+    with pytest.raises(RuntimeError, match="every ticker poll failed"):
+        job._main_fn(_args(), _settings(tmp_path), logger)
+
+
+def test_partial_failure_still_lands_good_tickers(tmp_path: Path, monkeypatch) -> None:
+    """One bad ticker must not fail the run or drop the good ticker's cursor."""
+    monkeypatch.setattr(job, "compute_watchlist",
+                        lambda *a, **k: [{"ticker": "O:SPY1"}, {"ticker": "BOOM"}])
+
+    class _FlakyClient:
+        def __init__(self, *a, **k) -> None:
+            pass
+
+        def paginate(self, path, params=None, limit=1000):
+            if path.endswith("BOOM"):
+                raise RuntimeError("upstream exploded")
+            return iter([_trade(42)])
+
+    monkeypatch.setattr(job, "MassiveClient", _FlakyClient)
+    settings = _settings(tmp_path)
+    logger = JsonlLogger(path=None, echo=False)
+    summary = job._main_fn(_args(), settings, logger)
+    assert summary["rows"] == 1
+    assert summary["errors"] == 1
+    assert job._load_cursors(settings) == {"O:SPY1": 42}

@@ -94,7 +94,8 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger, keep_all: bool):
 def main(argv: list[str] | None = None) -> None:
     """Entry point; defaults --date to the previous trading day."""
     argv, keep_all = strip_flag(list(sys.argv[1:] if argv is None else argv), "--all")
-    if "--date" not in argv:
+    # "--date=X" is a single argv token; see flatfile_pull.main.
+    if not any(a == "--date" or a.startswith("--date=") for a in argv):
         prev = market_gate.previous_trading_day(market_gate.today_et())
         argv += ["--date", prev.isoformat()]
 

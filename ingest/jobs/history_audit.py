@@ -302,7 +302,10 @@ def main(argv: list[str] | None = None) -> int:
     # subject is the archive, not today. Defaulting to the previous trading
     # day (the same convention flatfile_pull uses) means the weekly Saturday
     # cron line gates on Friday's session and needs no --force.
-    if "--date" not in rest:
+    # argparse also accepts ``--date=X``; a bare "--date" membership test
+    # misses that form, and the appended default would silently override the
+    # gate date the caller passed through.
+    if not any(a == "--date" or a.startswith("--date=") for a in rest):
         prev = market_gate.previous_trading_day(market_gate.today_et())
         rest = rest + ["--date", prev.isoformat()]
 

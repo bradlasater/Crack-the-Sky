@@ -534,7 +534,10 @@ def main(argv: list[str] | None = None) -> None:
     exit 0 on the Saturday run.
     """
     argv = list(sys.argv[1:] if argv is None else argv)
-    if "--date" not in argv:
+    # argparse also accepts ``--date=X``; a bare "--date" membership test
+    # misses that form, and the appended default would silently override the
+    # date the caller asked to audit.
+    if not any(a == "--date" or a.startswith("--date=") for a in argv):
         prev = market_gate.previous_trading_day(market_gate.today_et())
         argv += ["--date", prev.isoformat()]
     run_job(JOB, _main_fn, argv)

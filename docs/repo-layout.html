@@ -6,7 +6,7 @@
   <title>Crack the Sky — repo layout</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;family=Newsreader:opsz,wght@6..72,500;6..72,600&amp;display=swap" rel="stylesheet">
   <link rel="stylesheet" href="site.css">
 </head>
 <body id="top">
@@ -17,7 +17,13 @@
       <div class="toc-title">System handbook</div>
       <ol>
         <li><a href="index.html">Overview</a></li>
-        <li><a href="repo-layout.html" class="active">Repo layout</a></li>
+        <li>
+          <a href="repo-layout.html" class="active">Repo layout</a>
+          <ol class="sub">
+            <li><a href="repo-layout.html#repo-toplevel">Top level</a></li>
+            <li><a href="repo-layout.html#repo-not-there">Not in the repo</a></li>
+          </ol>
+        </li>
         <li><a href="data-flow.html">Data flow</a></li>
         <li>
           <a href="ingest.html">Ingest</a>
@@ -51,6 +57,7 @@
         <div class="meta"><a href="index.html">← overview</a></div>
       </header>
 
+      <h2 id="repo-toplevel">Top level</h2>
       <p>
         Three Python packages plus tests and ops scripts. Jobs are
         <code>python -m ingest.jobs.&lt;name&gt;</code> from a venv, not an
@@ -91,6 +98,7 @@
           </tr>
         </tbody>
       </table>
+      <h2 id="repo-not-there">Not in the repo</h2>
       <p>
         There is no <code>surfaces/</code>, no rates package, no ClickHouse
         client. The schemas module mentions ClickHouse in a docstring; no DDL

@@ -692,14 +692,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--r",
         type=float,
-        required=True,
-        help="continuous risk-free rate (the CLI pins a rate explicitly; "
-             "greeks_asof with r=None uses the landed Treasury curve)",
+        default=None,
+        help="continuous risk-free rate; default = the landed Treasury "
+             "curve (ingest.common.rates.rate_for). Pin a scalar to "
+             "override, e.g. for reproducible canary diffs",
     )
     parser.add_argument(
         "--roots",
         default=",".join(ALLOWED_ROOTS),
-        help="comma-separated OPRA roots (default SPY,SPX,SPXW)",
+        help="comma-separated OPRA roots (default " + ",".join(ALLOWED_ROOTS) + ")",
     )
     parser.add_argument(
         "--data-root",

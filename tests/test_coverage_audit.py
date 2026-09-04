@@ -380,3 +380,110 @@ def test_main_defaults_date_to_the_previous_trading_day(monkeypatch) -> None:
                         lambda job, fn, argv: seen.setdefault("argv", argv))
     audit.main([])
     assert seen["argv"][0] == "--date"
+
+
+# ---------------------------------------------------------------------------
+# Underlying history against the rolling entitlement window
+#
+# The equity aggregate endpoints only serve ~2 years back, so unlike the
+# option flat files this history expires. The job ran faithfully every morning
+# for T-1 while holding four days in total, and nothing noticed.
+# ---------------------------------------------------------------------------
+
+def _land_underlying(root: Path, dataset: str, days: list[date]) -> None:
+    for d in days:
+        part = root / "clean" / dataset / f"dt={d.isoformat()}"
+        part.mkdir(parents=True, exist_ok=True)
+        (part / "underlying_bars-SPY-1.parquet").write_bytes(b"")
+
+
+def _sessions(settings: Settings, start: date, end: date) -> list[date]:
+    from datetime import timedelta
+
+    from ingest.common import market_gate
+
+    out, d = [], start
+    while d <= end:
+        if market_gate.is_trading_day(d, settings.data_root):
+            out.append(d)
+        d += timedelta(days=1)
+    return out
+
+
+def _full_window(settings: Settings, d: date) -> list[date]:
+    from datetime import timedelta
+
+    start = d - timedelta(days=audit.UNDERLYING_ENTITLEMENT_DAYS)
+    return _sessions(settings, start, d)
+
+
+def test_underlying_window_passes_when_the_window_is_complete(tmp_path) -> None:
+    s = _settings(tmp_path)
+    days = _full_window(s, RUN_DATE)
+    for ds in audit.UNDERLYING_DATASETS:
+        _land_underlying(tmp_path, ds, days)
+    checks = {c.name: c for c in audit.check_underlying_window(s, RUN_DATE)}
+    for ds in audit.UNDERLYING_DATASETS:
+        assert checks[f"{ds}_window"].status == audit.PASS, checks[f"{ds}_window"].detail
+        assert checks[f"{ds}[{RUN_DATE}]"].status == audit.PASS
+
+
+def test_missing_yesterday_fails_even_with_a_full_history(tmp_path) -> None:
+    """The daily job breaking is a different failure from an old hole."""
+    s = _settings(tmp_path)
+    days = [d for d in _full_window(s, RUN_DATE) if d != RUN_DATE]
+    for ds in audit.UNDERLYING_DATASETS:
+        _land_underlying(tmp_path, ds, days)
+    checks = {c.name: c for c in audit.check_underlying_window(s, RUN_DATE)}
+    assert checks[f"underlying_minute_bars[{RUN_DATE}]"].status == audit.FAIL
+
+
+def test_a_hole_in_the_middle_warns_because_it_is_still_fetchable(tmp_path) -> None:
+    from datetime import timedelta
+
+    s = _settings(tmp_path)
+    window = _full_window(s, RUN_DATE)
+    # Drop a session comfortably inside the window, away from the old edge.
+    victim = window[len(window) // 2]
+    assert victim > window[0] + timedelta(days=audit.UNDERLYING_EDGE_DAYS)
+    for ds in audit.UNDERLYING_DATASETS:
+        _land_underlying(tmp_path, ds, [d for d in window if d != victim])
+    checks = {c.name: c for c in audit.check_underlying_window(s, RUN_DATE)}
+    got = checks["underlying_minute_bars_window"]
+    assert got.status == audit.WARN
+    assert got.data["missing"] == 1 and got.data["expiring"] == 0
+    assert "backfill_underlying.sh" in got.detail
+
+
+def test_a_hole_about_to_expire_fails(tmp_path) -> None:
+    """Inside the edge zone, "later" has stopped being an option."""
+    s = _settings(tmp_path)
+    window = _full_window(s, RUN_DATE)
+    victim = window[0]
+    for ds in audit.UNDERLYING_DATASETS:
+        _land_underlying(tmp_path, ds, [d for d in window if d != victim])
+    checks = {c.name: c for c in audit.check_underlying_window(s, RUN_DATE)}
+    got = checks["underlying_minute_bars_window"]
+    assert got.status == audit.FAIL
+    assert got.data["expiring"] == 1
+    assert "unrecoverable" in got.detail
+
+
+def test_window_does_not_reach_past_the_entitlement_boundary(tmp_path) -> None:
+    """Hunting past ~2 years would report expected 403s as gaps forever."""
+    from datetime import timedelta
+
+    s = _settings(tmp_path)
+    _land_underlying(tmp_path, "underlying_minute_bars", _full_window(s, RUN_DATE))
+    checks = {c.name: c for c in audit.check_underlying_window(s, RUN_DATE)}
+    got = checks["underlying_minute_bars_window"]
+    assert got.status == audit.PASS
+    start = date.fromisoformat(got.data["window_start"])
+    assert RUN_DATE - start == timedelta(days=audit.UNDERLYING_ENTITLEMENT_DAYS)
+    assert start > RUN_DATE - timedelta(days=365 * 2)
+
+
+def test_underlying_window_is_part_of_the_daily_run(tmp_path) -> None:
+    s = _settings(tmp_path)
+    names = {c.name for c in audit.run_checks(s, RUN_DATE, _logger())}
+    assert any(n.endswith("_window") for n in names), names

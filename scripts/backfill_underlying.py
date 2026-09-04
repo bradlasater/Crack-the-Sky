@@ -44,6 +44,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from ingest.common import market_gate  # noqa: E402
 from ingest.common.cli import healthcheck_url, ping  # noqa: E402
 from ingest.common.config import Settings  # noqa: E402
 from ingest.common.http_client import NotEntitledError  # noqa: E402
@@ -61,6 +62,11 @@ JOBS = (
     ("underlying_minute_bars", underlying_bars, False),
     ("underlying_day_bars", grouped_daily, True),
 )
+
+
+def _today() -> date:
+    """Indirection so tests can freeze the clock the boundary is derived from."""
+    return market_gate.today_et()
 
 
 def _have(settings: Settings, dataset: str, d: date) -> bool:
@@ -107,10 +113,15 @@ def main(argv: list[str] | None = None) -> int:
                          "whole US market per call (12,518 tickers) and 429s "
                          "at a cadence SPY minute aggs sail through.")
     a = ap.parse_args(argv)
-    end = date.fromisoformat(a.end) if a.end else date.today() - timedelta(days=1)
-    # The oldest session the plan will still serve, derived from the same
-    # constant coverage_audit audits against so the two cannot disagree.
-    boundary = end - timedelta(days=UNDERLYING_ENTITLEMENT_DAYS)
+    today = _today()
+    end = date.fromisoformat(a.end) if a.end else today - timedelta(days=1)
+    # The oldest session the plan will still serve. A property of the vendor's
+    # clock, NOT of the range being asked for: deriving it from `end` let a
+    # historical end slide the boundary backwards and admit sessions that had
+    # already expired -- precisely the wasted requests this exists to stop --
+    # and a future end slide it forwards and skip fetchable ones. `end` caps
+    # the range and nothing else.
+    boundary = today - timedelta(days=UNDERLYING_ENTITLEMENT_DAYS)
     start = date.fromisoformat(a.start) if a.start else boundary
     if start < boundary:
         print(f"[backfill-underlying] start {start} is past the entitlement "

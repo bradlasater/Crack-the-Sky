@@ -416,7 +416,9 @@ def _missing_sessions(
     return out
 
 
-def check_underlying_window(settings: Settings, d: date) -> list[Check]:
+def check_underlying_window(
+    settings: Settings, d: date, today: date | None = None
+) -> list[Check]:
     """Underlying history, against the window the plan will still serve.
 
     Two questions, because they fail differently. Did yesterday's scheduled
@@ -425,7 +427,17 @@ def check_underlying_window(settings: Settings, d: date) -> list[Check]:
     "later" stops being an option.
     """
     checks: list[Check] = []
-    window_start = d - timedelta(days=UNDERLYING_ENTITLEMENT_DAYS)
+    # Measured from the vendor's clock, not from the audited day. They differ
+    # by one day in production (this runs on T-1) but not when the job is
+    # pointed at an older date by hand, and a boundary that slides with the
+    # question being asked is the same bug the backfill had: it would report
+    # long-expired sessions as still fetchable.
+    today = today or market_gate.today_et()
+    window_start = today - timedelta(days=UNDERLYING_ENTITLEMENT_DAYS)
+    if window_start > d:
+        return [Check("underlying_window", SKIP,
+                      f"audited day {d.isoformat()} is older than the "
+                      f"entitlement boundary {window_start.isoformat()}", {})]
     edge_end = window_start + timedelta(days=UNDERLYING_EDGE_DAYS)
     sessions = _window_sessions(settings, window_start, d)
     if not sessions:

@@ -71,8 +71,15 @@ class _Stub:
             _land(self.root, self.dataset, day.isoformat())
 
 
-def _install(mod, monkeypatch, tmp_path, behaviour=None, dataset="underlying_minute_bars"):
+# Frozen: the entitlement boundary is measured from the clock, so a suite
+# that reads the real one tests a different window every day.
+TODAY = date(2026, 9, 4)
+
+
+def _install(mod, monkeypatch, tmp_path, behaviour=None,
+             dataset="underlying_minute_bars", today=TODAY):
     stub = _Stub(tmp_path, dataset, behaviour)
+    monkeypatch.setattr(mod, "_today", lambda: today)
     monkeypatch.setattr(mod, "JOBS", ((dataset, stub, False),))
     monkeypatch.setattr(mod, "ping", lambda *a, **k: None)
     monkeypatch.setattr(mod, "healthcheck_url", lambda *a, **k: (None, False))
@@ -192,18 +199,18 @@ def test_sessions_come_from_the_manifest_not_the_calendar(mod, monkeypatch, tmp_
 # expired -- forever, on data that no longer exists.
 # ---------------------------------------------------------------------------
 
-def _window_start(mod, end: date) -> date:
+def _window_start(mod, today: date = TODAY) -> date:
     from datetime import timedelta
 
-    return end - timedelta(days=mod.UNDERLYING_ENTITLEMENT_DAYS)
+    return today - timedelta(days=mod.UNDERLYING_ENTITLEMENT_DAYS)
 
 
 def test_no_arguments_derives_the_whole_current_window(mod, monkeypatch, tmp_path) -> None:
     """How cron invokes it: no dates at all."""
     from datetime import timedelta
 
-    yesterday = date.today() - timedelta(days=1)
-    boundary = _window_start(mod, yesterday)
+    yesterday = TODAY - timedelta(days=1)
+    boundary = _window_start(mod)
     just_inside = boundary + timedelta(days=1)
     just_outside = boundary - timedelta(days=1)
     _seed(tmp_path, [d.isoformat() for d in (just_outside, boundary, just_inside, yesterday)])
@@ -217,8 +224,8 @@ def test_no_arguments_derives_the_whole_current_window(mod, monkeypatch, tmp_pat
 
 
 def test_a_start_older_than_the_boundary_is_clamped(mod, monkeypatch, tmp_path, capsys) -> None:
-    end = date(2026, 9, 3)
-    boundary = _window_start(mod, end)
+    end = TODAY - __import__("datetime").timedelta(days=1)
+    boundary = _window_start(mod)
     ancient = date(2020, 1, 2)
     _seed(tmp_path, [ancient.isoformat(), boundary.isoformat(), end.isoformat()])
     stub = _install(mod, monkeypatch, tmp_path)
@@ -248,3 +255,37 @@ def test_the_crontab_line_pins_no_dates(mod) -> None:
     assert not re.search(r"\d{4}-\d{2}-\d{2}", line), (
         f"crontab pins a date, which will drift past the boundary: {line}"
     )
+
+
+def test_a_historical_end_does_not_slide_the_boundary(mod, monkeypatch, tmp_path) -> None:
+    """The bug Copilot caught: `end` caps the range, it does not move the wall.
+
+    Deriving the boundary from `end` meant asking for an older end quietly
+    re-admitted sessions that had already expired -- exactly the wasted
+    requests this script exists to avoid.
+    """
+    from datetime import timedelta
+
+    boundary = _window_start(mod)
+    expired = boundary - timedelta(days=5)
+    end = TODAY - timedelta(days=200)
+    _seed(tmp_path, [expired.isoformat(), boundary.isoformat(), end.isoformat()])
+    stub = _install(mod, monkeypatch, tmp_path)
+
+    assert mod.main([expired.isoformat(), end.isoformat()]) == 0
+    asked = [d.isoformat() for d in stub.calls]
+    assert expired.isoformat() not in asked, (
+        "a historical --end slid the boundary back and admitted an expired session"
+    )
+    assert boundary.isoformat() in asked
+
+
+def test_a_future_end_does_not_skip_fetchable_sessions(mod, monkeypatch, tmp_path) -> None:
+    from datetime import timedelta
+
+    boundary = _window_start(mod)
+    end = TODAY + timedelta(days=90)
+    _seed(tmp_path, [boundary.isoformat(), (TODAY - timedelta(days=1)).isoformat()])
+    stub = _install(mod, monkeypatch, tmp_path)
+    assert mod.main([boundary.isoformat(), end.isoformat()]) == 0
+    assert boundary.isoformat() in [d.isoformat() for d in stub.calls]

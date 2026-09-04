@@ -7,7 +7,7 @@ so these assert both directions explicitly.
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 from ingest.common import landing
@@ -380,3 +380,158 @@ def test_main_defaults_date_to_the_previous_trading_day(monkeypatch) -> None:
                         lambda job, fn, argv: seen.setdefault("argv", argv))
     audit.main([])
     assert seen["argv"][0] == "--date"
+
+
+# ---------------------------------------------------------------------------
+# Underlying history against the rolling entitlement window
+#
+# The equity aggregate endpoints only serve ~2 years back, so unlike the
+# option flat files this history expires. The job ran faithfully every morning
+# for T-1 while holding four days in total, and nothing noticed.
+# ---------------------------------------------------------------------------
+
+def _land_underlying(root: Path, dataset: str, days: list[date]) -> None:
+    for d in days:
+        part = root / "clean" / dataset / f"dt={d.isoformat()}"
+        part.mkdir(parents=True, exist_ok=True)
+        (part / "underlying_bars-SPY-1.parquet").write_bytes(b"")
+
+
+def _seed_manifest(root: Path, sessions: list[date]) -> None:
+    """Write the flat-file manifest the window check reads sessions from."""
+    from ingest.common import landing
+    from ingest.jobs.flatfile_pull import SESSION_ORACLE
+
+    path = landing.meta_path("flatfile_manifest.json", root)
+    path.write_text(
+        json.dumps([{"dataset": SESSION_ORACLE, "date": d.isoformat(), "md5": "x"}
+                    for d in sessions]),
+        encoding="utf-8",
+    )
+
+
+def _sessions(settings: Settings, start: date, end: date) -> list[date]:
+    """Weekday sessions, seeded into the manifest so the check can see them."""
+    from datetime import timedelta
+
+    out, d = [], start
+    while d <= end:
+        if d.weekday() < 5:
+            out.append(d)
+        d += timedelta(days=1)
+    _seed_manifest(Path(settings.data_root), out)
+    return out
+
+
+def _full_window(settings: Settings, d: date) -> list[date]:
+    from datetime import timedelta
+
+    start = d - timedelta(days=audit.UNDERLYING_ENTITLEMENT_DAYS)
+    return _sessions(settings, start, d)
+
+
+def test_underlying_window_passes_when_the_window_is_complete(tmp_path) -> None:
+    s = _settings(tmp_path)
+    days = _full_window(s, RUN_DATE)
+    for ds in audit.UNDERLYING_DATASETS:
+        _land_underlying(tmp_path, ds, days)
+    checks = {c.name: c for c in audit.check_underlying_window(s, RUN_DATE)}
+    for ds in audit.UNDERLYING_DATASETS:
+        assert checks[f"{ds}_window"].status == audit.PASS, checks[f"{ds}_window"].detail
+        assert checks[f"{ds}[{RUN_DATE}]"].status == audit.PASS
+
+
+def test_missing_yesterday_fails_even_with_a_full_history(tmp_path) -> None:
+    """The daily job breaking is a different failure from an old hole."""
+    s = _settings(tmp_path)
+    days = [d for d in _full_window(s, RUN_DATE) if d != RUN_DATE]
+    for ds in audit.UNDERLYING_DATASETS:
+        _land_underlying(tmp_path, ds, days)
+    checks = {c.name: c for c in audit.check_underlying_window(s, RUN_DATE)}
+    assert checks[f"underlying_minute_bars[{RUN_DATE}]"].status == audit.FAIL
+
+
+def test_a_hole_in_the_middle_warns_because_it_is_still_fetchable(tmp_path) -> None:
+    from datetime import timedelta
+
+    s = _settings(tmp_path)
+    window = _full_window(s, RUN_DATE)
+    # Drop a session comfortably inside the window, away from the old edge.
+    victim = window[len(window) // 2]
+    assert victim > window[0] + timedelta(days=audit.UNDERLYING_EDGE_DAYS)
+    for ds in audit.UNDERLYING_DATASETS:
+        _land_underlying(tmp_path, ds, [d for d in window if d != victim])
+    checks = {c.name: c for c in audit.check_underlying_window(s, RUN_DATE)}
+    got = checks["underlying_minute_bars_window"]
+    assert got.status == audit.WARN
+    assert got.data["missing"] == 1 and got.data["expiring"] == 0
+    # Named exactly, because a remediation hint that points at a file which
+    # does not exist sends an operator to a failing command.
+    assert "scripts/backfill_underlying.py" in got.detail
+    assert (Path(__file__).resolve().parent.parent
+            / "scripts" / "backfill_underlying.py").is_file()
+
+
+def test_a_hole_about_to_expire_fails(tmp_path) -> None:
+    """Inside the edge zone, "later" has stopped being an option."""
+    s = _settings(tmp_path)
+    window = _full_window(s, RUN_DATE)
+    victim = window[0]
+    for ds in audit.UNDERLYING_DATASETS:
+        _land_underlying(tmp_path, ds, [d for d in window if d != victim])
+    checks = {c.name: c for c in audit.check_underlying_window(s, RUN_DATE)}
+    got = checks["underlying_minute_bars_window"]
+    assert got.status == audit.FAIL
+    assert got.data["expiring"] == 1
+    assert "unrecoverable" in got.detail
+
+
+def test_window_does_not_reach_past_the_entitlement_boundary(tmp_path) -> None:
+    """Hunting past ~2 years would report expected 403s as gaps forever."""
+    from datetime import timedelta
+
+    s = _settings(tmp_path)
+    _land_underlying(tmp_path, "underlying_minute_bars", _full_window(s, RUN_DATE))
+    checks = {c.name: c for c in audit.check_underlying_window(s, RUN_DATE)}
+    got = checks["underlying_minute_bars_window"]
+    assert got.status == audit.PASS
+    start = date.fromisoformat(got.data["window_start"])
+    assert RUN_DATE - start == timedelta(days=audit.UNDERLYING_ENTITLEMENT_DAYS)
+    assert start > RUN_DATE - timedelta(days=365 * 2)
+
+
+def test_underlying_window_is_part_of_the_daily_run(tmp_path) -> None:
+    s = _settings(tmp_path)
+    names = {c.name for c in audit.run_checks(s, RUN_DATE, _logger())}
+    assert any(n.endswith("_window") for n in names), names
+
+
+def test_past_holidays_are_not_reported_as_missing_sessions(tmp_path) -> None:
+    """The bug that made this check unable to ever pass.
+
+    holidays.json comes from /v1/marketstatus/upcoming, so it knows nothing
+    about past holidays and market_gate fails open on every historical
+    weekday. Enumerating sessions that way reported Christmas 2024 as a
+    permanently missing session. The manifest is the vendor's own record of
+    which days it published a tape for.
+    """
+    s = _settings(tmp_path)
+    window = _sessions(s, RUN_DATE - timedelta(days=10), RUN_DATE)
+    christmas = date(2024, 12, 25)
+    assert christmas.weekday() < 5, "fixture assumes a weekday holiday"
+    # Seed a manifest that includes the window but deliberately omits a
+    # weekday the vendor never published: the check must not miss it.
+    _seed_manifest(tmp_path, window)
+    for ds in audit.UNDERLYING_DATASETS:
+        _land_underlying(tmp_path, ds, window)
+    checks = {c.name: c for c in audit.check_underlying_window(s, RUN_DATE)}
+    got = checks["underlying_minute_bars_window"]
+    assert got.status == audit.PASS, got.detail
+    assert got.data["sessions"] == len(window)
+
+
+def test_no_manifest_skips_rather_than_alarming(tmp_path) -> None:
+    """Without the oracle there is no honest answer, so do not invent one."""
+    s = _settings(tmp_path)
+    checks = audit.check_underlying_window(s, RUN_DATE)
+    assert any(c.status == audit.SKIP for c in checks), [c.name for c in checks]

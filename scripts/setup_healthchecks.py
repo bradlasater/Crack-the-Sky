@@ -80,6 +80,11 @@ JOBS: dict[str, tuple[str, int, str]] = {
     "term_structure":   ("0 12 * * 2-6",    120, "ATM vol term structure from T-1 day bars (derived, rebuildable)"),
     "coverage_audit":   ("30 12 * * 2-6",   180, "Did yesterday actually land? Fails loudly if not"),
     "history_audit":    ("0 13 * * 6",      300, "Is the whole archive still complete? Weekly, vendor-verified"),
+    # Chips away at the rolling ~2-year equity-aggregate window. Without its
+    # own check a dead backfill would stay invisible until coverage_audit's
+    # *_window check escalated a gap to FAIL at the 30-day edge -- far too
+    # late for data that cannot be re-fetched afterwards.
+    "backfill_underlying": ("30 2 * * *",   60,  "Underlying history backfill (expiring window)"),
     "drift_check":      ("0 17 * * 1-5",    60,  "Own IV/Greeks identity canary (vendor diffs diagnostic). After EOD snapshot."),
 }
 

@@ -75,6 +75,25 @@ LOG=/data/massive/logs/cron.log
 # --- underlying ------------------------------------------------------------
 05 08 * * 2-6    cd $REPO && bash scripts/cronjob.sh underlying_bars $PY -m ingest.jobs.underlying_bars --prev-trading-day >> $LOG 2>&1
 10 08 * * 2-6    cd $REPO && bash scripts/cronjob.sh grouped_daily $PY -m ingest.jobs.grouped_daily >> $LOG 2>&1
+# Underlying history chips away at the rolling entitlement window. The equity
+# aggregate endpoints only serve ~2 years back (probed 2026-09-03: 2024-09-03
+# is 200, 2024-06-03 is 403), so a session not fetched before it ages out is
+# gone -- the only expiring dataset here other than option_snapshots.
+#
+# Bounded and paced deliberately. These endpoints throttle far harder than
+# /v3/trades (grouped_daily returns the whole US market per call), and the API
+# budget belongs to option_snapshots first, so this takes a small bite nightly
+# at 02:30 -- far outside the capture window -- and finishes over a couple of
+# weeks. Once the window is full it costs nothing: existing partitions are
+# skipped without a request.
+#
+# Monitored twice over, because the two failures look nothing alike: its own
+# Healthchecks entry catches the job dying or erroring, and coverage_audit's
+# *_window checks catch the window developing a hole regardless of why. The
+# first alone would miss a job that runs and quietly achieves nothing; the
+# second alone would not notice until a gap drifted within 30 days of expiry.
+30 02 * * *      cd $REPO && bash scripts/cronjob.sh backfill_underlying $PY scripts/backfill_underlying.py 2024-09-04 $(date -I -d yesterday) --max-sessions 40 --sleep 6 >> $LOG 2>&1
+
 # Treasury curve: the discount rate every IV inversion uses. 2 requests.
 # History is already walked back to 1962; `--full` resumes if that changes.
 20 08 * * 2-6    cd $REPO && bash scripts/cronjob.sh rates_sync $PY -m ingest.jobs.rates_sync >> $LOG 2>&1

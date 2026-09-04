@@ -4,7 +4,8 @@ Behaviour verified against the live API (see SPEC.md):
   * Auth is an ``apiKey`` query parameter; ``next_url`` values do NOT include
     it, so pagination must re-append the key.
   * 403 responses carry ``{"status": "NOT_AUTHORIZED", ...}`` and mean the
-    current plan tier is not entitled to the endpoint -> PermissionError.
+    current plan tier is not entitled to the endpoint -> NotEntitledError
+    (a PermissionError subclass, so existing handlers still match).
   * No ``X-RateLimit-*`` headers exist. Requests pass through a shared
     :class:`~ingest.common.ratelimit.TokenBucket` (so concurrent jobs bound
     their *total* outbound rate) and 429/5xx/network errors are retried with
@@ -48,6 +49,17 @@ RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 _APIKEY_RE = re.compile(r"(apiKey=)[^&\s]*", re.IGNORECASE)
 
 log = logging.getLogger(__name__)
+
+
+class NotEntitledError(PermissionError):
+    """HTTP 403: the plan tier does not cover this endpoint or timeframe.
+
+    Subclasses ``PermissionError`` so existing handlers keep working, but is
+    its own type because callers need to tell "the vendor will not serve this"
+    apart from an ordinary ``PermissionError`` such as EACCES on a parquet
+    write. A backfill that conflates the two treats a broken disk as an
+    expected entitlement miss and exits 0.
+    """
 
 
 class MassiveHTTPError(requests.HTTPError):
@@ -111,7 +123,8 @@ class MassiveClient:
         ``MAX_TRIES`` attempts, 30s timeout).
 
         Raises:
-            PermissionError: on HTTP 403 (tier not entitled to this endpoint).
+            NotEntitledError: on HTTP 403 (tier not entitled to this
+                endpoint or timeframe). Subclasses PermissionError.
             requests.HTTPError: on other non-retryable HTTP errors.
             requests.RequestException: when retries are exhausted.
         """
@@ -129,7 +142,7 @@ class MassiveClient:
                 self._sleep(attempt, f"network error: {detail}")
                 continue
             if resp.status_code == 403:
-                raise PermissionError(self._entitlement_message(url, resp))
+                raise NotEntitledError(self._entitlement_message(url, resp))
             if resp.status_code in RETRYABLE_STATUS:
                 last_exc = MassiveHTTPError(resp.status_code, url)
                 self._sleep(attempt, f"HTTP {resp.status_code}")

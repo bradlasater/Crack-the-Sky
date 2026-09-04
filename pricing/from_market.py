@@ -12,12 +12,36 @@ Vendor theta is per calendar day and vega per 1% vol, so ``diff_theta`` and
 the same conversions ``pricing.drift_check`` compares with); the raw vendor
 columns are also carried unchanged.
 
-Two things here are load-bearing on this data feed:
+Three things here are load-bearing on this data feed:
 
 * **Expiry is an instant.** Settlement is 16:00 ET for SPY/SPXW and 09:30 ET
   for AM-settled SPX (:data:`marketdata.opra.SETTLEMENT_ET`). Using the expiry
   *date* at UTC midnight is 20:00 ET the day before, understating T at every
   tenor and biasing inverted IV by ~108bp at 7 DTE.
+* **Every price here is a traded price, never a mid.** Option NBBO is 403 on
+  this tier -- both ``/v3/quotes`` and the ``quotes_v1`` flat file -- so
+  :attr:`marketdata.types.Quote.market_price` is the last trade, else the
+  session close. There is no bid, no ask and no spread anywhere in the
+  warehouse, and that assumption propagates into every IV and every greek
+  computed from one. Three consequences worth holding onto:
+
+  - A traded price may print anywhere in the spread -- at the bid, at the ask,
+    or inside it -- so inverted IV carries an unknown offset from the mid,
+    bounded in the worst case by roughly half the spread in vol terms. Without
+    NBBO that offset cannot be measured or corrected for, only bounded, and
+    the bound is widest exactly where spreads are widest: the OTM wings the
+    skew is made of. Treat it as noise of unknown sign whose scale grows with
+    illiquidity, not as a symmetric error that averages out over a series.
+  - The usual liquidity screen -- discard quotes wider than some threshold --
+    is unavailable, because there is no width to measure. Volume and open
+    interest are the substitutes the snapshot does carry.
+  - A last trade can be arbitrarily stale on an illiquid strike. The trade's
+    own timestamp is in ``option_snapshots.last_trade_sip_timestamp_ns``, but
+    it is *not* reachable through ``Quote``: ``Quote.asof_ns`` prefers
+    ``underlying_last_updated_ns`` and only falls back to the trade stamp, so
+    a fresh-looking ``asof_ns`` says nothing about the age of ``last``. A
+    staleness filter has to read the raw column.
+
 * **The discount rate comes from the landed Treasury curve** when the caller
   passes ``r=None``, interpolated to the contract's own maturity
   (:mod:`pricing.rates`). A flat 4% against a real 3.84% short end is a small

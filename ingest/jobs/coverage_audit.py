@@ -361,6 +361,110 @@ def check_underlying_coverage(settings: Settings, d: date) -> list[Check]:
     return checks
 
 
+# The equity aggregate endpoints are entitled only inside a ROLLING window,
+# unlike the option flat files, which go back to 2022 and stay there. Probed
+# 2026-09-03: SPY 1-minute aggs return 200 for 2024-09-03 and 403 "Your plan
+# doesn't include this data timeframe" for 2024-06-03.
+#
+# That makes underlying history the second dataset on this box that expires.
+# option_snapshots is the obvious one and is watched everywhere; this one is
+# quieter and was missed completely -- the job ran faithfully every morning
+# for T-1 and nobody noticed it held four days in total, while two years of
+# fetchable sessions aged off the far edge unclaimed.
+#
+# Measured at 2 years; held slightly short so the check does not itself go
+# hunting past the boundary and call an expected 403 a gap.
+UNDERLYING_ENTITLEMENT_DAYS = 365 * 2 - 7
+# Sessions this close to falling out of the window are the last chance to
+# fetch them, so a hole there is a FAIL rather than a WARN.
+UNDERLYING_EDGE_DAYS = 30
+UNDERLYING_DATASETS = ("underlying_minute_bars", "underlying_day_bars")
+
+
+def _window_sessions(settings: Settings, start: date, end: date) -> list[date]:
+    """Real sessions in ``[start, end]``, per the vendor's own record.
+
+    Deliberately not ``market_gate.is_trading_day``: holidays.json is fed by
+    /v1/marketstatus/**upcoming**, so it knows nothing about past holidays and
+    the gate fails open on every historical weekday. Auditing against it would
+    report Christmas 2024 as a permanently missing session and this check
+    would never reach PASS. flatfile_pull's manifest lists the dates the
+    vendor actually published trades_v1 for, which is the same oracle
+    history_audit uses.
+    """
+    from ingest.jobs.flatfile_pull import manifest_dates
+
+    return sorted(
+        d for d in (
+            date.fromisoformat(x)
+            for x in manifest_dates(Path(settings.data_root))
+        )
+        if start <= d <= end
+    )
+
+
+def _missing_sessions(
+    settings: Settings, dataset: str, sessions: list[date]
+) -> list[date]:
+    """Sessions with no clean partition for ``dataset``."""
+    root = _clean_root(settings, dataset)
+    out = []
+    for day in sessions:
+        part = root / f"dt={day.isoformat()}"
+        if not part.is_dir() or not any(part.glob("*.parquet")):
+            out.append(day)
+    return out
+
+
+def check_underlying_window(settings: Settings, d: date) -> list[Check]:
+    """Underlying history, against the window the plan will still serve.
+
+    Two questions, because they fail differently. Did yesterday's scheduled
+    run land? And is any of the still-fetchable history missing -- with what
+    is about to expire called out separately, since that is the part where
+    "later" stops being an option.
+    """
+    checks: list[Check] = []
+    window_start = d - timedelta(days=UNDERLYING_ENTITLEMENT_DAYS)
+    edge_end = window_start + timedelta(days=UNDERLYING_EDGE_DAYS)
+    sessions = _window_sessions(settings, window_start, d)
+    if not sessions:
+        return [Check("underlying_window", SKIP,
+                      "no flat-file manifest to enumerate sessions from", {})]
+
+    for dataset in UNDERLYING_DATASETS:
+        part = _clean_root(settings, dataset) / f"dt={d.isoformat()}"
+        if part.is_dir() and any(part.glob("*.parquet")):
+            checks.append(Check(f"{dataset}[{d}]", PASS, "session captured", {}))
+        else:
+            checks.append(Check(f"{dataset}[{d}]", FAIL,
+                                "no partition -- the daily run did not land", {}))
+
+        missing = _missing_sessions(settings, dataset, sessions)
+        expiring = [m for m in missing if m <= edge_end]
+        total = len(missing)
+        detail = (f"{total} missing of {len(sessions)} sessions in the "
+                  f"fetchable window {window_start.isoformat()}..{d.isoformat()}")
+        data = {"missing": total, "expiring": len(expiring),
+                "sessions": len(sessions),
+                "window_start": window_start.isoformat()}
+        if expiring:
+            checks.append(Check(
+                f"{dataset}_window", FAIL,
+                f"{detail}; {len(expiring)} of them expire within "
+                f"{UNDERLYING_EDGE_DAYS} days (oldest {expiring[0].isoformat()}) "
+                "-- these are unrecoverable once they age out",
+                data))
+        elif total:
+            checks.append(Check(f"{dataset}_window", WARN,
+                                detail + " -- still fetchable, backfill with "
+                                "scripts/backfill_underlying.py", data))
+        else:
+            checks.append(Check(f"{dataset}_window", PASS,
+                                f"complete back to {window_start.isoformat()}", data))
+    return checks
+
+
 def check_websocket(settings: Settings, d: date, logger: JsonlLogger) -> list[Check]:
     """Websocket capture produced files, and how many reconnect gaps."""
     raw = Path(settings.data_root) / "raw" / "option_minute_bars_ws" / f"dt={d.isoformat()}"
@@ -468,6 +572,7 @@ def run_checks(settings: Settings, d: date, logger: JsonlLogger) -> list[Check]:
     checks += check_flatfiles(settings, d)
     checks += check_partitions(settings, d)
     checks += check_underlying_coverage(settings, d)
+    checks += check_underlying_window(settings, d)
     checks += check_websocket(settings, d, logger)
     checks += check_disk(settings, d)
     return checks

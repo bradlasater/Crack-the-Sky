@@ -276,20 +276,9 @@ FLATFILE_DATASET = "trades_v1"
 
 def _completed_flatfile_dates(settings: Settings) -> set[str]:
     """Dates ``flatfile_pull`` has *finished* landing, per its own manifest."""
-    path = landing.meta_path("flatfile_manifest.json", data_root=settings.data_root)
-    try:
-        manifest = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001 - unreadable manifest means "nothing is covered"
-        return set()
-    if not isinstance(manifest, list):
-        return set()
-    return {
-        e["date"]
-        for e in manifest
-        if isinstance(e, dict)
-        and e.get("dataset") == FLATFILE_DATASET
-        and e.get("date")
-    }
+    from ingest.jobs.flatfile_pull import manifest_dates
+
+    return manifest_dates(Path(settings.data_root), FLATFILE_DATASET)
 
 
 def _flatfile_covered(settings: Settings, day: date, completed: set[str]) -> bool:

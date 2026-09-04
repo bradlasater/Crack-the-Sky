@@ -85,8 +85,13 @@ LOG=/data/massive/logs/cron.log
 # budget belongs to option_snapshots first, so this takes a small bite nightly
 # at 02:30 -- far outside the capture window -- and finishes over a couple of
 # weeks. Once the window is full it costs nothing: existing partitions are
-# skipped without a request. Its outcome is monitored by coverage_audit's
-# *_window checks, not by a healthcheck of its own.
+# skipped without a request.
+#
+# Monitored twice over, because the two failures look nothing alike: its own
+# Healthchecks entry catches the job dying or erroring, and coverage_audit's
+# *_window checks catch the window developing a hole regardless of why. The
+# first alone would miss a job that runs and quietly achieves nothing; the
+# second alone would not notice until a gap drifted within 30 days of expiry.
 30 02 * * *      cd $REPO && bash scripts/cronjob.sh backfill_underlying $PY scripts/backfill_underlying.py 2024-09-04 $(date -I -d yesterday) --max-sessions 40 --sleep 6 >> $LOG 2>&1
 
 # Treasury curve: the discount rate every IV inversion uses. 2 requests.

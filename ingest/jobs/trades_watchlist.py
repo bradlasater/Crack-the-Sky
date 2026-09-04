@@ -5,7 +5,10 @@ contract set (see ``ingest.jobs.compute_watchlist``). Cursor state at
 ``_meta/trades_cursor.json`` maps ``{ticker: last_sip_ts_ns}``; each run
 polls ``/v3/trades/{ticker}?timestamp.gte={cursor+1}&sort=timestamp&order=asc``
 and paginates fully (hot contracts do ~1,900 trades/min), then updates the
-cursors and lands clean ``option_trades`` rows with ``src='rest'``.
+cursors and lands clean ``option_trades`` rows with ``src='rest'``, each under
+the ``dt=`` of the day the trade actually happened rather than the day it was
+fetched -- an uncursored first poll returns a contract's whole history, so
+those are routinely not the same day.
 
 Concurrency: the corrected watchlist is ~8,000 tickers (it was ~2,660 while
 SPX was being excluded by a SPY-derived strike band), which is ~26 minutes
@@ -40,6 +43,7 @@ import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, time
+from pathlib import Path
 from typing import Any
 
 from ingest.common import landing, market_gate, ratelimit
@@ -221,6 +225,8 @@ def _poll_ticker(
     max_ts = cursor
     raw: list[dict[str, Any]] = []
     records: list[dict[str, Any]] = []
+    # raw and records are built in lockstep and stay index-aligned --
+    # _by_trade_date zips them to split a run across trade-date partitions.
     for trade in client.paginate(f"{TRADES_PATH}/{ticker}", params=params, limit=1000):
         raw.append({"ticker": ticker, **trade})
         records.append(_trade_record(ticker, trade))
@@ -228,6 +234,47 @@ def _poll_ticker(
         if ts is not None and (max_ts is None or ts > max_ts):
             max_ts = ts
     return ticker, raw, records, max_ts
+
+
+def trade_date(sip_timestamp_ns: int | None, fallback: date) -> date:
+    """ET calendar date a trade happened on; ``fallback`` when it has no stamp.
+
+    Integer seconds, not ``ns / 1e9``: a float cannot hold nanosecond epochs
+    exactly, and a date derived from a rounded instant is a date that can be
+    wrong at midnight.
+    """
+    if sip_timestamp_ns is None:
+        return fallback
+    return datetime.fromtimestamp(
+        sip_timestamp_ns // 1_000_000_000, market_gate.ET
+    ).date()
+
+
+def _by_trade_date(
+    records: list[dict[str, Any]], raw: list[dict[str, Any]], run_date: date
+) -> dict[date, tuple[list[dict[str, Any]], list[dict[str, Any]]]]:
+    """Split one run's output into ``{trade_date: (raw_rows, clean_rows)}``.
+
+    dt= must mean "the day these trades happened", not "the day we happened to
+    fetch them". Those coincide for a warm cursor and diverge badly without
+    one: a contract's first-ever poll has no cursor and returns its entire
+    history, which is how 1,594,219 rows of older trades (87.6% of the
+    partition's REST rows) came to sit under dt=2026-09-01.
+    """
+    out: dict[date, tuple[list, list]] = {}
+    # strict: the lockstep between raw and records is a contract, not a hope.
+    for rec, raw_rec in zip(records, raw, strict=True):
+        d = trade_date(rec.get("sip_timestamp_ns"), run_date)
+        bucket = out.setdefault(d, ([], []))
+        bucket[0].append(raw_rec)
+        bucket[1].append(rec)
+    return out
+
+
+def _flatfile_covered(settings: Settings, day: date) -> bool:
+    """Has ``flatfile_pull`` already landed the authoritative record for ``day``?"""
+    part = Path(settings.data_root) / "clean" / "option_trades" / f"dt={day.isoformat()}"
+    return any(part.glob("flatfile_pull-*.parquet"))
 
 
 def _main_fn(args, settings: Settings, logger: JsonlLogger):
@@ -311,19 +358,50 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger):
 
     if not args.dry_run:
         if records:
-            raw_path = landing.write_raw(
-                "option_trades", run_date, raw_trades, job=JOB,
-                data_root=settings.data_root,
-            )
-            clean_path = landing.write_clean(
-                "option_trades", run_date, records, job=JOB,
-                data_root=settings.data_root,
-            )
+            partitions = _by_trade_date(records, raw_trades, run_date)
+            # An uncursored first poll drags in a contract's whole history --
+            # 2,544 rows across 165 past sessions on 2026-09-03 alone. Filing
+            # those by trade date is correct but pointless: flatfile_pull has
+            # already landed the authoritative, strictly more complete record
+            # for those days, so each would add a one- or two-row parquet to a
+            # partition that was already right. Drop them, and say how many.
+            covered = {d for d in partitions if d != run_date and _flatfile_covered(settings, d)}
+            dropped = sum(len(partitions[d][1]) for d in covered)
+            if covered:
+                logger.log(
+                    "trades_dropped_covered",
+                    rows=dropped,
+                    days=len(covered),
+                    first=min(covered).isoformat(),
+                    last=max(covered).isoformat(),
+                    reason="flat file already holds these sessions",
+                )
+            for day in sorted(set(partitions) - covered):
+                raw_rows, clean_rows = partitions[day]
+                raw_path = landing.write_raw(
+                    "option_trades", day, raw_rows, job=JOB,
+                    data_root=settings.data_root,
+                )
+                clean_path = landing.write_clean(
+                    "option_trades", day, clean_rows, job=JOB,
+                    data_root=settings.data_root,
+                )
+                logger.log(
+                    "trades_written",
+                    dt=day.isoformat(),
+                    rows=len(clean_rows),
+                    backfilled=day != run_date,
+                    raw_path=str(raw_path),
+                    clean_path=str(clean_path),
+                )
+            today_rows = len(partitions.get(run_date, ([], []))[1])
             logger.log(
-                "trades_written",
+                "trades_partitioned",
                 rows=len(records),
-                raw_path=str(raw_path),
-                clean_path=str(clean_path),
+                written=len(records) - dropped,
+                partitions=len(partitions) - len(covered),
+                today=today_rows,
+                other_days=len(records) - today_rows - dropped,
             )
         _save_cursors(settings, cursors)
         _save_poll_state(settings, run_date, run_index, poll_state)

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from ingest.schemas import SCHEMAS
@@ -25,6 +26,23 @@ from ingest.schemas import SCHEMAS
 ASOF_DATASETS: frozenset[str] = frozenset(
     {"option_snapshots", "contracts", "contracts_expired", "forwards"}
 )
+
+# Datasets a partition can hold from more than one source, where the sources
+# overlap. ``option_trades`` is the case: ``flatfile_pull`` lands the
+# authoritative T+1 record for the day, and ``trades_watchlist`` lands a
+# same-day REST approximation of the same trades. Reading the partition whole
+# returns both, which double-counts every trade the two agree on -- measured
+# at ~74% of same-day REST rows on 2026-09-02, with the remainder differing
+# only in timestamp precision (flat files are millisecond-aligned, REST is
+# not), so the true overlap is higher still.
+#
+# There is no defensible default here: "flatfile" is authoritative but does
+# not exist until T+1, and "rest" is the only same-day record but is partial.
+# So the choice is the caller's, and not making it is an error.
+MULTI_SOURCE_DATASETS: frozenset[str] = frozenset({"option_trades"})
+
+# Values of the ``src`` column, which is what the choice actually selects.
+SRC_FLATFILE, SRC_REST = "flatfile", "rest"
 
 
 class CatalogError(ValueError):
@@ -169,11 +187,16 @@ def read_partition(
     dataset: str,
     dt: date,
     data_root: str | os.PathLike[str] | None = None,
+    src: str | None = None,
 ) -> pa.Table:
     """Read every parquet file of one clean partition, schema-validated.
 
     Do not use this for :data:`ASOF_DATASETS` — those double-count. Use
     :func:`read_asof` instead.
+
+    For :data:`MULTI_SOURCE_DATASETS`, ``src`` is required and selects one
+    source ("flatfile" or "rest"); omitting it raises rather than silently
+    returning an overlapping union of the two.
     """
     _schema(dataset)
     if dataset in ASOF_DATASETS:
@@ -181,13 +204,29 @@ def read_partition(
             f"{dataset} is written many times a day; use read_asof "
             "(a whole-partition read double-counts)"
         )
+    if dataset in MULTI_SOURCE_DATASETS:
+        if src is None:
+            raise CatalogError(
+                f"{dataset} partitions hold overlapping sources; pass "
+                f"src={SRC_FLATFILE!r} for the authoritative T+1 record or "
+                f"src={SRC_REST!r} for the same-day REST capture "
+                "(reading both double-counts)"
+            )
+    elif src is not None:
+        raise CatalogError(f"{dataset} has a single source; drop src={src!r}")
+
     root = _data_root(data_root)
     part = _partition_dir(root, dataset, dt)
     files = _parquet_files(part)
     if not files:
         raise CatalogError(f"no parquet in {part}")
     tables = [_read_file(p, dataset) for p in files]
-    return pa.concat_tables(tables)
+    table = pa.concat_tables(tables)
+    if src is not None:
+        table = table.filter(pc.equal(table.column("src"), src))
+        if table.num_rows == 0:
+            raise CatalogError(f"no src={src!r} rows in {part}")
+    return table
 
 
 def read_asof(

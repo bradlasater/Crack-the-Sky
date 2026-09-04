@@ -221,6 +221,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--asof-ns", type=int, default=None)
     parser.add_argument(
+        "--src",
+        default=None,
+        help="source to read for multi-source datasets (option_trades): "
+             "'flatfile' for the authoritative T+1 record, 'rest' for the "
+             "same-day capture. Reading both double-counts.",
+    )
+    parser.add_argument(
         "--data-root",
         default=os.environ.get("DATA_ROOT", "/data/massive"),
     )
@@ -242,7 +249,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.dataset in ASOF_DATASETS:
             table = read_asof(args.dataset, dt, asof_ns=args.asof_ns, data_root=args.data_root)
         else:
-            table = read_partition(args.dataset, dt, data_root=args.data_root)
+            table = read_partition(
+                args.dataset, dt, data_root=args.data_root, src=args.src
+            )
     except (CatalogError, SchemaError) as exc:
         print(f"FAIL  catalog  {exc}", file=sys.stderr)
         return 1

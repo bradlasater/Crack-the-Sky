@@ -549,3 +549,190 @@ def test_partial_failure_still_lands_good_tickers(tmp_path: Path, monkeypatch) -
     assert summary["rows"] == 1
     assert summary["errors"] == 1
     assert job._load_cursors(settings) == {"O:SPY1": 42}
+
+
+# ---------------------------------------------------------------------------
+# Partition by trade date, not fetch date
+#
+# An uncursored first poll returns a contract's entire history, so a single
+# run routinely carries trades from months of sessions. Filing those under the
+# run date is what put 1,594,219 foreign-day rows (87.6%) into dt=2026-09-01.
+# ---------------------------------------------------------------------------
+
+def _ns(y: int, m: int, d: int, hh: int, mm: int) -> int:
+    """Epoch nanoseconds for an ET wall-clock instant."""
+    from datetime import datetime
+
+    from ingest.common import market_gate
+
+    return int(
+        datetime(y, m, d, hh, mm, tzinfo=market_gate.ET).timestamp()
+    ) * 1_000_000_000
+
+
+def test_trade_date_uses_et_not_utc() -> None:
+    from datetime import date as _date
+
+    # 20:00 ET on 2026-09-02 is 00:00 UTC on 2026-09-03: the UTC date is a
+    # different day, and using it would misfile every evening print.
+    assert job.trade_date(_ns(2026, 9, 2, 20, 0), _date(2026, 1, 1)) == _date(2026, 9, 2)
+    assert job.trade_date(_ns(2026, 9, 2, 9, 30), _date(2026, 1, 1)) == _date(2026, 9, 2)
+
+
+def test_trade_date_falls_back_when_unstamped() -> None:
+    from datetime import date as _date
+
+    assert job.trade_date(None, _date(2026, 9, 4)) == _date(2026, 9, 4)
+
+
+def test_trade_date_does_not_lose_nanoseconds_to_float() -> None:
+    """ns / 1e9 cannot represent these exactly; // 1_000_000_000 can."""
+    from datetime import date as _date
+
+    just_before_midnight = _ns(2026, 9, 3, 0, 0) - 1
+    assert job.trade_date(just_before_midnight, _date(2000, 1, 1)) == _date(2026, 9, 2)
+
+
+def test_by_trade_date_splits_a_run_across_sessions() -> None:
+    from datetime import date as _date
+
+    recs = [
+        {"sip_timestamp_ns": _ns(2026, 9, 2, 10, 0)},
+        {"sip_timestamp_ns": _ns(2026, 9, 3, 10, 0)},
+        {"sip_timestamp_ns": _ns(2026, 9, 3, 11, 0)},
+        {"sip_timestamp_ns": None},
+    ]
+    raw = [{"i": i} for i in range(4)]
+    out = job._by_trade_date(recs, raw, _date(2026, 9, 3))
+    assert sorted(out) == [_date(2026, 9, 2), _date(2026, 9, 3)]
+    assert len(out[_date(2026, 9, 2)][1]) == 1
+    # Two stamped + the unstamped one, which falls back to the run date.
+    assert len(out[_date(2026, 9, 3)][1]) == 3
+    # raw stays aligned with clean.
+    assert out[_date(2026, 9, 2)][0] == [{"i": 0}]
+
+
+def test_by_trade_date_requires_raw_and_clean_to_stay_aligned() -> None:
+    from datetime import date as _date
+
+    with pytest.raises(ValueError):
+        job._by_trade_date([{"sip_timestamp_ns": None}], [], _date(2026, 9, 3))
+
+
+def test_run_writes_each_trade_date_to_its_own_partition(monkeypatch, tmp_path) -> None:
+    """The end-to-end property: dt= is the day the trade happened."""
+    import argparse
+    from datetime import date as _date
+
+    from ingest.common.logging_utils import JsonlLogger
+
+    old = _trade(_ns(2026, 5, 14, 10, 0))
+    new = _trade(_ns(2026, 9, 4, 10, 0))
+    s = _settings(tmp_path)
+    monkeypatch.setattr(job, "_now_et", _midsession)
+    monkeypatch.setattr(job, "compute_watchlist", lambda *a, **k: [{"ticker": "O:X"}])
+    monkeypatch.setattr(
+        job, "MassiveClient", lambda *a, **k: _FakeClient({"O:X": [old, new]})
+    )
+    job._main_fn(
+        argparse.Namespace(date="2026-09-04", limit=None, dry_run=False,
+                           force=True, underlying=None),
+        s, JsonlLogger(path=None, echo=False),
+    )
+    parts = sorted(p.name for p in (tmp_path / "clean" / "option_trades").iterdir())
+    assert parts == ["dt=2026-05-14", "dt=2026-09-04"], parts
+
+    import pyarrow.parquet as pq
+    for day in (_date(2026, 5, 14), _date(2026, 9, 4)):
+        files = list((tmp_path / "clean" / "option_trades" / f"dt={day}").glob("*.parquet"))
+        assert len(files) == 1
+        t = pq.read_table(files[0], columns=["sip_timestamp_ns"])
+        got = {job.trade_date(v, day) for v in t.column("sip_timestamp_ns").to_pylist()}
+        assert got == {day}, f"dt={day} holds {got}"
+
+
+def _write_flatfile_marker(root: Path, day: str) -> None:
+    part = root / "clean" / "option_trades" / f"dt={day}"
+    part.mkdir(parents=True, exist_ok=True)
+    (part / "flatfile_pull-1000.parquet").write_bytes(b"")
+
+
+def test_rows_for_days_the_flat_file_already_covers_are_dropped(
+    monkeypatch, tmp_path
+) -> None:
+    """Backfilling a session the authoritative record already holds is noise."""
+    import argparse
+
+    from ingest.common.logging_utils import JsonlLogger
+
+    _write_flatfile_marker(tmp_path, "2026-05-14")
+    s = _settings(tmp_path)
+    monkeypatch.setattr(job, "_now_et", _midsession)
+    monkeypatch.setattr(job, "compute_watchlist", lambda *a, **k: [{"ticker": "O:X"}])
+    monkeypatch.setattr(
+        job,
+        "MassiveClient",
+        lambda *a, **k: _FakeClient(
+            {"O:X": [_trade(_ns(2026, 5, 14, 10, 0)), _trade(_ns(2026, 9, 4, 10, 0))]}
+        ),
+    )
+    job._main_fn(
+        argparse.Namespace(date="2026-09-04", limit=None, dry_run=False,
+                           force=True, underlying=None),
+        s, JsonlLogger(path=None, echo=False),
+    )
+    covered = tmp_path / "clean" / "option_trades" / "dt=2026-05-14"
+    assert list(covered.glob("trades_watchlist-*.parquet")) == [], (
+        "wrote a REST file into a session the flat file already covers"
+    )
+    today = tmp_path / "clean" / "option_trades" / "dt=2026-09-04"
+    assert len(list(today.glob("trades_watchlist-*.parquet"))) == 1
+
+
+def test_uncovered_past_days_are_still_written(monkeypatch, tmp_path) -> None:
+    """Only *covered* days are dropped; a gap the flat file lacks is kept."""
+    import argparse
+
+    from ingest.common.logging_utils import JsonlLogger
+
+    s = _settings(tmp_path)
+    monkeypatch.setattr(job, "_now_et", _midsession)
+    monkeypatch.setattr(job, "compute_watchlist", lambda *a, **k: [{"ticker": "O:X"}])
+    monkeypatch.setattr(
+        job,
+        "MassiveClient",
+        lambda *a, **k: _FakeClient({"O:X": [_trade(_ns(2026, 9, 3, 10, 0))]}),
+    )
+    job._main_fn(
+        argparse.Namespace(date="2026-09-04", limit=None, dry_run=False,
+                           force=True, underlying=None),
+        s, JsonlLogger(path=None, echo=False),
+    )
+    part = tmp_path / "clean" / "option_trades" / "dt=2026-09-03"
+    assert len(list(part.glob("trades_watchlist-*.parquet"))) == 1
+
+
+def test_today_is_never_dropped_even_if_a_flat_file_exists(
+    monkeypatch, tmp_path
+) -> None:
+    """The same-day capture is the point of the job; it outranks the check."""
+    import argparse
+
+    from ingest.common.logging_utils import JsonlLogger
+
+    _write_flatfile_marker(tmp_path, "2026-09-04")
+    s = _settings(tmp_path)
+    monkeypatch.setattr(job, "_now_et", _midsession)
+    monkeypatch.setattr(job, "compute_watchlist", lambda *a, **k: [{"ticker": "O:X"}])
+    monkeypatch.setattr(
+        job,
+        "MassiveClient",
+        lambda *a, **k: _FakeClient({"O:X": [_trade(_ns(2026, 9, 4, 10, 0))]}),
+    )
+    job._main_fn(
+        argparse.Namespace(date="2026-09-04", limit=None, dry_run=False,
+                           force=True, underlying=None),
+        s, JsonlLogger(path=None, echo=False),
+    )
+    part = tmp_path / "clean" / "option_trades" / "dt=2026-09-04"
+    assert len(list(part.glob("trades_watchlist-*.parquet"))) == 1

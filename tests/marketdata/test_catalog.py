@@ -166,3 +166,71 @@ def test_files_by_underlying_buckets_unstamped_and_filters_asof(tmp_path) -> Non
     )
     assert [p.name for p in by_underlying.values()] == ["snapshot_sweep-SPY-1000.parquet"]
     assert [p.name for p in unstamped] == ["hand_written.parquet"]
+
+
+# ---------------------------------------------------------------------------
+# option_trades holds two overlapping sources in one partition
+# ---------------------------------------------------------------------------
+
+def _trade_row(ticker: str, ts_ns: int, src: str) -> dict:
+    return {
+        "ticker": ticker, "price": 1.25, "size": 3, "exchange": 300,
+        "conditions": None, "correction": 0, "trade_id": None,
+        "sequence_number": None, "sip_timestamp_ns": ts_ns,
+        "participant_timestamp_ns": None, "src": src,
+    }
+
+
+def _both_sources(tmp_path) -> None:
+    write_records(
+        partition_path(tmp_path, "option_trades", DT, "flatfile_pull-1000.parquet"),
+        "option_trades",
+        [_trade_row("O:SPY260831C00420000", 1_000_000_000_000_000_000, "flatfile"),
+         _trade_row("O:SPY260831C00420000", 1_000_000_000_100_000_000, "flatfile")],
+    )
+    write_records(
+        partition_path(tmp_path, "option_trades", DT, "trades_watchlist-2000.parquet"),
+        "option_trades",
+        [_trade_row("O:SPY260831C00420000", 1_000_000_000_000_000_000, "rest")],
+    )
+
+
+def test_option_trades_whole_partition_read_requires_a_source(tmp_path) -> None:
+    """Reading both sources returns the same trade twice; make that an error."""
+    _both_sources(tmp_path)
+    with pytest.raises(CatalogError, match="overlapping sources"):
+        read_partition("option_trades", DT, data_root=tmp_path)
+
+
+def test_option_trades_src_selects_one_source(tmp_path) -> None:
+    _both_sources(tmp_path)
+    ff = read_partition("option_trades", DT, data_root=tmp_path, src="flatfile")
+    rest = read_partition("option_trades", DT, data_root=tmp_path, src="rest")
+    assert ff.num_rows == 2
+    assert rest.num_rows == 1
+    assert set(ff.column("src").to_pylist()) == {"flatfile"}
+    assert set(rest.column("src").to_pylist()) == {"rest"}
+
+
+def test_option_trades_missing_source_is_an_error_not_an_empty_table(tmp_path) -> None:
+    """Absence must be loud: a same-day read before flatfile_pull lands."""
+    write_records(
+        partition_path(tmp_path, "option_trades", DT, "trades_watchlist-2000.parquet"),
+        "option_trades",
+        [_trade_row("O:SPY260831C00420000", 1_000_000_000_000_000_000, "rest")],
+    )
+    with pytest.raises(CatalogError, match="no src='flatfile' rows"):
+        read_partition("option_trades", DT, data_root=tmp_path, src="flatfile")
+
+
+def test_src_on_a_single_source_dataset_is_an_error(tmp_path) -> None:
+    """Silently ignoring src would let a typo read the wrong thing forever."""
+    write_records(
+        partition_path(tmp_path, "option_minute_bars", DT, "flatfile_pull-1000.parquet"),
+        "option_minute_bars",
+        [{"ticker": "O:SPY260831C00420000", "window_start_ns": 1_000_000_000_000_000_000,
+          "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1,
+          "transactions": 1, "vwap": 1.0, "src": "flatfile"}],
+    )
+    with pytest.raises(CatalogError, match="single source"):
+        read_partition("option_minute_bars", DT, data_root=tmp_path, src="flatfile")

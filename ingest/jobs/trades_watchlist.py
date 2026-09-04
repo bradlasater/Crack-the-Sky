@@ -167,13 +167,11 @@ def _save_poll_state(
 # is the closing one. It ignores backoff and sweeps every ticker.
 #
 # Without this, a quiet ticker could fall due after the final run and have its
-# closing trades left for the next morning -- where they would land in the
-# *next* session's partition, because dt= is the fetch date. That mis-filing
-# already happens for an unrelated reason (a contract's first-ever poll has no
-# cursor and returns its whole history: 455 rows of 2026-09-02 trades landed
-# in the 2026-09-03 partition with no backoff in production at all), so this
-# does not fix the partitioning. What it does buy is a property worth having:
-# backoff cannot make the close *worse* than it already was.
+# closing trades left for the next morning. Those trades are no longer
+# misfiled when that happens -- _by_trade_date sends them to the session they
+# belong to -- but they would still arrive a day late, and the same-day tape
+# is the entire point of this job. The sweep is about latency now, not
+# partitioning.
 #
 # Cost is one full sweep a day -- ~9,100 requests, ~150s at the current rate.
 CLOSING_SWEEP_AFTER_ET = time(16, 25)
@@ -271,8 +269,48 @@ def _by_trade_date(
     return out
 
 
-def _flatfile_covered(settings: Settings, day: date) -> bool:
-    """Has ``flatfile_pull`` already landed the authoritative record for ``day``?"""
+# The flat-file dataset behind clean/option_trades. A manifest entry for this
+# dataset+date is flatfile_pull's completion record.
+FLATFILE_DATASET = "trades_v1"
+
+
+def _completed_flatfile_dates(settings: Settings) -> set[str]:
+    """Dates ``flatfile_pull`` has *finished* landing, per its own manifest."""
+    path = landing.meta_path("flatfile_manifest.json", data_root=settings.data_root)
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - unreadable manifest means "nothing is covered"
+        return set()
+    if not isinstance(manifest, list):
+        return set()
+    return {
+        e["date"]
+        for e in manifest
+        if isinstance(e, dict)
+        and e.get("dataset") == FLATFILE_DATASET
+        and e.get("date")
+    }
+
+
+def _flatfile_covered(settings: Settings, day: date, completed: set[str]) -> bool:
+    """Has ``flatfile_pull`` already landed the authoritative record for ``day``?
+
+    Both halves are required, and neither is sufficient.
+
+    ``landing.write_clean`` writes straight to the final ``.parquet`` path --
+    no temp-then-rename -- and ``flatfile_pull`` appends its manifest entry
+    only afterwards. The two jobs also overlap: flatfile_pull runs at 11:05
+    and this one runs every five minutes straight through it. So a bare glob
+    can match a half-written or failed-mid-write file, and dropping REST rows
+    on the strength of that -- then persisting cursors past them -- would
+    leave no usable copy of those trades anywhere.
+
+    The manifest entry is the completion record, so require it too. Requiring
+    only the manifest would be wrong in the other direction: an entry with the
+    parquet since pruned is not coverage either.
+    """
+    if day.isoformat() not in completed:
+        return False
     part = Path(settings.data_root) / "clean" / "option_trades" / f"dt={day.isoformat()}"
     return any(part.glob("flatfile_pull-*.parquet"))
 
@@ -365,7 +403,11 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger):
             # already landed the authoritative, strictly more complete record
             # for those days, so each would add a one- or two-row parquet to a
             # partition that was already right. Drop them, and say how many.
-            covered = {d for d in partitions if d != run_date and _flatfile_covered(settings, d)}
+            completed = _completed_flatfile_dates(settings)
+            covered = {
+                d for d in partitions
+                if d != run_date and _flatfile_covered(settings, d, completed)
+            }
             dropped = sum(len(partitions[d][1]) for d in covered)
             if covered:
                 logger.log(

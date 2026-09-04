@@ -651,10 +651,19 @@ def test_run_writes_each_trade_date_to_its_own_partition(monkeypatch, tmp_path) 
         assert got == {day}, f"dt={day} holds {got}"
 
 
-def _write_flatfile_marker(root: Path, day: str) -> None:
+def _write_flatfile_marker(root: Path, day: str, manifest: bool = True) -> None:
+    """Land what a finished flatfile_pull leaves behind: parquet + manifest entry."""
     part = root / "clean" / "option_trades" / f"dt={day}"
     part.mkdir(parents=True, exist_ok=True)
     (part / "flatfile_pull-1000.parquet").write_bytes(b"")
+    if manifest:
+        path = landing.meta_path("flatfile_manifest.json", data_root=root)
+        try:
+            entries = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            entries = []
+        entries.append({"dataset": job.FLATFILE_DATASET, "date": day, "md5": "x"})
+        path.write_text(json.dumps(entries), encoding="utf-8")
 
 
 def test_rows_for_days_the_flat_file_already_covers_are_dropped(
@@ -736,3 +745,66 @@ def test_today_is_never_dropped_even_if_a_flat_file_exists(
     )
     part = tmp_path / "clean" / "option_trades" / "dt=2026-09-04"
     assert len(list(part.glob("trades_watchlist-*.parquet"))) == 1
+
+
+def test_a_parquet_without_a_manifest_entry_is_not_coverage(
+    monkeypatch, tmp_path
+) -> None:
+    """The race Copilot found: write_clean has no temp-then-rename.
+
+    flatfile_pull runs at 11:05 and this job runs straight through it, so a
+    half-written parquet can be sitting at its final path with no manifest
+    entry yet. Treating that as coverage would drop the REST rows and then
+    persist cursors past them, leaving no copy of those trades anywhere.
+    """
+    import argparse
+
+    from ingest.common.logging_utils import JsonlLogger
+
+    _write_flatfile_marker(tmp_path, "2026-05-14", manifest=False)
+    s = _settings(tmp_path)
+    monkeypatch.setattr(job, "_now_et", _midsession)
+    monkeypatch.setattr(job, "compute_watchlist", lambda *a, **k: [{"ticker": "O:X"}])
+    monkeypatch.setattr(
+        job,
+        "MassiveClient",
+        lambda *a, **k: _FakeClient({"O:X": [_trade(_ns(2026, 5, 14, 10, 0))]}),
+    )
+    job._main_fn(
+        argparse.Namespace(date="2026-09-04", limit=None, dry_run=False,
+                           force=True, underlying=None),
+        s, JsonlLogger(path=None, echo=False),
+    )
+    part = tmp_path / "clean" / "option_trades" / "dt=2026-05-14"
+    assert len(list(part.glob("trades_watchlist-*.parquet"))) == 1, (
+        "dropped REST rows on the strength of an unfinished flat-file write"
+    )
+
+
+def test_manifest_entry_without_a_parquet_is_not_coverage(tmp_path) -> None:
+    """The other direction: an entry whose parquet has since been pruned."""
+    from datetime import date as _date
+
+    s = _settings(tmp_path)
+    path = landing.meta_path("flatfile_manifest.json", data_root=tmp_path)
+    path.write_text(
+        json.dumps([{"dataset": job.FLATFILE_DATASET, "date": "2026-05-14"}]),
+        encoding="utf-8",
+    )
+    completed = job._completed_flatfile_dates(s)
+    assert "2026-05-14" in completed
+    assert job._flatfile_covered(s, _date(2026, 5, 14), completed) is False
+
+
+def test_unreadable_manifest_means_nothing_is_covered(tmp_path) -> None:
+    """Fail toward keeping data, never toward dropping it."""
+    from datetime import date as _date
+
+    s = _settings(tmp_path)
+    _write_flatfile_marker(tmp_path, "2026-05-14")
+    landing.meta_path("flatfile_manifest.json", data_root=tmp_path).write_text(
+        "{not json", encoding="utf-8"
+    )
+    completed = job._completed_flatfile_dates(s)
+    assert completed == set()
+    assert job._flatfile_covered(s, _date(2026, 5, 14), completed) is False

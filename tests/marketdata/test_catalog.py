@@ -10,6 +10,7 @@ from marketdata.catalog import (
     AsOfError,
     CatalogError,
     SchemaError,
+    check_src,
     files_by_underlying,
     list_partitions,
     read_asof,
@@ -234,3 +235,30 @@ def test_src_on_a_single_source_dataset_is_an_error(tmp_path) -> None:
     )
     with pytest.raises(CatalogError, match="single source"):
         read_partition("option_minute_bars", DT, data_root=tmp_path, src="flatfile")
+
+
+def test_check_src_rejects_an_unknown_source(tmp_path) -> None:
+    with pytest.raises(CatalogError, match="unknown src"):
+        check_src("option_trades", "flatfle")
+
+
+def test_missing_partition_still_enforces_the_source_rule(tmp_path) -> None:
+    """The rule must not depend on whether that date happens to have landed.
+
+    ``ingest.jobs.read_partition`` short-circuits on a missing partition, so
+    without an explicit check first, option_trades would quietly accept a
+    missing src on every date not yet pulled.
+    """
+    from datetime import date as _date
+
+    from ingest.common.config import Settings
+    from ingest.jobs import read_partition as jobs_read_partition
+
+    settings = Settings(massive_api_key="k", data_root=tmp_path,
+                        log_root=tmp_path / "logs")
+    with pytest.raises(CatalogError, match="overlapping sources"):
+        jobs_read_partition(settings, "option_trades", _date(2001, 1, 1))
+    with pytest.raises(CatalogError, match="single source"):
+        jobs_read_partition(settings, "option_minute_bars", _date(2001, 1, 1), src="rest")
+    # A valid pairing on a missing partition is still just "no rows".
+    assert jobs_read_partition(settings, "option_trades", _date(2001, 1, 1), src="rest") == []

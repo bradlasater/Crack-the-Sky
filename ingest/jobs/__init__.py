@@ -145,6 +145,9 @@ def read_partition(
     -- and for ``catalog.MULTI_SOURCE_DATASETS`` read without an explicit
     ``src``.
     """
+    # Before the shortcut, not after: an invalid dataset/src pairing must fail
+    # the same way whether or not that date happens to have landed yet.
+    catalog.check_src(dataset, src)
     if dt not in partition_dates(settings, dataset):
         return []
     return catalog.read_partition(dataset, dt, settings.data_root, src=src).to_pylist()

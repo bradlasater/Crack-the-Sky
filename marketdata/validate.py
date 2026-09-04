@@ -20,6 +20,7 @@ from marketdata.catalog import (
     ASOF_DATASETS,
     CatalogError,
     SchemaError,
+    check_src,
     list_partitions,
     read_asof,
     read_partition,
@@ -246,6 +247,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
+        # Checked on both branches: read_asof takes no src, so forwarding it
+        # only to read_partition would let --src on an as-of dataset pass
+        # silently -- the opposite of the rule it is meant to enforce.
+        check_src(args.dataset, args.src)
         if args.dataset in ASOF_DATASETS:
             table = read_asof(args.dataset, dt, asof_ns=args.asof_ns, data_root=args.data_root)
         else:

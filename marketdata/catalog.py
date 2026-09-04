@@ -57,6 +57,31 @@ class AsOfError(CatalogError):
     """No file in the partition is at or before the requested instant."""
 
 
+def check_src(dataset: str, src: str | None) -> None:
+    """Validate a ``src`` argument against the dataset. Raises, or returns None.
+
+    Its own function because the rule must not depend on whether data has
+    landed: callers that short-circuit on a missing partition have to apply it
+    *before* short-circuiting, or ``option_trades`` would quietly accept a
+    missing ``src`` on any date not yet pulled.
+    """
+    if dataset in MULTI_SOURCE_DATASETS:
+        if src is None:
+            raise CatalogError(
+                f"{dataset} partitions hold overlapping sources; pass "
+                f"src={SRC_FLATFILE!r} for the authoritative T+1 record or "
+                f"src={SRC_REST!r} for the same-day REST capture "
+                "(reading both double-counts)"
+            )
+        if src not in (SRC_FLATFILE, SRC_REST):
+            raise CatalogError(
+                f"unknown src={src!r} for {dataset}; "
+                f"expected {SRC_FLATFILE!r} or {SRC_REST!r}"
+            )
+    elif src is not None:
+        raise CatalogError(f"{dataset} has a single source; drop src={src!r}")
+
+
 def _data_root(data_root: str | os.PathLike[str] | None = None) -> Path:
     if data_root is not None:
         return Path(data_root)
@@ -204,17 +229,7 @@ def read_partition(
             f"{dataset} is written many times a day; use read_asof "
             "(a whole-partition read double-counts)"
         )
-    if dataset in MULTI_SOURCE_DATASETS:
-        if src is None:
-            raise CatalogError(
-                f"{dataset} partitions hold overlapping sources; pass "
-                f"src={SRC_FLATFILE!r} for the authoritative T+1 record or "
-                f"src={SRC_REST!r} for the same-day REST capture "
-                "(reading both double-counts)"
-            )
-    elif src is not None:
-        raise CatalogError(f"{dataset} has a single source; drop src={src!r}")
-
+    check_src(dataset, src)
     root = _data_root(data_root)
     part = _partition_dir(root, dataset, dt)
     files = _parquet_files(part)

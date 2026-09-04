@@ -7,7 +7,7 @@ so these assert both directions explicitly.
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 from ingest.common import landing
@@ -397,16 +397,29 @@ def _land_underlying(root: Path, dataset: str, days: list[date]) -> None:
         (part / "underlying_bars-SPY-1.parquet").write_bytes(b"")
 
 
-def _sessions(settings: Settings, start: date, end: date) -> list[date]:
-    from datetime import timedelta
+def _seed_manifest(root: Path, sessions: list[date]) -> None:
+    """Write the flat-file manifest the window check reads sessions from."""
+    from ingest.common import landing
+    from ingest.jobs.flatfile_pull import SESSION_ORACLE
 
-    from ingest.common import market_gate
+    path = landing.meta_path("flatfile_manifest.json", root)
+    path.write_text(
+        json.dumps([{"dataset": SESSION_ORACLE, "date": d.isoformat(), "md5": "x"}
+                    for d in sessions]),
+        encoding="utf-8",
+    )
+
+
+def _sessions(settings: Settings, start: date, end: date) -> list[date]:
+    """Weekday sessions, seeded into the manifest so the check can see them."""
+    from datetime import timedelta
 
     out, d = [], start
     while d <= end:
-        if market_gate.is_trading_day(d, settings.data_root):
+        if d.weekday() < 5:
             out.append(d)
         d += timedelta(days=1)
+    _seed_manifest(Path(settings.data_root), out)
     return out
 
 
@@ -487,3 +500,34 @@ def test_underlying_window_is_part_of_the_daily_run(tmp_path) -> None:
     s = _settings(tmp_path)
     names = {c.name for c in audit.run_checks(s, RUN_DATE, _logger())}
     assert any(n.endswith("_window") for n in names), names
+
+
+def test_past_holidays_are_not_reported_as_missing_sessions(tmp_path) -> None:
+    """The bug that made this check unable to ever pass.
+
+    holidays.json comes from /v1/marketstatus/upcoming, so it knows nothing
+    about past holidays and market_gate fails open on every historical
+    weekday. Enumerating sessions that way reported Christmas 2024 as a
+    permanently missing session. The manifest is the vendor's own record of
+    which days it published a tape for.
+    """
+    s = _settings(tmp_path)
+    window = _sessions(s, RUN_DATE - timedelta(days=10), RUN_DATE)
+    christmas = date(2024, 12, 25)
+    assert christmas.weekday() < 5, "fixture assumes a weekday holiday"
+    # Seed a manifest that includes the window but deliberately omits a
+    # weekday the vendor never published: the check must not miss it.
+    _seed_manifest(tmp_path, window)
+    for ds in audit.UNDERLYING_DATASETS:
+        _land_underlying(tmp_path, ds, window)
+    checks = {c.name: c for c in audit.check_underlying_window(s, RUN_DATE)}
+    got = checks["underlying_minute_bars_window"]
+    assert got.status == audit.PASS, got.detail
+    assert got.data["sessions"] == len(window)
+
+
+def test_no_manifest_skips_rather_than_alarming(tmp_path) -> None:
+    """Without the oracle there is no honest answer, so do not invent one."""
+    s = _settings(tmp_path)
+    checks = audit.check_underlying_window(s, RUN_DATE)
+    assert any(c.status == audit.SKIP for c in checks), [c.name for c in checks]

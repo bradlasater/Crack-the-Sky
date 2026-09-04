@@ -32,7 +32,7 @@ import argparse
 import os
 import sys
 import time
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -41,10 +41,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # cli.healthcheck_url return (None, False), so no run here pings anything.
 os.environ["HEALTHCHECKS_PING_KEY"] = ""
 
-from ingest.common import market_gate  # noqa: E402
 from ingest.common.config import Settings  # noqa: E402
 from ingest.common.logging_utils import JsonlLogger  # noqa: E402
 from ingest.jobs import grouped_daily, underlying_bars  # noqa: E402
+from ingest.jobs.flatfile_pull import manifest_dates  # noqa: E402
 
 JOBS = (
     ("underlying_minute_bars", underlying_bars, False),
@@ -68,35 +68,65 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("start")
     ap.add_argument("end")
     ap.add_argument("--sleep", type=float, default=0.0,
-                    help="extra pause between sessions (the shared token "
-                         "bucket already paces the requests)")
+                    help="pause between sessions. The shared token bucket "
+                         "paces request *count*, but charges one token per "
+                         "call regardless of response size, so a heavy "
+                         "endpoint needs pacing the bucket cannot express.")
+    ap.add_argument("--max-sessions", type=int, default=None,
+                    help="stop after this many sessions that needed work. "
+                         "The point of a bounded chunk: these endpoints are "
+                         "throttled far harder than /v3/trades, and the API "
+                         "budget belongs to option_snapshots first, so the "
+                         "backfill is designed to be run nightly and finish "
+                         "over days rather than to be pushed through in one "
+                         "sitting.")
+    ap.add_argument("--datasets", default=",".join(n for n, _, _ in JOBS),
+                    help="comma-separated subset to backfill. Split them when "
+                         "one endpoint is throttled: grouped_daily returns the "
+                         "whole US market per call (12,518 tickers) and 429s "
+                         "at a cadence SPY minute aggs sail through.")
     a = ap.parse_args(argv)
     start, end = date.fromisoformat(a.start), date.fromisoformat(a.end)
     if start > end:
         print("start after end", file=sys.stderr)
         return 2
 
+    wanted = {x.strip() for x in a.datasets.split(",") if x.strip()}
+    unknown = wanted - {n for n, _, _ in JOBS}
+    if unknown:
+        print(f"unknown dataset(s): {sorted(unknown)}", file=sys.stderr)
+        return 2
+    jobs = [j for j in JOBS if j[0] in wanted]
+
     settings = Settings.load()
     logger = JsonlLogger(path=None, echo=False)
-    done = dict.fromkeys((n for n, _, _ in JOBS), 0)
-    had = dict.fromkeys((n for n, _, _ in JOBS), 0)
-    unfetchable = dict.fromkeys((n for n, _, _ in JOBS), 0)
+    done = dict.fromkeys((n for n, _, _ in jobs), 0)
+    had = dict.fromkeys((n for n, _, _ in jobs), 0)
+    unfetchable = dict.fromkeys((n for n, _, _ in jobs), 0)
     failed: list[tuple[str, date, str]] = []
 
-    sessions = []
-    d = start
-    while d <= end:
-        if market_gate.is_trading_day(d, settings.data_root):
-            sessions.append(d)
-        d += timedelta(days=1)
+    # The vendor's own record of which days it published a tape for.
+    # market_gate cannot answer this for the past: holidays.json is fed by
+    # /v1/marketstatus/upcoming, so historical holidays are absent and every
+    # past weekday looks like a session. Asking for Christmas 2024 burns a
+    # request on an endpoint that is throttled hard enough to matter.
+    known = {date.fromisoformat(x) for x in manifest_dates(Path(settings.data_root))}
+    sessions = sorted(d for d in known if start <= d <= end)
+    if not sessions:
+        print("[backfill-underlying] no flat-file manifest; nothing to enumerate",
+              file=sys.stderr)
+        return 2
     print(f"[backfill-underlying] {len(sessions)} sessions {start}..{end}", flush=True)
 
     t0 = time.time()
+    budget_used = 0
     for i, day in enumerate(sessions, 1):
-        for dataset, mod, keep_all in JOBS:
+        worked = False
+        for dataset, mod, keep_all in jobs:
             if _have(settings, dataset, day):
                 had[dataset] += 1
                 continue
+            worked = True
             # The client retries 429 itself, but a long backfill still walks
             # into one occasionally; a transient throttle must not cost a
             # session that will be unfetchable in a few months.
@@ -118,8 +148,14 @@ def main(argv: list[str] | None = None) -> int:
                         failed.append((dataset, day, f"{type(exc).__name__}: {exc}"))
                     else:
                         time.sleep(2 * attempt)
-        if a.sleep:
-            time.sleep(a.sleep)
+        if worked:
+            budget_used += 1
+            if a.sleep:
+                time.sleep(a.sleep)
+        if a.max_sessions is not None and budget_used >= a.max_sessions:
+            print(f"[backfill-underlying] stopping at --max-sessions="
+                  f"{a.max_sessions} (reached {day})", flush=True)
+            break
         if i % 50 == 0 or i == len(sessions):
             rate = i / max(time.time() - t0, 1e-9)
             print(f"[backfill-underlying] {i}/{len(sessions)} {day} "
@@ -127,7 +163,7 @@ def main(argv: list[str] | None = None) -> int:
                   + " ".join(f"{k}:+{v}" for k, v in done.items()), flush=True)
 
     print("\n[backfill-underlying] DONE", flush=True)
-    for dataset, _, _ in JOBS:
+    for dataset, _, _ in jobs:
         print(f"  {dataset:24} written={done[dataset]:4d} "
               f"already_had={had[dataset]:4d} unfetchable={unfetchable[dataset]:4d}",
               flush=True)

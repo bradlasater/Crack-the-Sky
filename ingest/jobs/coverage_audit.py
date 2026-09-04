@@ -381,18 +381,38 @@ UNDERLYING_EDGE_DAYS = 30
 UNDERLYING_DATASETS = ("underlying_minute_bars", "underlying_day_bars")
 
 
+def _window_sessions(settings: Settings, start: date, end: date) -> list[date]:
+    """Real sessions in ``[start, end]``, per the vendor's own record.
+
+    Deliberately not ``market_gate.is_trading_day``: holidays.json is fed by
+    /v1/marketstatus/**upcoming**, so it knows nothing about past holidays and
+    the gate fails open on every historical weekday. Auditing against it would
+    report Christmas 2024 as a permanently missing session and this check
+    would never reach PASS. flatfile_pull's manifest lists the dates the
+    vendor actually published trades_v1 for, which is the same oracle
+    history_audit uses.
+    """
+    from ingest.jobs.flatfile_pull import manifest_dates
+
+    return sorted(
+        d for d in (
+            date.fromisoformat(x)
+            for x in manifest_dates(Path(settings.data_root))
+        )
+        if start <= d <= end
+    )
+
+
 def _missing_sessions(
-    settings: Settings, dataset: str, start: date, end: date
+    settings: Settings, dataset: str, sessions: list[date]
 ) -> list[date]:
-    """Trading days in ``[start, end]`` with no clean partition for ``dataset``."""
+    """Sessions with no clean partition for ``dataset``."""
     root = _clean_root(settings, dataset)
-    out, day = [], start
-    while day <= end:
-        if market_gate.is_trading_day(day, settings.data_root):
-            part = root / f"dt={day.isoformat()}"
-            if not part.is_dir() or not any(part.glob("*.parquet")):
-                out.append(day)
-        day += timedelta(days=1)
+    out = []
+    for day in sessions:
+        part = root / f"dt={day.isoformat()}"
+        if not part.is_dir() or not any(part.glob("*.parquet")):
+            out.append(day)
     return out
 
 
@@ -407,6 +427,10 @@ def check_underlying_window(settings: Settings, d: date) -> list[Check]:
     checks: list[Check] = []
     window_start = d - timedelta(days=UNDERLYING_ENTITLEMENT_DAYS)
     edge_end = window_start + timedelta(days=UNDERLYING_EDGE_DAYS)
+    sessions = _window_sessions(settings, window_start, d)
+    if not sessions:
+        return [Check("underlying_window", SKIP,
+                      "no flat-file manifest to enumerate sessions from", {})]
 
     for dataset in UNDERLYING_DATASETS:
         part = _clean_root(settings, dataset) / f"dt={d.isoformat()}"
@@ -416,12 +440,13 @@ def check_underlying_window(settings: Settings, d: date) -> list[Check]:
             checks.append(Check(f"{dataset}[{d}]", FAIL,
                                 "no partition -- the daily run did not land", {}))
 
-        missing = _missing_sessions(settings, dataset, window_start, d)
+        missing = _missing_sessions(settings, dataset, sessions)
         expiring = [m for m in missing if m <= edge_end]
         total = len(missing)
-        detail = (f"{total} missing of the fetchable window "
-                  f"{window_start.isoformat()}..{d.isoformat()}")
+        detail = (f"{total} missing of {len(sessions)} sessions in the "
+                  f"fetchable window {window_start.isoformat()}..{d.isoformat()}")
         data = {"missing": total, "expiring": len(expiring),
+                "sessions": len(sessions),
                 "window_start": window_start.isoformat()}
         if expiring:
             checks.append(Check(

@@ -168,6 +168,35 @@ def _head_with_retry(
             raise
 
 
+SESSION_ORACLE = "trades_v1"
+
+
+def manifest_dates(data_root: Path, dataset: str = SESSION_ORACLE) -> set[str]:
+    """Dates this job has *finished* landing for ``dataset``, as ISO strings.
+
+    The manifest entry is written after the parquet, so this is a completion
+    record rather than a "file exists" guess.
+
+    It is also the cheapest honest answer to "was this date a session?".
+    ``market_gate`` cannot answer it for the past: holidays.json is fed by
+    /v1/marketstatus/**upcoming**, so historical holidays are simply absent
+    and every past weekday looks like a trading day. The vendor publishes a
+    trades_v1 object only for real sessions, which is why history_audit
+    already treats that dataset as the oracle.
+    """
+    path = landing.meta_path("flatfile_manifest.json", data_root)
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - an unreadable manifest knows nothing
+        return set()
+    if not isinstance(manifest, list):
+        return set()
+    return {
+        e["date"] for e in manifest
+        if isinstance(e, dict) and e.get("dataset") == dataset and e.get("date")
+    }
+
+
 def _manifest_md5(data_root: Path, dataset: str, d: date) -> str | None:
     """The md5 recorded for this dataset+date, if we have pulled it before."""
     path = landing.meta_path("flatfile_manifest.json", data_root)

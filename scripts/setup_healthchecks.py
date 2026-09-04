@@ -51,17 +51,17 @@ JOBS: dict[str, tuple[str, int, str]] = {
     "holidays_sync":    ("0 7 * * 0",       240, "Market calendar refresh (weekly)"),
     "snapshot_sweep":   ("* 10-15 * * 1-5", 10,  "1/min full-chain snapshots - THE irreplaceable dataset"),
     # Grace covers the gap between the 09:25 start and the terminal ping at
-    # the ~16:20 capture end, plus an hour of margin. It was 600 (10h), which
-    # pushed detection of a missing terminal ping to 19:25; 480 brings it to
-    # 17:25 the same day.
+    # the ~16:35 capture end (market_gate.option_capture_end_et), plus ~50
+    # minutes of margin. It was 600 (10h), which pushed detection of a missing
+    # terminal ping to 19:25; 480 brings it to 17:25 the same day.
     "ws_minute_bars":   ("25 9 * * 1-5",    480, "Delayed options websocket capture (long-running)"),
     # The run check above can only answer "did today's capture finish", so a
     # process that dies mid-session stays green until that terminal ping is
     # overdue. This second check is pinged from the job's 5-minute stats tick.
     #
-    # On coverage, precisely: capture runs 09:25 -> ~16:20 and the first stats
+    # On coverage, precisely: capture runs 09:25 -> ~16:35 and the first stats
     # tick lands ~09:30, but one cron expression cannot say "every 5 minutes
-    # from 09:30 to 16:20" -- the minute field applies to every hour in the
+    # from 09:30 to 16:35" -- the minute field applies to every hour in the
     # hour field. Expecting pings outside the capture window would alarm every
     # single day, so the schedule is the widest band that sits entirely
     # inside it. That gives ~10-minute detection between 10:00 and 15:55; a

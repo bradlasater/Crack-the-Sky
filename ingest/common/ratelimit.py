@@ -30,9 +30,26 @@ import threading
 import time
 from pathlib import Path
 
-# Default ceiling. Well above the measured sequential 4.6 req/s so concurrency
-# still buys throughput, but low enough to stay out of the burst-429 regime.
-DEFAULT_RATE = float(os.environ.get("MASSIVE_MAX_RPS", "40"))
+# Default ceiling. Rate and burst are set from different evidence, so they are
+# deliberately no longer the same number.
+#
+# Sustained rate: probed 2026-09-03 after the close, paced GETs on /v3/trades
+# for 15s per tier -- 40, 60, 80 and 100 rps all returned 0 x 429 with flat
+# latency (p50 79-86ms, p95 182-209ms at every tier). The original 40 was set
+# from a single sequential measurement and was far more conservative than the
+# API required. 60 takes a useful part of that headroom without banking all of
+# it: the probe ran with the market closed, when the vendor's own load is at
+# its lowest, so the observed ceiling is an upper bound on the real one.
+#
+# Burst stays at 40. The 429s recorded on 2026-08-31 came from *tight
+# aggregate bursts*, not from sustained pacing, which is the one shape this
+# probe did not test. Keeping burst where it was means the extra allowance is
+# spent as throughput and never as a spike.
+#
+# This is headroom, not the fix. trades_watchlist stopped saturating the
+# bucket when it gained adaptive backoff (~3,700 requests a slot, down from
+# 9,127); this exists so a heavy tape day has somewhere to go.
+DEFAULT_RATE = float(os.environ.get("MASSIVE_MAX_RPS", "60"))
 DEFAULT_BURST = float(os.environ.get("MASSIVE_BURST", "40"))
 
 # Fraction of the bucket that low-priority callers may not touch.

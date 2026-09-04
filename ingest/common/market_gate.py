@@ -30,7 +30,30 @@ ET = ZoneInfo(os.environ.get("TZ_NAME", "America/New_York"))
 
 REGULAR_CLOSE = time(16, 0)
 EARLY_CLOSE = time(13, 0)
-OPTION_CAPTURE_BUFFER = timedelta(minutes=20)
+
+# Capture has to outlive the close by two independent margins, so the buffer
+# is derived from them rather than picked. A flat "close + 20" looked generous
+# and silently truncated every session:
+#
+#   +15  options keep trading to 16:15 ET, past the 16:00 equity close
+#   +15  wss://delayed.massive.com is a 15-minute delayed feed
+#   + 1  a minute bar is only delivered once its own window has closed
+#   + 4  margin for delivery jitter
+#
+# Measured 2026-09-01..03: bars arrived a constant 962.7s after their window
+# start -- exactly the 15-minute delay plus the 60s bar. Under close+20 the
+# last bar ever captured therefore started at 16:03, and 16:04-16:15 were
+# dropped every day: 6,927 SPY/SPX/VIX rows on 2026-09-02 alone, 63% of that
+# session's reconcile delta. Flat files carry the same bars, so this was lost
+# convenience rather than lost data -- but reconcile reported it as generic
+# drift, which is the expensive part.
+OPTION_CLOSE_LAG = timedelta(minutes=15)
+WS_FEED_DELAY = timedelta(minutes=15)
+WS_BAR_WINDOW = timedelta(minutes=1)
+WS_DELIVERY_MARGIN = timedelta(minutes=4)
+OPTION_CAPTURE_BUFFER = (
+    OPTION_CLOSE_LAG + WS_FEED_DELAY + WS_BAR_WINDOW + WS_DELIVERY_MARGIN
+)
 
 # Cache of parsed holidays.json keyed by resolved file path.
 _holiday_cache: dict[Path, list[dict]] = {}
@@ -131,8 +154,10 @@ def market_close_et(d: date, data_root: str | os.PathLike[str] | None = None) ->
 
 
 def option_capture_end_et(d: date, data_root: str | os.PathLike[str] | None = None) -> datetime:
-    """End of option-data capture for ``d``: market close + 20 min buffer.
+    """End of option-data capture for ``d``: close + :data:`OPTION_CAPTURE_BUFFER`.
 
-    Covers the 15-minute delayed feed plus the 16:15 options close tail.
+    35 minutes, so the deadline reaches the *delivery* of the last option bar
+    rather than its timestamp: 16:15 options close, plus the delayed feed's
+    15 minutes, plus the bar window. See the constant for the measurement.
     """
     return market_close_et(d, data_root) + OPTION_CAPTURE_BUFFER

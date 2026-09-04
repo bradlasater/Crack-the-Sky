@@ -106,7 +106,10 @@
       <h2 id="knobs-code-tuning">Code-side knobs</h2>
       <p>
         Also in code, not in <code>.env.example</code>:
-        <code>MASSIVE_MAX_RPS</code> / <code>MASSIVE_BURST</code> (40),
+        <code>MASSIVE_MAX_RPS</code> (60 — sustained; probed clean to 100 rps
+        on 2026-09-03) and <code>MASSIVE_BURST</code> (40 — held back
+        deliberately, because the 429s seen on 2026-08-31 came from tight
+        bursts rather than sustained pacing),
         <code>MASSIVE_RATELIMIT_SHARED</code> (1 — the token bucket is
         cross-process by default, so every job on the box draws on one
         allowance rather than one each; set 0 for the old per-process

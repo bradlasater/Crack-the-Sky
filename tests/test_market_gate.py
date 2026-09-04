@@ -10,7 +10,7 @@ The frozen holiday calendar (tests/fixtures/holidays.json, derived from a real
 from __future__ import annotations
 
 import shutil
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -68,11 +68,31 @@ def test_regular_close_is_1600(data_root: Path) -> None:
     assert (close.hour, close.minute) == (16, 0)
 
 
-def test_option_capture_end_is_close_plus_20min(data_root: Path) -> None:
-    assert market_gate.option_capture_end_et(date(2026, 9, 8), data_root) == (
-        market_gate.market_close_et(date(2026, 9, 8), data_root) + timedelta(minutes=20)
+def test_option_capture_end_is_close_plus_the_derived_buffer(data_root: Path) -> None:
+    day = date(2026, 9, 8)
+    assert market_gate.option_capture_end_et(day, data_root) == (
+        market_gate.market_close_et(day, data_root) + market_gate.OPTION_CAPTURE_BUFFER
     )
-    assert market_gate.option_capture_end_et(date(2026, 11, 27), data_root).hour == 13
+    # Early closes move the deadline with the close, not to a fixed clock time.
+    early = market_gate.option_capture_end_et(date(2026, 11, 27), data_root)
+    assert (early.hour, early.minute) == (13, 35)
+
+
+def test_capture_deadline_outlives_the_last_option_bar_delivery(data_root: Path) -> None:
+    """The regression that made this a derived constant.
+
+    A "generous-looking" close+20 stopped capture at 16:20 while the delayed
+    feed was still delivering 16:04-16:15, so the closing minutes were dropped
+    every session. Assert the property that was actually wanted: the deadline
+    must survive until the *last* option bar has been delivered.
+    """
+    day = date(2026, 9, 8)
+    close = market_gate.market_close_et(day, data_root)
+    # Window start of the final option bar, delivered a feed-delay plus its
+    # own one-minute window later.
+    last_bar_start = close + market_gate.OPTION_CLOSE_LAG - market_gate.WS_BAR_WINDOW
+    delivered = last_bar_start + market_gate.WS_FEED_DELAY + market_gate.WS_BAR_WINDOW
+    assert market_gate.option_capture_end_et(day, data_root) >= delivered
 
 
 def test_require_trading_day_exits_0_quietly_on_closed(data_root: Path, capsys) -> None:

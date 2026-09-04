@@ -133,17 +133,24 @@ def latest_partition(
     return candidates[-1] if candidates else None
 
 
-def read_partition(settings: Settings, dataset: str, dt: date) -> list[dict[str, Any]]:
+def read_partition(
+    settings: Settings, dataset: str, dt: date, src: str | None = None
+) -> list[dict[str, Any]]:
     """Read every parquet file of one clean partition into a list of dicts.
 
     Schema-validated by ``catalog.read_partition``; returns [] when the
     partition does not exist (a missing partition is not an error for the
     jobs that poll for landed data). Raises ``CatalogError`` for datasets
-    written many times a day -- those double-count on a whole-partition read.
+    written many times a day -- those double-count on a whole-partition read
+    -- and for ``catalog.MULTI_SOURCE_DATASETS`` read without an explicit
+    ``src``.
     """
+    # Before the shortcut, not after: an invalid dataset/src pairing must fail
+    # the same way whether or not that date happens to have landed yet.
+    catalog.check_src(dataset, src)
     if dt not in partition_dates(settings, dataset):
         return []
-    return catalog.read_partition(dataset, dt, settings.data_root).to_pylist()
+    return catalog.read_partition(dataset, dt, settings.data_root, src=src).to_pylist()
 
 
 def latest_clean_records(

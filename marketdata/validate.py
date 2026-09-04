@@ -20,6 +20,7 @@ from marketdata.catalog import (
     ASOF_DATASETS,
     CatalogError,
     SchemaError,
+    check_src,
     list_partitions,
     read_asof,
     read_partition,
@@ -221,6 +222,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--asof-ns", type=int, default=None)
     parser.add_argument(
+        "--src",
+        default=None,
+        help="source to read for multi-source datasets (option_trades): "
+             "'flatfile' for the authoritative T+1 record, 'rest' for the "
+             "same-day capture. Reading both double-counts.",
+    )
+    parser.add_argument(
         "--data-root",
         default=os.environ.get("DATA_ROOT", "/data/massive"),
     )
@@ -239,10 +247,16 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
+        # Checked on both branches: read_asof takes no src, so forwarding it
+        # only to read_partition would let --src on an as-of dataset pass
+        # silently -- the opposite of the rule it is meant to enforce.
+        check_src(args.dataset, args.src)
         if args.dataset in ASOF_DATASETS:
             table = read_asof(args.dataset, dt, asof_ns=args.asof_ns, data_root=args.data_root)
         else:
-            table = read_partition(args.dataset, dt, data_root=args.data_root)
+            table = read_partition(
+                args.dataset, dt, data_root=args.data_root, src=args.src
+            )
     except (CatalogError, SchemaError) as exc:
         print(f"FAIL  catalog  {exc}", file=sys.stderr)
         return 1

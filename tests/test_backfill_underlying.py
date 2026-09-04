@@ -182,3 +182,69 @@ def test_sessions_come_from_the_manifest_not_the_calendar(mod, monkeypatch, tmp_
     stub = _install(mod, monkeypatch, tmp_path)
     assert _run(mod) == 0
     assert "2026-08-26" not in [d.isoformat() for d in stub.calls]
+
+
+# ---------------------------------------------------------------------------
+# The window must move with the entitlement boundary
+#
+# A pinned start date drifts past the boundary at one session a day, and the
+# job then spends its nightly budget re-requesting sessions that have already
+# expired -- forever, on data that no longer exists.
+# ---------------------------------------------------------------------------
+
+def _window_start(mod, end: date) -> date:
+    from datetime import timedelta
+
+    return end - timedelta(days=mod.UNDERLYING_ENTITLEMENT_DAYS)
+
+
+def test_no_arguments_derives_the_whole_current_window(mod, monkeypatch, tmp_path) -> None:
+    """How cron invokes it: no dates at all."""
+    from datetime import timedelta
+
+    yesterday = date.today() - timedelta(days=1)
+    boundary = _window_start(mod, yesterday)
+    just_inside = boundary + timedelta(days=1)
+    just_outside = boundary - timedelta(days=1)
+    _seed(tmp_path, [d.isoformat() for d in (just_outside, boundary, just_inside, yesterday)])
+    stub = _install(mod, monkeypatch, tmp_path)
+
+    assert mod.main([]) == 0
+    asked = [d.isoformat() for d in stub.calls]
+    assert just_outside.isoformat() not in asked, "asked for an expired session"
+    assert boundary.isoformat() in asked, "did not reach back to the boundary"
+    assert yesterday.isoformat() in asked, "did not reach forward to yesterday"
+
+
+def test_a_start_older_than_the_boundary_is_clamped(mod, monkeypatch, tmp_path, capsys) -> None:
+    end = date(2026, 9, 3)
+    boundary = _window_start(mod, end)
+    ancient = date(2020, 1, 2)
+    _seed(tmp_path, [ancient.isoformat(), boundary.isoformat(), end.isoformat()])
+    stub = _install(mod, monkeypatch, tmp_path)
+    assert mod.main([ancient.isoformat(), end.isoformat()]) == 0
+    asked = [d.isoformat() for d in stub.calls]
+    assert ancient.isoformat() not in asked, (
+        "requested a session that is past the entitlement boundary"
+    )
+    assert boundary.isoformat() in asked
+    assert "clamping" in capsys.readouterr().out
+
+
+def test_the_derived_window_matches_what_coverage_audit_audits(mod) -> None:
+    """One constant, so the backfill and the audit cannot disagree."""
+    from ingest.jobs.coverage_audit import UNDERLYING_ENTITLEMENT_DAYS
+
+    assert mod.UNDERLYING_ENTITLEMENT_DAYS == UNDERLYING_ENTITLEMENT_DAYS
+
+
+def test_the_crontab_line_pins_no_dates(mod) -> None:
+    """The regression this guards: a literal start date in deploy/crontab."""
+    import re
+
+    crontab = (ROOT / "deploy" / "crontab").read_text()
+    line = next(ln for ln in crontab.splitlines()
+                if "backfill_underlying.py" in ln and not ln.lstrip().startswith("#"))
+    assert not re.search(r"\d{4}-\d{2}-\d{2}", line), (
+        f"crontab pins a date, which will drift past the boundary: {line}"
+    )

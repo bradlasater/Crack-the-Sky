@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""backfill_underlying.py START END — underlying history, in one process.
+"""backfill_underlying.py [START [END]] — underlying history, in one process.
 
 Why this exists, and why it is more urgent than ``scripts/backfill.sh``: the
 equity aggregate endpoints are entitled only inside a ROLLING ~2-year window.
@@ -29,7 +29,9 @@ liveness of its own. Relying only on coverage_audit's ``*_window`` checks
 would mean a dead backfill stays invisible until a gap drifts within 30 days
 of expiry, which is exactly the outcome this whole thing exists to prevent.
 
-    venv/bin/python scripts/backfill_underlying.py 2024-09-04 2026-09-02
+    venv/bin/python scripts/backfill_underlying.py                 # the whole window
+    venv/bin/python scripts/backfill_underlying.py 2026-08-01      # from a date
+    venv/bin/python scripts/backfill_underlying.py 2026-08-01 2026-08-31
 """
 
 from __future__ import annotations
@@ -37,16 +39,18 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from ingest.common import market_gate  # noqa: E402
 from ingest.common.cli import healthcheck_url, ping  # noqa: E402
 from ingest.common.config import Settings  # noqa: E402
 from ingest.common.http_client import NotEntitledError  # noqa: E402
 from ingest.common.logging_utils import JsonlLogger  # noqa: E402
 from ingest.jobs import grouped_daily, underlying_bars  # noqa: E402
+from ingest.jobs.coverage_audit import UNDERLYING_ENTITLEMENT_DAYS  # noqa: E402
 from ingest.jobs.flatfile_pull import manifest_dates  # noqa: E402
 
 # Attempts per dataset-day before a session is recorded as failed.
@@ -58,6 +62,11 @@ JOBS = (
     ("underlying_minute_bars", underlying_bars, False),
     ("underlying_day_bars", grouped_daily, True),
 )
+
+
+def _today() -> date:
+    """Indirection so tests can freeze the clock the boundary is derived from."""
+    return market_gate.today_et()
 
 
 def _have(settings: Settings, dataset: str, d: date) -> bool:
@@ -73,8 +82,18 @@ def _args(d: date) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("start")
-    ap.add_argument("end")
+    ap.add_argument(
+        "start", nargs="?", default=None,
+        help="oldest session to fetch. Defaults to the entitlement boundary, "
+             "and a value older than it is clamped up to it. Pinning a literal "
+             "date here is a bug waiting to happen: the boundary moves forward "
+             "one session a day, so a fixed start drifts past it and the job "
+             "spends its nightly budget re-requesting days that expired.",
+    )
+    ap.add_argument(
+        "end", nargs="?", default=None,
+        help="newest session to fetch (default: yesterday).",
+    )
     ap.add_argument("--sleep", type=float, default=0.0,
                     help="pause between sessions. The shared token bucket "
                          "paces request *count*, but charges one token per "
@@ -94,7 +113,20 @@ def main(argv: list[str] | None = None) -> int:
                          "whole US market per call (12,518 tickers) and 429s "
                          "at a cadence SPY minute aggs sail through.")
     a = ap.parse_args(argv)
-    start, end = date.fromisoformat(a.start), date.fromisoformat(a.end)
+    today = _today()
+    end = date.fromisoformat(a.end) if a.end else today - timedelta(days=1)
+    # The oldest session the plan will still serve. A property of the vendor's
+    # clock, NOT of the range being asked for: deriving it from `end` let a
+    # historical end slide the boundary backwards and admit sessions that had
+    # already expired -- precisely the wasted requests this exists to stop --
+    # and a future end slide it forwards and skip fetchable ones. `end` caps
+    # the range and nothing else.
+    boundary = today - timedelta(days=UNDERLYING_ENTITLEMENT_DAYS)
+    start = date.fromisoformat(a.start) if a.start else boundary
+    if start < boundary:
+        print(f"[backfill-underlying] start {start} is past the entitlement "
+              f"boundary; clamping to {boundary}", flush=True)
+        start = boundary
     if start > end:
         print("start after end", file=sys.stderr)
         return 2

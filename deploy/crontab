@@ -87,12 +87,17 @@ LOG=/data/massive/logs/cron.log
 # weeks. Once the window is full it costs nothing: existing partitions are
 # skipped without a request.
 #
+# No dates on the command line on purpose. The window is derived from
+# coverage_audit's entitlement constant, so the start moves forward with the
+# boundary. A pinned start would drift past it within a fortnight and spend
+# the nightly budget re-requesting sessions that had already expired.
+#
 # Monitored twice over, because the two failures look nothing alike: its own
 # Healthchecks entry catches the job dying or erroring, and coverage_audit's
 # *_window checks catch the window developing a hole regardless of why. The
 # first alone would miss a job that runs and quietly achieves nothing; the
 # second alone would not notice until a gap drifted within 30 days of expiry.
-30 02 * * *      cd $REPO && bash scripts/cronjob.sh backfill_underlying $PY scripts/backfill_underlying.py 2024-09-04 $(date -I -d yesterday) --max-sessions 40 --sleep 6 >> $LOG 2>&1
+30 02 * * *      cd $REPO && bash scripts/cronjob.sh backfill_underlying $PY scripts/backfill_underlying.py --max-sessions 40 --sleep 6 >> $LOG 2>&1
 
 # Treasury curve: the discount rate every IV inversion uses. 2 requests.
 # History is already walked back to 1962; `--full` resumes if that changes.

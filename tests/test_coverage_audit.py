@@ -423,10 +423,14 @@ def _sessions(settings: Settings, start: date, end: date) -> list[date]:
     return out
 
 
-def _full_window(settings: Settings, d: date) -> list[date]:
-    from datetime import timedelta
+# The audit runs on T-1, so "today" is the day after the audited session.
+# Frozen, because the entitlement boundary is measured from the clock and a
+# suite that moves with it tests a different window every day.
+TODAY = RUN_DATE + timedelta(days=1)
 
-    start = d - timedelta(days=audit.UNDERLYING_ENTITLEMENT_DAYS)
+
+def _full_window(settings: Settings, d: date, today: date = TODAY) -> list[date]:
+    start = today - timedelta(days=audit.UNDERLYING_ENTITLEMENT_DAYS)
     return _sessions(settings, start, d)
 
 
@@ -435,7 +439,7 @@ def test_underlying_window_passes_when_the_window_is_complete(tmp_path) -> None:
     days = _full_window(s, RUN_DATE)
     for ds in audit.UNDERLYING_DATASETS:
         _land_underlying(tmp_path, ds, days)
-    checks = {c.name: c for c in audit.check_underlying_window(s, RUN_DATE)}
+    checks = {c.name: c for c in audit.check_underlying_window(s, RUN_DATE, today=TODAY)}
     for ds in audit.UNDERLYING_DATASETS:
         assert checks[f"{ds}_window"].status == audit.PASS, checks[f"{ds}_window"].detail
         assert checks[f"{ds}[{RUN_DATE}]"].status == audit.PASS
@@ -447,7 +451,7 @@ def test_missing_yesterday_fails_even_with_a_full_history(tmp_path) -> None:
     days = [d for d in _full_window(s, RUN_DATE) if d != RUN_DATE]
     for ds in audit.UNDERLYING_DATASETS:
         _land_underlying(tmp_path, ds, days)
-    checks = {c.name: c for c in audit.check_underlying_window(s, RUN_DATE)}
+    checks = {c.name: c for c in audit.check_underlying_window(s, RUN_DATE, today=TODAY)}
     assert checks[f"underlying_minute_bars[{RUN_DATE}]"].status == audit.FAIL
 
 
@@ -461,7 +465,7 @@ def test_a_hole_in_the_middle_warns_because_it_is_still_fetchable(tmp_path) -> N
     assert victim > window[0] + timedelta(days=audit.UNDERLYING_EDGE_DAYS)
     for ds in audit.UNDERLYING_DATASETS:
         _land_underlying(tmp_path, ds, [d for d in window if d != victim])
-    checks = {c.name: c for c in audit.check_underlying_window(s, RUN_DATE)}
+    checks = {c.name: c for c in audit.check_underlying_window(s, RUN_DATE, today=TODAY)}
     got = checks["underlying_minute_bars_window"]
     assert got.status == audit.WARN
     assert got.data["missing"] == 1 and got.data["expiring"] == 0
@@ -479,7 +483,7 @@ def test_a_hole_about_to_expire_fails(tmp_path) -> None:
     victim = window[0]
     for ds in audit.UNDERLYING_DATASETS:
         _land_underlying(tmp_path, ds, [d for d in window if d != victim])
-    checks = {c.name: c for c in audit.check_underlying_window(s, RUN_DATE)}
+    checks = {c.name: c for c in audit.check_underlying_window(s, RUN_DATE, today=TODAY)}
     got = checks["underlying_minute_bars_window"]
     assert got.status == audit.FAIL
     assert got.data["expiring"] == 1
@@ -492,12 +496,14 @@ def test_window_does_not_reach_past_the_entitlement_boundary(tmp_path) -> None:
 
     s = _settings(tmp_path)
     _land_underlying(tmp_path, "underlying_minute_bars", _full_window(s, RUN_DATE))
-    checks = {c.name: c for c in audit.check_underlying_window(s, RUN_DATE)}
+    checks = {c.name: c for c in audit.check_underlying_window(s, RUN_DATE, today=TODAY)}
     got = checks["underlying_minute_bars_window"]
     assert got.status == audit.PASS
     start = date.fromisoformat(got.data["window_start"])
-    assert RUN_DATE - start == timedelta(days=audit.UNDERLYING_ENTITLEMENT_DAYS)
-    assert start > RUN_DATE - timedelta(days=365 * 2)
+    # Measured from the clock, not from the audited day -- the bug Copilot
+    # caught in the backfill, which this check shared.
+    assert TODAY - start == timedelta(days=audit.UNDERLYING_ENTITLEMENT_DAYS)
+    assert start > TODAY - timedelta(days=365 * 2)
 
 
 def test_underlying_window_is_part_of_the_daily_run(tmp_path) -> None:
@@ -524,7 +530,7 @@ def test_past_holidays_are_not_reported_as_missing_sessions(tmp_path) -> None:
     _seed_manifest(tmp_path, window)
     for ds in audit.UNDERLYING_DATASETS:
         _land_underlying(tmp_path, ds, window)
-    checks = {c.name: c for c in audit.check_underlying_window(s, RUN_DATE)}
+    checks = {c.name: c for c in audit.check_underlying_window(s, RUN_DATE, today=TODAY)}
     got = checks["underlying_minute_bars_window"]
     assert got.status == audit.PASS, got.detail
     assert got.data["sessions"] == len(window)
@@ -533,5 +539,31 @@ def test_past_holidays_are_not_reported_as_missing_sessions(tmp_path) -> None:
 def test_no_manifest_skips_rather_than_alarming(tmp_path) -> None:
     """Without the oracle there is no honest answer, so do not invent one."""
     s = _settings(tmp_path)
-    checks = audit.check_underlying_window(s, RUN_DATE)
+    checks = audit.check_underlying_window(s, RUN_DATE, today=TODAY)
     assert any(c.status == audit.SKIP for c in checks), [c.name for c in checks]
+
+
+def test_boundary_follows_the_clock_not_the_audited_day(tmp_path) -> None:
+    """Auditing an older date must not slide the window back with it.
+
+    A boundary derived from the question being asked would report sessions
+    that expired months ago as still fetchable, and send an operator to a
+    backfill that can only 403.
+    """
+    s = _settings(tmp_path)
+    later = TODAY + timedelta(days=200)
+    window = _full_window(s, RUN_DATE, today=later)
+    for ds in audit.UNDERLYING_DATASETS:
+        _land_underlying(tmp_path, ds, window)
+    checks = {c.name: c for c in audit.check_underlying_window(s, RUN_DATE, today=later)}
+    got = checks["underlying_minute_bars_window"]
+    start = date.fromisoformat(got.data["window_start"])
+    assert later - start == timedelta(days=audit.UNDERLYING_ENTITLEMENT_DAYS)
+
+
+def test_a_day_older_than_the_boundary_skips(tmp_path) -> None:
+    """Nothing honest to say about a session that can no longer be fetched."""
+    s = _settings(tmp_path)
+    far_future = RUN_DATE + timedelta(days=audit.UNDERLYING_ENTITLEMENT_DAYS + 30)
+    checks = audit.check_underlying_window(s, RUN_DATE, today=far_future)
+    assert [c.status for c in checks] == [audit.SKIP]

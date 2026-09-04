@@ -413,7 +413,9 @@ def test_failed_polls_are_retried_next_slot_not_treated_as_silence(
     )
     for _ in range(4):
         client = _Boom({"O:OK": []})
-        monkeypatch.setattr(job, "MassiveClient", lambda *a, **k: client)
+        # Bind per-iteration: a bare closure over `client` is B023, and the
+        # late-binding it warns about is exactly what would break this loop.
+        monkeypatch.setattr(job, "MassiveClient", lambda *a, _c=client, **k: _c)
         res = job._main_fn(args, s, JsonlLogger(path=None, echo=False))
         assert any(ticker == "O:ERR" for ticker, _ in client.seen), (
             "an erroring ticker was backed off"

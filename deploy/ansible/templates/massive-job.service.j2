@@ -1,0 +1,43 @@
+# Generated from deploy/schedule.json by deploy/ansible/playbook.yml.
+# Do not edit on the box -- edit the schedule and re-run the playbook.
+[Unit]
+Description=massive {{ item.job }} ({{ item.unit }}.timer)
+After=network-online.target
+Wants=network-online.target
+{% set jobs_with_checks = schedule.units | selectattr('healthchecks') | map(attribute='job') | list -%}
+{% if item.job in jobs_with_checks -%}
+# The job pings Healthchecks /fail itself on any non-zero exit (ingest.common.cli);
+# this hook covers the deaths it cannot report (OOM kill, unit start failure,
+# exhausted restart budget). The instance is the check slug, so the --expired /
+# --eod variants alert on the same check their job pings. Unmonitored jobs
+# (prune) get no hook: the alert unit would autocreate a check nobody wants.
+OnFailure=massive-alert@massive-{{ item.job | replace('_', '-') }}.service
+{% endif -%}
+{% if item.restart -%}
+# Low-frequency job: the next scheduled tick is far away, so a failure retries
+# instead of waiting for it. The start limit bounds the retries; tripping it
+# puts the unit in the failed state (firing the OnFailure hook where the job
+# has one). StartLimit* live in [Unit]: in [Service] they parse as unknown keys
+# and are silently ignored (deploy/systemd/massive-ws-minute-bars.service has
+# lived with that).
+StartLimitBurst=3
+StartLimitIntervalSec=1800
+{% endif %}
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/crack-the-sky
+EnvironmentFile=-%h/crack-the-sky/.env
+# cronjob.sh is the overlap-safety mechanism: flock -n -E 99 -> job_skipped ->
+# exit 0, so a timer fire while the crontab run still holds /tmp/massive-<job>.lock
+# is a logged no-op, never a second concurrent run.
+ExecStart=/bin/bash %h/crack-the-sky/scripts/cronjob.sh {{ item.job }} {% if item.command[0] == '-m' or item.command[0].endswith('.py') %}%h/crack-the-sky/venv/bin/python {% endif %}{{ item.command | join(' ') }}
+# cron.log keeps the append-only job log; the journal keeps unit start/stop and
+# exit status, which is the actual win (journalctl --user -u {{ item.unit }}).
+StandardOutput=append:/data/massive/logs/cron.log
+StandardError=append:/data/massive/logs/cron.log
+{% if item.restart -%}
+# Restart=on-failure is permitted with Type=oneshot (always is not).
+Restart=on-failure
+RestartSec={{ item.restart.sec }}
+{% endif %}

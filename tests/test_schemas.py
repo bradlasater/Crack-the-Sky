@@ -31,6 +31,7 @@ DATASETS = [
     "inflation",
     "forwards",
     "atm_term_structure",
+    "vol_surface",
     "dividends",
     "splits",
 ]

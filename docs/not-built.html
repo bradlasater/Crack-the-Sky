@@ -68,8 +68,8 @@
         <tbody>
           <tr>
             <td>Vol surfaces / interpolator</td>
-            <td><span class="badge missing">not built</span></td>
-            <td>The <em>ATM</em> curve is built — <code>atm_term_structure</code>, one row per (date, root, expiry), 2022-08-31 onward. There is still no smile fit and no interpolator, so there is nothing to evaluate off-strike or between expiries.</td>
+            <td><span class="badge shipped">built</span></td>
+            <td><code>pricing.surface</code> fits raw SVI (Gatheral) per (date, root, expiry) over own-IV OTM strikes from <code>option_day_bars</code> — calls above the parity forward, puts below — SPX/SPXW only: SPY strikes invert on the American tree (<code>implied_vol_american</code>) and this fit path is European end to end, so an SPY smile is follow-up. Butterfly (<code>g(k) ≥ 0</code>) and calendar (total variance non-decreasing in T) guards raise <code>SurfaceArbitrageError</code> rather than write an arbitrageable slice. <code>Surface.vol(K, T)</code> interpolates linearly in total variance between expiries, flat outside — alongside the ATM curve, not replacing it. Rebuilds over the archive via <code>scripts/build_surface.py</code> into <code>vol_surface</code>. Still not built: the calibration consumers (drift_check's off-ATM slice).</td>
           </tr>
           <tr>
             <td>Rates warehouse / curve</td>

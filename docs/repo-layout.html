@@ -78,7 +78,7 @@
           </tr>
           <tr>
             <td class="job">pricing/</td>
-            <td>Calculators, not a surface. BSM catalog, IV invert, Engine (European analytic / American CRR), <code>from_market</code>, <code>drift_check</code>, <code>term_structure</code> (the ATM curve — still not a surface: no smile fit, no interpolator).</td>
+            <td>Calculators plus the one fitted object. BSM catalog, IV invert, Engine (European analytic / American CRR), <code>from_market</code>, <code>drift_check</code>, <code>term_structure</code> (the ATM curve), <code>surface</code> (raw-SVI smile per expiry over the own-IV chain, with arb guards and term interpolation).</td>
           </tr>
           <tr>
             <td class="job">tests/</td>
@@ -94,7 +94,7 @@
           </tr>
           <tr>
             <td class="job">scripts/</td>
-            <td>bootstrap, backfill, repair, prune_raw, Healthchecks setup, <code>build_term_structure.py</code> (rebuilds the ATM curve over the archive). Not a package.</td>
+            <td>bootstrap, backfill, repair, prune_raw, Healthchecks setup, <code>build_term_structure.py</code> (rebuilds the ATM curve over the archive), <code>build_surface.py</code> (same for the SVI surface). Not a package.</td>
           </tr>
         </tbody>
       </table>

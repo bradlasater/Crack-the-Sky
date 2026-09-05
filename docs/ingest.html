@@ -138,7 +138,9 @@
       <h3 id="ingest-jobs">Jobs that exist</h3>
       <p>
         Scheduled jobs plus one deliberate non-cron tool. Cadence is Eastern
-        time from <code>deploy/crontab</code>.
+        time from <code>deploy/schedule.json</code> — the one canonical
+        schedule, rendered into systemd user timers by
+        <code>deploy/ansible/playbook.yml</code>.
       </p>
       <table>
         <thead>
@@ -272,20 +274,36 @@
 
       <h3 id="ingest-cron">NY cron</h3>
       <p>
-        Source of truth: <code>deploy/crontab</code>. <code>TZ=America/New_York</code>.
-        Cron does not expand <code>~</code> — rewrite the literal home path before
-        <code>crontab deploy/crontab</code>. <code>MAILTO=""</code> in the checked-in
-        file (set a mailbox on the box if you want cron mail on nonzero exits).
-        What is actually installed on the box, and the drift alarm that keeps it
-        honest: <a href="box-operations.html">box operations</a>.
+        Source of truth: <code>deploy/schedule.json</code>, one entry per unit
+        carrying the schedule twice — a <code>cron</code> form and a systemd
+        <code>on_calendar</code> form, machine-checked to fire at the same
+        instants (<code>tests/test_schedule.py</code>). Times are
+        America/New_York wall clock (the box's system timezone; timers elapse
+        in local time). The Ansible playbook templates a user-level
+        <code>.service</code>/<code>.timer</code> pair per entry into
+        <code>~/.config/systemd/user/</code>; every service still goes through
+        <code>scripts/cronjob.sh</code>, so a timer fire that overlaps a run
+        holding the job's flock logs <code>job_skipped</code> and exits 0.
+      </p>
+      <p>
+        Cutover: the crontab (<code>deploy/crontab</code>,
+        <code>TZ=America/New_York</code>) stays installed as a fallback while
+        the timers take over — safe because both paths share the lock, and the
+        timers' <code>AccuracySec=1s</code> keeps the loser's fire inside every
+        job's runtime (systemd's default 1-minute accuracy would not, and a
+        late duplicate <code>snapshot_sweep</code> would read as a stray
+        sweep). The crontab and its drift alarm are removed by a follow-up PR
+        after a clean day of timer runs. What is actually installed on the box,
+        and the drift alarms that keep it honest:
+        <a href="box-operations.html">box operations</a>.
       </p>
       <p>
         Healthchecks: one check per job, slug <code>massive-&lt;job&gt;</code>
         (underscores → hyphens). Ping key in <code>.env</code>; a leftover
         <code>HEALTHCHECKS_PING_URL</code> without a ping key is rejected at
         <code>Settings.load</code> (exit 2). Setup script
-        <code>scripts/setup_healthchecks.py</code> must match crontab job names
-        (CI asserts that).
+        <code>scripts/setup_healthchecks.py</code> reads the same
+        <code>deploy/schedule.json</code> (CI asserts the job/check pairing).
       </p>
 
       <h3 id="ingest-session">Weekday session, Eastern time</h3>

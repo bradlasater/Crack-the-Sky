@@ -1,0 +1,23 @@
+# Generated from deploy/schedule.json by deploy/ansible/playbook.yml.
+# Do not edit on the box -- edit the schedule and re-run the playbook.
+[Unit]
+Description={{ item.unit }} schedule (America/New_York wall clock)
+
+[Timer]
+{% for cal in item.on_calendar -%}
+OnCalendar={{ cal }}
+{% endfor -%}
+# AccuracySec=1s is the load-bearing line of the cutover. The crontab stays
+# installed alongside these timers, and both paths share /tmp/massive-<job>.lock
+# via cronjob.sh: whichever fires first runs, the other logs job_skipped. At the
+# default AccuracySec=1min the timer can fire up to 60s after cron -- long after
+# cron's ~13s snapshot_sweep released the lock -- producing two snapshot files in
+# one minute, which coverage_audit reads as stray sweeps. 1s closes that window.
+AccuracySec=1s
+RandomizedDelaySec=0
+# cron has no catch-up either, and a missed snapshot sweep is worthless an hour
+# later; Persistent=true would stampede the whole day's backlog after a reboot.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

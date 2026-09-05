@@ -245,15 +245,14 @@ def test_the_derived_window_matches_what_coverage_audit_audits(mod) -> None:
     assert mod.UNDERLYING_ENTITLEMENT_DAYS == UNDERLYING_ENTITLEMENT_DAYS
 
 
-def test_the_crontab_line_pins_no_dates(mod) -> None:
-    """The regression this guards: a literal start date in deploy/crontab."""
+def test_the_scheduled_command_pins_no_dates(mod) -> None:
+    """The regression this guards: a literal start date in the schedule."""
     import re
 
-    crontab = (ROOT / "deploy" / "crontab").read_text()
-    line = next(ln for ln in crontab.splitlines()
-                if "backfill_underlying.py" in ln and not ln.lstrip().startswith("#"))
-    assert not re.search(r"\d{4}-\d{2}-\d{2}", line), (
-        f"crontab pins a date, which will drift past the boundary: {line}"
+    schedule = json.loads((ROOT / "deploy" / "schedule.json").read_text())
+    unit = next(u for u in schedule["units"] if u["job"] == "backfill_underlying")
+    assert not any(re.search(r"\d{4}-\d{2}-\d{2}", arg) for arg in unit["command"]), (
+        f"the schedule pins a date, which will drift past the boundary: {unit['command']}"
     )
 
 

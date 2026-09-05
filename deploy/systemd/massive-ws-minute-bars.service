@@ -1,5 +1,9 @@
-# Systemd user service for the WS minute-bar capture (alternative to the
-# 09:25 cron line). Install per-user:
+# Systemd user service for the WS minute-bar capture -- the manual,
+# always-supervised alternative to the scheduled start. The 09:25 start is now
+# driven by a generated timer pair (deploy/schedule.json ->
+# deploy/ansible/templates/massive-job.{service,timer}.j2), installed as the
+# same unit name; do not install this file over the generated one.
+# Install per-user:
 #   mkdir -p ~/.config/systemd/user
 #   cp deploy/systemd/massive-ws-minute-bars.service ~/.config/systemd/user/
 #   systemctl --user daemon-reload

@@ -1,0 +1,193 @@
+{
+  "$comment": "The one canonical job schedule. Ansible reads this with include_vars and templates the systemd user timers from it (deploy/ansible/templates/), scripts/setup_healthchecks.py reads the healthchecks blocks, and the cron forms keep deploy/crontab honest while it stays installed during the cutover. Every entry carries the schedule twice -- cron and on_calendar -- and tests/test_schedule.py asserts the two fire at the same instants. Times are America/New_York wall clock (the box's system timezone; OnCalendar always fires in local time). Units whose job shares a name with another unit (the --expired / --eod passes) share that job's lock and Healthchecks check, so they carry no healthchecks block of their own. restart: null means the unit gets no Restart= line -- pointless when the next tick is seconds away. JSON, not YAML, so both Ansible and the Python stdlib read it with no new dependency.",
+  "units": [
+    {
+      "job": "contracts_sync",
+      "unit": "massive-contracts-sync",
+      "command": ["-m", "ingest.jobs.contracts_sync"],
+      "cron": ["00 08 * * 1-5", "30 16 * * 1-5"],
+      "on_calendar": ["Mon-Fri 08:00:00", "Mon-Fri 16:30:00"],
+      "healthchecks": {"schedule": "0 8 * * 1-5", "grace_min": 90, "desc": "SPY/SPX contract universe (also runs 16:30)"},
+      "restart": {"sec": 120}
+    },
+    {
+      "job": "dividends_sync",
+      "unit": "massive-dividends-sync",
+      "command": ["-m", "ingest.jobs.dividends_sync"],
+      "cron": ["00 08 * * 1-5"],
+      "on_calendar": ["Mon-Fri 08:00:00"],
+      "healthchecks": {"schedule": "0 8 * * 1-5", "grace_min": 90, "desc": "SPY dividends and splits"},
+      "restart": {"sec": 120}
+    },
+    {
+      "job": "contracts_sync",
+      "unit": "massive-contracts-sync-expired",
+      "command": ["-m", "ingest.jobs.contracts_sync", "--expired"],
+      "cron": ["00 09 * * 6"],
+      "on_calendar": ["Sat 09:00:00"],
+      "healthchecks": null,
+      "restart": {"sec": 120}
+    },
+    {
+      "job": "holidays_sync",
+      "unit": "massive-holidays-sync",
+      "command": ["-m", "ingest.jobs.holidays_sync"],
+      "cron": ["00 07 * * 0"],
+      "on_calendar": ["Sun 07:00:00"],
+      "healthchecks": {"schedule": "0 7 * * 0", "grace_min": 240, "desc": "Market calendar refresh (weekly)"},
+      "restart": {"sec": 120}
+    },
+    {
+      "job": "snapshot_sweep",
+      "unit": "massive-snapshot-sweep",
+      "command": ["-m", "ingest.jobs.snapshot_sweep"],
+      "cron": ["05 09 * * 1-5", "30-59 9 * * 1-5", "* 10-15 * * 1-5", "0-30 16 * * 1-5"],
+      "on_calendar": ["Mon-Fri 09:05:00", "Mon-Fri 09:30..59:00", "Mon-Fri 10..15:00..59:00", "Mon-Fri 16:00..30:00"],
+      "healthchecks": {"schedule": "* 10-15 * * 1-5", "grace_min": 10, "desc": "1/min full-chain snapshots - THE irreplaceable dataset"},
+      "restart": null
+    },
+    {
+      "job": "snapshot_sweep",
+      "unit": "massive-snapshot-sweep-eod",
+      "command": ["-m", "ingest.jobs.snapshot_sweep", "--eod"],
+      "cron": ["35 16 * * 1-5"],
+      "on_calendar": ["Mon-Fri 16:35:00"],
+      "healthchecks": null,
+      "restart": {"sec": 120}
+    },
+    {
+      "job": "drift_check",
+      "unit": "massive-drift-check",
+      "command": ["-m", "pricing.drift_check"],
+      "cron": ["00 17 * * 1-5"],
+      "on_calendar": ["Mon-Fri 17:00:00"],
+      "healthchecks": {"schedule": "0 17 * * 1-5", "grace_min": 60, "desc": "Own IV/Greeks identity canary (vendor diffs diagnostic). After EOD snapshot."},
+      "restart": {"sec": 120}
+    },
+    {
+      "job": "ws_minute_bars",
+      "unit": "massive-ws-minute-bars",
+      "command": ["-m", "ingest.jobs.ws_minute_bars"],
+      "cron": ["25 09 * * 1-5"],
+      "on_calendar": ["Mon-Fri 09:25:00"],
+      "healthchecks": {"schedule": "25 9 * * 1-5", "grace_min": 480, "desc": "Delayed options websocket capture (long-running)"},
+      "restart": {"sec": 10}
+    },
+    {
+      "job": "trades_watchlist",
+      "unit": "massive-trades-watchlist",
+      "command": ["-m", "ingest.jobs.trades_watchlist"],
+      "cron": ["30-55/5 9 * * 1-5", "*/5 10-15 * * 1-5", "0-30/5 16 * * 1-5"],
+      "on_calendar": ["Mon-Fri 09:30..55/5:00", "Mon-Fri 10..15:00/5:00", "Mon-Fri 16:00..30/5:00"],
+      "healthchecks": {"schedule": "*/5 10-15 * * 1-5", "grace_min": 20, "desc": "Same-day option trades for the liquid watchlist"},
+      "restart": null
+    },
+    {
+      "job": "underlying_bars",
+      "unit": "massive-underlying-bars",
+      "command": ["-m", "ingest.jobs.underlying_bars", "--prev-trading-day"],
+      "cron": ["05 08 * * 2-6"],
+      "on_calendar": ["Tue-Sat 08:05:00"],
+      "healthchecks": {"schedule": "5 8 * * 2-6", "grace_min": 90, "desc": "SPY minute bars, T-1 only"},
+      "restart": {"sec": 120}
+    },
+    {
+      "job": "grouped_daily",
+      "unit": "massive-grouped-daily",
+      "command": ["-m", "ingest.jobs.grouped_daily"],
+      "cron": ["10 08 * * 2-6"],
+      "on_calendar": ["Tue-Sat 08:10:00"],
+      "healthchecks": {"schedule": "10 8 * * 2-6", "grace_min": 90, "desc": "Whole-market daily bars (SPY + VIX proxies)"},
+      "restart": {"sec": 120}
+    },
+    {
+      "job": "backfill_underlying",
+      "unit": "massive-backfill-underlying",
+      "command": ["scripts/backfill_underlying.py", "--max-sessions", "40", "--sleep", "6"],
+      "cron": ["30 02 * * *"],
+      "on_calendar": ["02:30:00"],
+      "healthchecks": {"schedule": "30 2 * * *", "grace_min": 60, "desc": "Underlying history backfill (expiring window)"},
+      "restart": {"sec": 120}
+    },
+    {
+      "job": "rates_sync",
+      "unit": "massive-rates-sync",
+      "command": ["-m", "ingest.jobs.rates_sync"],
+      "cron": ["20 08 * * 2-6"],
+      "on_calendar": ["Tue-Sat 08:20:00"],
+      "healthchecks": {"schedule": "20 8 * * 2-6", "grace_min": 90, "desc": "Treasury curve - the discount rate every IV inversion uses"},
+      "restart": {"sec": 120}
+    },
+    {
+      "job": "flatfile_pull",
+      "unit": "massive-flatfile-pull",
+      "command": ["-m", "ingest.jobs.flatfile_pull"],
+      "cron": ["05 11 * * 2-6"],
+      "on_calendar": ["Tue-Sat 11:05:00"],
+      "healthchecks": {"schedule": "5 11 * * 2-6", "grace_min": 120, "desc": "T-1 S3 flat files - the authoritative record"},
+      "restart": {"sec": 120}
+    },
+    {
+      "job": "reconcile",
+      "unit": "massive-reconcile",
+      "command": ["-m", "ingest.jobs.reconcile"],
+      "cron": ["30 11 * * 2-6"],
+      "on_calendar": ["Tue-Sat 11:30:00"],
+      "healthchecks": {"schedule": "30 11 * * 2-6", "grace_min": 120, "desc": "Rewrite minute bars from the flat file"},
+      "restart": {"sec": 120}
+    },
+    {
+      "job": "ibkr_executions",
+      "unit": "massive-ibkr-executions",
+      "command": ["-m", "ingest.jobs.ibkr_executions"],
+      "cron": ["30 18 * * 1-5"],
+      "on_calendar": ["Mon-Fri 18:30:00"],
+      "healthchecks": {"schedule": "30 18 * * 1-5", "grace_min": 120, "desc": "Broker fills via IBKR Flex (no gateway)"},
+      "restart": {"sec": 120}
+    },
+    {
+      "job": "term_structure",
+      "unit": "massive-term-structure",
+      "command": ["-m", "pricing.term_structure"],
+      "cron": ["00 12 * * 2-6"],
+      "on_calendar": ["Tue-Sat 12:00:00"],
+      "healthchecks": {"schedule": "0 12 * * 2-6", "grace_min": 120, "desc": "ATM vol term structure from T-1 day bars (derived, rebuildable)"},
+      "restart": {"sec": 120}
+    },
+    {
+      "job": "coverage_audit",
+      "unit": "massive-coverage-audit",
+      "command": ["-m", "ingest.jobs.coverage_audit"],
+      "cron": ["30 12 * * 2-6"],
+      "on_calendar": ["Tue-Sat 12:30:00"],
+      "healthchecks": {"schedule": "30 12 * * 2-6", "grace_min": 180, "desc": "Did yesterday actually land? Fails loudly if not"},
+      "restart": {"sec": 120}
+    },
+    {
+      "job": "history_audit",
+      "unit": "massive-history-audit",
+      "command": ["-m", "ingest.jobs.history_audit"],
+      "cron": ["00 13 * * 6"],
+      "on_calendar": ["Sat 13:00:00"],
+      "healthchecks": {"schedule": "0 13 * * 6", "grace_min": 300, "desc": "Is the whole archive still complete? Weekly, vendor-verified"},
+      "restart": {"sec": 120}
+    },
+    {
+      "job": "prune",
+      "unit": "massive-prune",
+      "command": ["bash", "scripts/prune_raw.sh", "--apply"],
+      "cron": ["15 03 1 * *"],
+      "on_calendar": ["*-*-01 03:15:00"],
+      "healthchecks": null,
+      "restart": {"sec": 300}
+    }
+  ],
+  "extra_checks": {
+    "ws_minute_bars_alive": {
+      "schedule": "*/5 10-15 * * 1-5",
+      "grace_min": 10,
+      "desc": "Websocket capture liveness (5-min stats tick; covers 10:00-15:55)",
+      "owner": "ws_minute_bars"
+    }
+  }
+}

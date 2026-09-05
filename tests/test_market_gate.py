@@ -10,7 +10,6 @@ The frozen holiday calendar (tests/fixtures/holidays.json, derived from a real
 from __future__ import annotations
 
 import importlib
-import re
 import shutil
 from datetime import date
 from pathlib import Path
@@ -118,7 +117,7 @@ def test_missing_calendar_fails_open_on_weekday(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Weekend-only cron lines vs. the gate
+# Weekend-only schedule entries vs. the gate
 # ---------------------------------------------------------------------------
 #
 # The gate exits 0 *quietly* so market holidays do not page, and run_job
@@ -128,9 +127,9 @@ def test_missing_calendar_fails_open_on_weekday(tmp_path: Path) -> None:
 # precisely what `contracts_sync --expired` did until 2026-09-05, having never
 # once written a clean/contracts_expired partition.
 #
-# So: every weekend-only line in deploy/crontab must reach its work, either by
-# forcing past the gate (holidays_sync, contracts_sync --expired) or by
-# resolving its run date to a trading day (history_audit).
+# So: every weekend-only entry in deploy/schedule.json must reach its work,
+# either by forcing past the gate (holidays_sync, contracts_sync --expired) or
+# by resolving its run date to a trading day (history_audit).
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WEEKEND_DOW = {0, 6, 7}  # cron accepts both 0 and 7 for Sunday
@@ -142,8 +141,8 @@ def _dow_days(spec: str) -> set[int]:
 
     Expanded rather than string-matched. Splitting on commas alone reads
     ``6-7`` as the single token "6-7", which is not in WEEKEND_DOW, so a
-    Saturday-and-Sunday line would drop out of the guard below while still
-    looking covered -- and ranges are this crontab's normal style (``1-5``,
+    Saturday-and-Sunday entry would drop out of the guard below while still
+    looking covered -- and ranges are this schedule's normal style (``1-5``,
     ``2-6``). Steps and the SUN..SAT names are handled for the same reason.
     """
     days: set[int] = set()
@@ -164,34 +163,33 @@ def _dow_days(spec: str) -> set[int]:
     return days
 
 
-def _weekend_only_cron_jobs() -> list[tuple[str, str, list[str]]]:
-    """(line, module, args) for deploy/crontab lines that only ever fire on a weekend."""
+def _weekend_only_units() -> list[tuple[str, str, list[str]]]:
+    """(unit, module, args) for schedule.json units that only ever fire on a weekend."""
+    import json
+
     found = []
-    for line in (REPO_ROOT / "deploy" / "crontab").read_text().splitlines():
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        fields = line.split()
-        if len(fields) < 6 or not fields[0][0].isdigit():
-            continue  # env assignment, not a schedule
-        days = _dow_days(fields[4])
-        if not days or not days <= WEEKEND_DOW:
-            continue
-        m = re.search(r"-m (ingest\.jobs\.\w+|pricing\.\w+)((?: --[\w-]+)*)", line)
-        if not m:
+    schedule = json.loads((REPO_ROOT / "deploy" / "schedule.json").read_text())
+    for unit in schedule["units"]:
+        cmd = unit["command"]
+        if len(cmd) < 2 or cmd[0] != "-m":
             continue  # a bash script, which does not use run_job
-        found.append((line, m.group(1), m.group(2).split()))
+        if not cmd[1].startswith(("ingest.jobs.", "pricing.")):
+            continue
+        days = set().union(*(_dow_days(expr.split()[4]) for expr in unit["cron"]))
+        if days and days <= WEEKEND_DOW:
+            found.append((unit["unit"], cmd[1], cmd[2:]))
     return found
 
 
-def test_the_crontab_has_weekend_only_lines_to_check() -> None:
+def test_the_schedule_has_weekend_only_units_to_check() -> None:
     """Guard the guard: a parser that silently matches nothing proves nothing."""
-    assert len(_weekend_only_cron_jobs()) >= 2
+    assert len(_weekend_only_units()) >= 2
 
 
 @pytest.mark.parametrize(
     ("module_path", "args"),
-    [(mod, args) for _, mod, args in _weekend_only_cron_jobs()],
-    ids=[f"{mod.rsplit('.', 1)[-1]}{''.join(args)}" for _, mod, args in _weekend_only_cron_jobs()],
+    [(mod, args) for _, mod, args in _weekend_only_units()],
+    ids=[f"{mod.rsplit('.', 1)[-1]}{''.join(args)}" for _, mod, args in _weekend_only_units()],
 )
 def test_a_weekend_only_job_survives_its_own_schedule(monkeypatch, module_path, args) -> None:
     """It must force past the gate, or gate on a date that is a trading day."""

@@ -1,0 +1,43 @@
+# Renders the generated user units into a local directory -- the box.yml
+# timer-drift step diffs this output against ~/.config/systemd/user, and it is
+# handy for eyeballing a schedule.json change before converging the box.
+# Installs nothing; uses the same templates as playbook.yml.
+#
+#   ansible-playbook deploy/ansible/render_units.yml [-e out_dir=/tmp/units]
+- name: Render massive job units from deploy/schedule.json
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    out_dir: /tmp/massive-units-rendered
+  tasks:
+    - name: Schedule definition (the canonical schedule)
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../schedule.json"
+        name: schedule
+
+    - name: Output directory exists
+      ansible.builtin.file:
+        path: "{{ out_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Job service units rendered
+      ansible.builtin.template:
+        src: massive-job.service.j2
+        dest: "{{ out_dir }}/{{ item.unit }}.service"
+        mode: "0644"
+      loop: "{{ schedule.units }}"
+
+    - name: Job timer units rendered
+      ansible.builtin.template:
+        src: massive-job.timer.j2
+        dest: "{{ out_dir }}/{{ item.unit }}.timer"
+        mode: "0644"
+      loop: "{{ schedule.units }}"
+
+    - name: Failure-alert template unit rendered
+      ansible.builtin.template:
+        src: massive-alert@.service.j2
+        dest: "{{ out_dir }}/massive-alert@.service"
+        mode: "0644"

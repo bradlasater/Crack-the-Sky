@@ -133,7 +133,35 @@ def test_missing_calendar_fails_open_on_weekday(tmp_path: Path) -> None:
 # resolving its run date to a trading day (history_audit).
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-WEEKEND_DOW = {"0", "6", "7"}  # cron accepts both 0 and 7 for Sunday
+WEEKEND_DOW = {0, 6, 7}  # cron accepts both 0 and 7 for Sunday
+DOW_NAMES = {"SUN": 0, "MON": 1, "TUE": 2, "WED": 3, "THU": 4, "FRI": 5, "SAT": 6}
+
+
+def _dow_days(spec: str) -> set[int]:
+    """Day numbers a cron day-of-week field selects.
+
+    Expanded rather than string-matched. Splitting on commas alone reads
+    ``6-7`` as the single token "6-7", which is not in WEEKEND_DOW, so a
+    Saturday-and-Sunday line would drop out of the guard below while still
+    looking covered -- and ranges are this crontab's normal style (``1-5``,
+    ``2-6``). Steps and the SUN..SAT names are handled for the same reason.
+    """
+    days: set[int] = set()
+    for part in spec.upper().split(","):
+        step = 1
+        if "/" in part:
+            part, _, raw_step = part.partition("/")
+            step = int(raw_step)
+        if part == "*":
+            lo, hi = 0, 7
+        elif "-" in part:
+            raw_lo, _, raw_hi = part.partition("-")
+            lo, hi = DOW_NAMES.get(raw_lo, raw_lo), DOW_NAMES.get(raw_hi, raw_hi)
+            lo, hi = int(lo), int(hi)
+        else:
+            lo = hi = int(DOW_NAMES.get(part, part))
+        days.update(range(lo, hi + 1, step))
+    return days
 
 
 def _weekend_only_cron_jobs() -> list[tuple[str, str, list[str]]]:
@@ -145,8 +173,8 @@ def _weekend_only_cron_jobs() -> list[tuple[str, str, list[str]]]:
         fields = line.split()
         if len(fields) < 6 or not fields[0][0].isdigit():
             continue  # env assignment, not a schedule
-        dow = fields[4]
-        if dow == "*" or not set(dow.split(",")) <= WEEKEND_DOW:
+        days = _dow_days(fields[4])
+        if not days or not days <= WEEKEND_DOW:
             continue
         m = re.search(r"-m (ingest\.jobs\.\w+|pricing\.\w+)((?: --[\w-]+)*)", line)
         if not m:
@@ -184,3 +212,29 @@ def test_a_weekend_only_job_survives_its_own_schedule(monkeypatch, module_path, 
         f"past the trading-day gate nor resolves --date to a trading day, so every run will "
         f"exit 0 before doing any work -- and ping Healthchecks green while doing it."
     )
+
+
+@pytest.mark.parametrize(
+    ("spec", "expected"),
+    [
+        ("6", {6}),
+        ("0", {0}),
+        ("6,0", {0, 6}),
+        ("6-7", {6, 7}),  # the form the comma-split guard used to miss
+        ("SAT", {6}),
+        ("SAT-SUN", set()),  # names do not wrap; cron reads this as empty
+        ("1-5", {1, 2, 3, 4, 5}),
+        ("2-6", {2, 3, 4, 5, 6}),
+        ("*", {0, 1, 2, 3, 4, 5, 6, 7}),
+        ("*/3", {0, 3, 6}),
+    ],
+)
+def test_dow_expansion(spec, expected) -> None:
+    """The guard is only as good as its day-of-week parser."""
+    assert _dow_days(spec) == expected
+
+
+def test_a_weekend_range_would_not_slip_past_the_guard() -> None:
+    """`6-7` is weekend-only and must be seen as such, not skipped as unparsed."""
+    assert _dow_days("6-7") <= WEEKEND_DOW
+    assert not _dow_days("2-6") <= WEEKEND_DOW  # Tue-Sat is not weekend-only

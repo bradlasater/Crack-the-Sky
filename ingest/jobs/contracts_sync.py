@@ -19,7 +19,7 @@ from itertools import islice
 from typing import Any
 
 from ingest import schemas
-from ingest.common import landing, ratelimit
+from ingest.common import landing, market_gate, ratelimit
 from ingest.common.cli import run_job
 from ingest.common.config import Settings
 from ingest.common.http_client import MassiveClient
@@ -113,15 +113,28 @@ def _sync_pass(
     return {"rows": len(records), **diff}
 
 
-def _main_fn(args, settings: Settings, logger: JsonlLogger, expired: bool):
+def _main_fn(args, settings: Settings, logger: JsonlLogger, expired: bool, user_forced: bool):
     client = MassiveClient(settings, priority=ratelimit.LOW)
     underlyings = parse_underlyings(args.underlying, DEFAULT_UNDERLYINGS)
     totals = {"rows": 0, "new": 0, "gone": 0, "expired_rows": 0}
+    # The live-universe pass is per-session data and belongs to sessions only.
+    # ``--expired`` injects ``--force`` to clear run_job's gate (see main), and
+    # letting that injected force reach this pass would write a `contracts`
+    # partition dated a Saturday -- the exact thing main's docstring promises
+    # it will not do. So this pass re-checks the calendar itself, and only a
+    # force the *caller* typed overrides it. Result: the injected force
+    # un-gates the expired pass and nothing else.
+    run_date = run_date_from_args(args)
+    sync_live = user_forced or market_gate.is_trading_day(run_date, settings.data_root)
+    if not sync_live:
+        logger.log("contracts_live_pass_skipped", date=run_date.isoformat(),
+                   reason="not a trading day; expired pass only")
     for underlying in underlyings:
-        counters = _sync_pass(client, settings, logger, args, underlying, "contracts", False)
-        totals["rows"] += counters["rows"]
-        totals["new"] += counters["new"]
-        totals["gone"] += counters["gone"]
+        if sync_live:
+            counters = _sync_pass(client, settings, logger, args, underlying, "contracts", False)
+            totals["rows"] += counters["rows"]
+            totals["new"] += counters["new"]
+            totals["gone"] += counters["gone"]
         if expired:
             counters = _sync_pass(
                 client, settings, logger, args, underlying, "contracts_expired", True
@@ -155,11 +168,12 @@ def main(argv: list[str] | None = None) -> None:
     way ``holidays_sync`` does.
     """
     argv, expired = strip_flag(list(sys.argv[1:] if argv is None else argv), "--expired")
-    if expired and "--force" not in argv:
+    user_forced = "--force" in argv
+    if expired and not user_forced:
         argv.append("--force")
 
     def main_fn(a, s, log):
-        return _main_fn(a, s, log, expired)
+        return _main_fn(a, s, log, expired, user_forced)
 
     run_job(JOB, main_fn, argv)
 

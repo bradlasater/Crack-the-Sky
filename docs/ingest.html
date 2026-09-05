@@ -239,7 +239,7 @@
             <td class="job">contracts_sync --expired<br><span class="tag rest">rest</span></td>
             <td class="when">09:00</td>
             <td>Saturday</td>
-            <td>Expired-contract pass into <code>contracts_expired</code> <span class="badge writeonly">write-only</span>. Code injects <code>--force</code> so the trading-day gate does not skip Saturday — without it this job exited 0 before doing anything and still pinged Healthchecks <em>ok</em>, so it monitored as healthy having never written a partition.</td>
+            <td>Expired-contract pass into <code>contracts_expired</code> <span class="badge writeonly">write-only</span>. Code injects <code>--force</code> so the trading-day gate does not skip Saturday — without it this job exited 0 before doing anything and still pinged Healthchecks <em>ok</em>, so it monitored as healthy having never written a partition. The injected force un-gates the expired pass only: the live <code>contracts</code> pass re-checks the calendar itself and is skipped (<code>contracts_live_pass_skipped</code>), so no session-dated partition is written for a day with no session.</td>
           </tr>
           <tr>
             <td class="job">prune_raw.sh --apply</td>

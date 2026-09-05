@@ -39,7 +39,9 @@ LOG=/data/massive/logs/cron.log
 # before any work, and answered with a Healthchecks *ok* ping, so a job that
 # had never once produced a partition monitored as healthy. The --force lives
 # in contracts_sync.main(), not here, so a hand-run on a weekend behaves the
-# same way. Do NOT add --expired to the Mon-Fri lines above: those must stay
+# same way, and it un-gates the expired pass only -- the live contracts pass
+# re-checks the calendar and skips, so Saturday gets no session-dated
+# partition. Do NOT add --expired to the Mon-Fri lines above: those must stay
 # gated or they write a contracts partition on market holidays.
 00 09 * * 6      cd $REPO && bash scripts/cronjob.sh contracts_sync $PY -m ingest.jobs.contracts_sync --expired >> $LOG 2>&1
 00 07 * * 0      cd $REPO && bash scripts/cronjob.sh holidays_sync $PY -m ingest.jobs.holidays_sync >> $LOG 2>&1

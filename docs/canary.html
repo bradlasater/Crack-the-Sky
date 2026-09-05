@@ -71,7 +71,12 @@
         (<code>|K/F − 1| ≤ 5%</code>):
       </p>
       <ul>
-        <li>Reprice: <code>market_price</code> vs stored <code>own_price</code> (CRR for American rows, BSM for European).</li>
+        <li>Reprice: <code>market_price</code> vs stored <code>own_price</code> (CRR for American rows, BSM for European).
+          Sigma is inverted with that same engine, so an American row round-trips
+          through the tree; before the American solver existed it was inverted in
+          closed form and repriced on the tree, leaving the early-exercise premium
+          in the residual. <code>--euro-iv</code> restores that older behaviour for
+          an A/B run.</li>
         <li>European pairs: Γ_call ≈ Γ_put and vega_call ≈ vega_put at a <em>shared</em> σ (mean of the two inverted IVs), plus PCP on day-close quotes vs <code>S e^{-qT} − K e^{-rT}</code>. PCP is skipped when either leg used a last-trade (possibly a different instant).</li>
         <li>FAIL when median reprice error exceeds its band, or &gt;25% of ATM names fail identities. Too few ATM names (&lt; 20) is also FAIL.</li>
       </ul>

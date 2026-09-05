@@ -105,6 +105,7 @@ from pricing.conventions import (
 )
 from pricing.engine import AmericanCRR, Engine, EuropeanBSM
 from pricing.iv import implied_vol as invert_iv
+from pricing.iv import implied_vol_american as invert_iv_american
 from pricing.rates import RateCurveError, rate_for
 
 ET = ZoneInfo("America/New_York")
@@ -262,20 +263,48 @@ def greeks_quote(
     )
 
 
+def iv_engine_name(engine: Engine | None) -> str:
+    """Name of the inverter :func:`implied_vol_quote` would use.
+
+    Mirrors ``Engine.name`` so a row can report which inverter produced its
+    sigma next to which engine produced its Greeks.
+    """
+    return "american_crr" if isinstance(engine, AmericanCRR) else "european_bsm"
+
+
 def implied_vol_quote(
     quote: Quote,
     *,
     r: float | None = None,
     q: float | None = None,
     forward: Forward | None = None,
+    engine: Engine | None = None,
 ) -> float:
-    """Invert the quote's last/close; ignore the vendor IV diagnostic."""
+    """Invert the quote's last/close; ignore the vendor IV diagnostic.
+
+    The inverter follows the **engine**, not the contract's exercise style.
+    Those differ: :func:`_chain_engine` prices a far-from-the-money SPY strike
+    with ``EuropeanBSM`` even though the contract is American, and
+    :func:`greeks_asof` downgrades further once its American budget is spent.
+    Inverting such a row on the tree and repricing it in closed form would put
+    the early-exercise premium straight back into the reprice residual --
+    the error this routing exists to remove. With ``engine=None`` the caller
+    gets the European invert, which is what every non-chain call wants.
+    """
     px = quote.market_price
     if px is None:
         raise ValueError("quote has no last or day_close to invert")
     T = year_fraction(quote.contract, require_asof(quote))
     rate = resolve_r(quote, r, T)
     S, T, cp, F = _spot_t_cp(quote, forward, rate)
+    if isinstance(engine, AmericanCRR):
+        # n_steps must match the tree that reprices this row: sigma is the
+        # value that reproduces the price on *that* tree, and a finer one
+        # reprices it slightly differently.
+        return invert_iv_american(
+            px, S, quote.contract.strike, T, rate, cp, q=q, F=F,
+            n_steps=engine.n_steps,
+        )
     return invert_iv(px, S, quote.contract.strike, T, rate, cp, q=q, F=F)
 
 
@@ -330,6 +359,7 @@ CHAIN_SCHEMA = pa.schema(
         pa.field("strike", pa.float64()),
         pa.field("exercise_style", pa.string()),
         pa.field("greeks_engine", pa.string()),
+        pa.field("iv_engine", pa.string()),
         pa.field("asof_ns", pa.int64()),
         pa.field("T", pa.float64()),
         pa.field("r", pa.float64()),
@@ -481,6 +511,7 @@ def greeks_asof(
     max_rows: int | None = None,
     conventions: GreeksConventions = DEFAULT_CONVENTIONS,
     counts: ChainCounts | None = None,
+    european_iv: bool = False,
 ) -> pa.Table:
     """Last snapshots and forwards at or before ``asof_ns`` → own IV and Greeks.
 
@@ -490,6 +521,12 @@ def greeks_asof(
     bounds raises ``ValueError`` when ``uninvertible="raise"`` (never NaN).
     Expired (T≤0) rows and rows with no last/close are omitted; an empty
     result is an error. Pass ``counts`` to recover those skip tallies.
+
+    Each row's sigma is inverted with the engine that row is priced with, so
+    an American row round-trips through the tree rather than through closed
+    form; ``iv_engine`` records which. ``european_iv=True`` forces the
+    European invert everywhere, reproducing the behaviour from before the
+    American solver existed for an A/B comparison.
 
     ``moneyness`` (if set) skips strikes farther than that fraction of the
     parity forward so a cron CRR pass can stay on an ATM slice.
@@ -591,7 +628,11 @@ def greeks_asof(
             # the q_out reconstruction below use a different rate than the IV
             # it is reconciling against.
             rate = resolve_r(qte, r, year_fraction(qte.contract, qte.asof_ns))
-            own_iv = implied_vol_quote(qte, r=rate, forward=fwd)
+            # The inverter follows the engine this row will actually be
+            # repriced with, so the reprice identity closes. --euro-iv pins it
+            # back to the European invert for A/B against the old behaviour.
+            iv_eng = None if european_iv else eng
+            own_iv = implied_vol_quote(qte, r=rate, forward=fwd, engine=iv_eng)
             if not math.isfinite(own_iv):
                 raise ValueError(f"{qte.contract.ticker}: inverted IV is not finite")
             if own_iv <= 0:
@@ -645,6 +686,7 @@ def greeks_asof(
                 "strike": float(qte.contract.strike),
                 "exercise_style": qte.contract.exercise_style,
                 "greeks_engine": eng.name,
+                "iv_engine": iv_engine_name(iv_eng),
                 "asof_ns": int(qte.asof_ns),
                 "T": float(T),
                 # The rate actually used for THIS contract. With r=None it is
@@ -761,6 +803,14 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="omit rows whose last/close sits outside no-arbitrage bounds",
     )
+    parser.add_argument(
+        "--euro-iv",
+        action="store_true",
+        help=(
+            "invert every row with European BSM, including American rows "
+            "priced on the tree (the behaviour before the American solver)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -782,6 +832,7 @@ def main(argv: list[str] | None = None) -> int:
             spy_american_moneyness=args.spy_atm_pct,
             uninvertible=uninvertible,
             max_rows=args.max_rows,
+            european_iv=args.euro_iv,
         )
     except (CatalogError, SchemaError, ChainError, ValueError) as exc:
         print(f"FAIL  chain  {exc}", file=sys.stderr)
@@ -790,8 +841,11 @@ def main(argv: list[str] | None = None) -> int:
     engines: dict[str, int] = {}
     for name in table["greeks_engine"].to_pylist():
         engines[str(name)] = engines.get(str(name), 0) + 1
+    iv_engines: dict[str, int] = {}
+    for name in table["iv_engine"].to_pylist():
+        iv_engines[str(name)] = iv_engines.get(str(name), 0) + 1
     print(
-        f"PASS  rows={table.num_rows}  engines={engines}  "
+        f"PASS  rows={table.num_rows}  engines={engines}  iv_engines={iv_engines}  "
         f"date={dt.isoformat()}  asof_ns={args.asof_ns}",
         file=sys.stderr,
     )

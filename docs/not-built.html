@@ -97,8 +97,13 @@
           </tr>
           <tr>
             <td>American IV solver</td>
-            <td><span class="badge missing">not built</span></td>
-            <td>European invert, then American CRR for SPY value/Greeks.</td>
+            <td><span class="badge shipped">built</span></td>
+            <td>
+              <code>pricing.iv.implied_vol_american</code> inverts the CRR
+              tree by Brent. SPY sigma now comes off the same engine that
+              prices it; a price at intrinsic returns 0.0, because an American
+              put exercised now is worth that at every sigma.
+            </td>
           </tr>
           <tr>
             <td>Index levels (I:SPX, I:VIX, …)</td>

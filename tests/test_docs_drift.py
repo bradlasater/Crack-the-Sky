@@ -2,12 +2,13 @@
 
 The docs pages are written by hand, so nothing regenerates them when the
 schedule, the environment variables, or the box layout change. These tests
-fail CI when deploy/crontab, .env.example, or the page cross-links move
+fail CI when deploy/schedule.json, .env.example, or the page cross-links move
 without the handbook being updated to match.
 """
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -19,19 +20,18 @@ DOCS_DIR = REPO_ROOT / "docs"
 # ---------------------------------------------------------------------------
 
 
-def _crontab_lines() -> list[str]:
-    """Active (non-comment, non-blank) lines of deploy/crontab."""
-    crontab = (REPO_ROOT / "deploy" / "crontab").read_text()
-    return [
-        line for line in crontab.splitlines() if line.strip() and not line.lstrip().startswith("#")
-    ]
+def _schedule_units() -> list[dict]:
+    """Unit entries from deploy/schedule.json -- the canonical schedule."""
+    return json.loads((REPO_ROOT / "deploy" / "schedule.json").read_text())["units"]
 
 
 def _scheduled_ingest_jobs() -> set[str]:
-    """Job modules run via `$PY -m ingest.jobs.<name>` in deploy/crontab."""
+    """Job modules run via `-m ingest.jobs.<name>` per deploy/schedule.json."""
     jobs = set()
-    for line in _crontab_lines():
-        jobs.update(re.findall(r"-m ingest\.jobs\.(\w+)", line))
+    for unit in _schedule_units():
+        cmd = unit["command"]
+        if cmd[0] == "-m" and cmd[1].startswith("ingest.jobs."):
+            jobs.add(cmd[1].removeprefix("ingest.jobs."))
     return jobs
 
 
@@ -62,11 +62,11 @@ def _local_hrefs(text: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Crontab jobs <-> ingest doc page
+# Scheduled jobs <-> ingest doc page
 # ---------------------------------------------------------------------------
 
 
-def test_crontab_jobs_documented_in_ingest_page() -> None:
+def test_scheduled_jobs_documented_in_ingest_page() -> None:
     """A scheduled job missing from the ingest page is invisible to the desk."""
     ingest = (DOCS_DIR / "ingest.html").read_text()
     missing = {job for job in _scheduled_ingest_jobs() if job not in ingest}
@@ -74,8 +74,8 @@ def test_crontab_jobs_documented_in_ingest_page() -> None:
 
 
 def test_drift_check_documented_in_ingest_page() -> None:
-    """pricing.drift_check runs from the same crontab and must be findable."""
-    assert any("-m pricing.drift_check" in line for line in _crontab_lines())
+    """pricing.drift_check runs from the same schedule and must be findable."""
+    assert any(u["command"][:2] == ["-m", "pricing.drift_check"] for u in _schedule_units())
     ingest = (DOCS_DIR / "ingest.html").read_text()
     assert "drift_check" in ingest
 
@@ -172,9 +172,10 @@ def test_pages_use_shared_shell() -> None:
 
 
 def test_box_path_matches_ops_page() -> None:
-    """The checkout name in crontab's REPO must match the documented box layout."""
-    m = re.search(r"^REPO=(\S+)$", (REPO_ROOT / "deploy" / "crontab").read_text(), re.MULTILINE)
-    assert m, "deploy/crontab must set REPO=<path>"
-    checkout = Path(m.group(1)).name
+    """The checkout name the generated units cd into must match the ops page."""
+    template = (REPO_ROOT / "deploy" / "ansible" / "templates" / "massive-job.service.j2").read_text()
+    m = re.search(r"^WorkingDirectory=%h/(\S+)$", template, re.MULTILINE)
+    assert m, "massive-job.service.j2 must set WorkingDirectory=%h/<checkout>"
+    checkout = m.group(1)
     ops = (DOCS_DIR / "box-operations.html").read_text()
     assert checkout in ops, f"checkout name {checkout!r} not in docs/box-operations.html"

@@ -178,6 +178,30 @@ def test_ping_body_is_truncated(recorder: _Recorder) -> None:
 # Monitoring config must not drift from the schedule
 # ---------------------------------------------------------------------------
 
+def _expand(field: str, lo: int, hi: int) -> list[int]:
+    """One cron field -> sorted values. Handles `*`, lists, ranges, steps.
+
+    Shared with tests/test_schedule.py, which expands whole cron expressions
+    (including the day-of-month and day-of-week fields) for comparison against
+    systemd-analyze.
+    """
+    out: set[int] = set()
+    for part in field.split(","):
+        step = 1
+        if "/" in part:
+            part, step_s = part.split("/")
+            step = int(step_s)
+        if part == "*":
+            lo_v, hi_v = lo, hi
+        elif "-" in part:
+            lo_s, hi_s = part.split("-")
+            lo_v, hi_v = int(lo_s), int(hi_s)
+        else:
+            lo_v = hi_v = int(part)
+        out.update(range(lo_v, hi_v + 1, step))
+    return sorted(out)
+
+
 def _setup_module():
     import importlib.util
     path = Path(__file__).resolve().parents[1] / "scripts" / "setup_healthchecks.py"
@@ -188,26 +212,16 @@ def _setup_module():
 
 
 def _scheduled_jobs() -> set[str]:
-    """Job modules actually scheduled in deploy/crontab."""
-    import re
-    crontab = (Path(__file__).resolve().parents[1] / "deploy" / "crontab").read_text()
-    jobs = set()
-    for line in crontab.splitlines():
-        if line.lstrip().startswith("#") or not line.strip():
-            continue
-        m = re.search(r"(?:ingest\.jobs|pricing)\.(\w+)", line)
-        if m:
-            jobs.add(m.group(1))
-            continue
-        # Standalone Python entry points (scripts/<name>.py) are scheduled the
-        # same way and need monitoring the same way; only the module form was
-        # recognised, so such a job could be added with no check and this test
-        # would have said nothing. Shell jobs (prune) stay out: they are
-        # deliberately unmonitored and listed nowhere in JOBS.
-        m = re.search(r"scripts/(\w+)\.py", line)
-        if m:
-            jobs.add(m.group(1))
-    return jobs
+    """Jobs actually scheduled in deploy/schedule.json (the timers' source).
+
+    Shell jobs (prune) stay out: they are deliberately unmonitored and listed
+    nowhere in JOBS.
+    """
+    import json
+    schedule = json.loads(
+        (Path(__file__).resolve().parents[1] / "deploy" / "schedule.json").read_text()
+    )
+    return {u["job"] for u in schedule["units"] if u["command"][0] != "bash"}
 
 
 def test_setup_script_slugs_match_the_runtime() -> None:
@@ -678,24 +692,7 @@ def test_liveness_schedule_stays_inside_the_capture_window() -> None:
     schedule, grace_minutes, _ = mod.JOBS["ws_minute_bars_alive"]
     minute_field, hour_field = schedule.split()[0], schedule.split()[1]
 
-    def _expand(field: str, hi: int) -> list[int]:
-        out: set[int] = set()
-        for part in field.split(","):
-            step = 1
-            if "/" in part:
-                part, step_s = part.split("/")
-                step = int(step_s)
-            if part == "*":
-                lo_v, hi_v = 0, hi
-            elif "-" in part:
-                lo_s, hi_s = part.split("-")
-                lo_v, hi_v = int(lo_s), int(hi_s)
-            else:
-                lo_v = hi_v = int(part)
-            out.update(range(lo_v, hi_v + 1, step))
-        return sorted(out)
-
-    minutes, hours = _expand(minute_field, 59), _expand(hour_field, 23)
+    minutes, hours = _expand(minute_field, 0, 59), _expand(hour_field, 0, 23)
     first = datetime(2026, 9, 2, hours[0], minutes[0], tzinfo=market_gate.ET)
     last = datetime(2026, 9, 2, hours[-1], minutes[-1], tzinfo=market_gate.ET)
 

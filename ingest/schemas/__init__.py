@@ -279,10 +279,37 @@ def _build_schemas() -> dict[str, Any]:
         pa.field("src", pa.string()),              # 'day_bars' | 'snapshots'
     ]
 
+    # One row per (date, root, expiry): a raw-SVI fit of that expiry's smile
+    # over own-IV OTM strikes. Derived from option_day_bars like
+    # atm_term_structure, so it stores the fit inputs (forward, rate, fitted
+    # k range) and diagnostics (RMS total-variance residual, the butterfly
+    # margin min g(k)) beside the five parameters.
+    vol_surface_fields = [
+        pa.field("date", pa.string()),             # session the prices are from
+        pa.field("underlying", pa.string()),       # SPX | SPXW (European only)
+        pa.field("expiration_date", pa.string()),
+        pa.field("dte", pa.int64()),               # calendar days to expiry
+        pa.field("t_years", pa.float64()),         # ACT/365, matching pricing
+        pa.field("forward", pa.float64()),         # put-call parity forward
+        pa.field("svi_a", pa.float64()),           # w(k) = a + b(rho(k-m) + ...)
+        pa.field("svi_b", pa.float64()),
+        pa.field("svi_rho", pa.float64()),
+        pa.field("svi_m", pa.float64()),
+        pa.field("svi_sigma", pa.float64()),
+        pa.field("k_min", pa.float64()),           # fitted log-moneyness range
+        pa.field("k_max", pa.float64()),
+        pa.field("n_strikes", pa.int64()),         # OTM points in the fit
+        pa.field("rms_error", pa.float64()),       # RMS total-variance residual
+        pa.field("min_g", pa.float64()),           # min of Gatheral's g(k)
+        pa.field("rate", pa.float64()),            # r used, from the curve
+        pa.field("src", pa.string()),              # 'day_bars'
+    ]
+
     contracts_schema = pa.schema(contract_fields)
     return {
         "forwards": pa.schema(forward_fields),
         "atm_term_structure": pa.schema(atm_term_structure_fields),
+        "vol_surface": pa.schema(vol_surface_fields),
         "contracts": contracts_schema,
         "contracts_expired": contracts_schema,  # same schema as contracts
         "option_snapshots": pa.schema(snapshot_fields),

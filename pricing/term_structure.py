@@ -66,12 +66,16 @@ SRC = "day_bars"
 DAYS_PER_YEAR = 365.0
 
 
-def _bars_to_chain(rows: list[dict[str, Any]], root: str) -> list[dict[str, Any]]:
+def bars_to_chain(rows: list[dict[str, Any]], root: str) -> list[dict[str, Any]]:
     """Day-bar rows -> snapshot-shaped records for ``forward_from_parity``.
 
     Only the four fields parity reads are populated. Reusing that function
     rather than re-deriving F keeps one definition of the forward in the repo,
     which matters because the drift canary checks against it.
+
+    Public because ``pricing.surface`` fits its smiles off the same chain;
+    every consumer of ``option_day_bars`` must recover the forward the same
+    way or the curve and the surface would disagree on F for the same day.
     """
     out = []
     for row in rows:
@@ -146,7 +150,7 @@ def build_rows(
 
     rows: list[dict[str, Any]] = []
     for root in roots:
-        chain = _bars_to_chain(bars, root)
+        chain = bars_to_chain(bars, root)
         if not chain:
             continue
 

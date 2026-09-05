@@ -16,9 +16,11 @@ datasets, not a calibration target. The surface sits *alongside* the ATM
 curve; nothing here replaces it.
 
 **SPX/SPXW only.** SPY strikes are American and invert under the wrong
-exercise boundary with a European solver, so they are refused until the
-American IV solver exists; VIX options are on the VX future and their smiles
-are a different modelling question.
+exercise boundary with a European solver, so they are refused here. The
+American inverter exists (``pricing.iv.implied_vol_american``), but the fit
+path in this module is European end to end; an SPY smile is follow-up, not a
+flag. VIX options are on the VX future and their smiles are a different
+modelling question.
 
 **OTM strikes only.** Calls above F, puts below. OTM options are the liquid
 half of the chain and their price is nearly all time value, which is what an

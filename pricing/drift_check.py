@@ -658,6 +658,7 @@ def run_drift(
     max_rows: int | None = DEFAULT_MAX_ROWS,
     uninvertible: str = "skip",
     thresholds: Thresholds | None = None,
+    european_iv: bool = False,
 ) -> DriftReport:
     """Load as-of chain, run identity checks, attach vendor diagnostics."""
     thr = thresholds or DEFAULT_THRESHOLDS
@@ -678,6 +679,7 @@ def run_drift(
         uninvertible=uninvertible,  # type: ignore[arg-type]
         max_rows=max_rows,
         counts=counts,
+        european_iv=european_iv,
     )
     return evaluate_drift(
         table,
@@ -794,6 +796,14 @@ def main(argv: list[str] | None = None) -> int:
         const="raise",
         help="fail loud on the first uninvertible row",
     )
+    parser.add_argument(
+        "--euro-iv",
+        action="store_true",
+        help=(
+            "invert American rows with European BSM as well, reproducing the "
+            "canary's behaviour from before the American solver; for A/B only"
+        ),
+    )
     args = parser.parse_args(argv)
 
     data_root = args.data_root or _get("DATA_ROOT", "/data/massive", file_vals)
@@ -853,6 +863,7 @@ def main(argv: list[str] | None = None) -> int:
             atm_pct=args.atm_pct,
             max_rows=args.max_rows,
             uninvertible=args.uninvertible,
+            european_iv=args.euro_iv,
             thresholds=Thresholds(
                 min_compare=args.min_compare,
                 fail_frac=args.fail_frac,

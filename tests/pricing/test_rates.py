@@ -152,3 +152,72 @@ def test_scans_every_partition_for_the_global_best(tmp_path: Path) -> None:
     assert load_curve("2026-09-30", tmp_path).date == "2026-08-28"
     assert load_curve("2026-08-25", tmp_path).date == "2026-08-20"
     assert load_curve("2000-01-01", tmp_path).date == "1999-01-04"
+
+
+# ---------------------------------------------------------------------------
+# Memoisation
+# ---------------------------------------------------------------------------
+
+
+def test_repeat_lookups_do_not_re_read_the_warehouse(tmp_path: Path, monkeypatch) -> None:
+    """The read is per (date, root), not per call.
+
+    ``resolve_r`` asks for the curve once per *quote*, and the read underneath
+    has to scan every partition, so an uncached lookup re-read the whole
+    treasury history for every row in a chain.
+    """
+    import pyarrow.parquet as pq
+
+    from ingest.common import rates as rates_mod
+
+    _land(tmp_path, CURVE_2026_08_28)
+    rates_mod.clear_curve_cache()
+
+    reads = 0
+    real = pq.read_table
+
+    def counting(*a, **kw):
+        nonlocal reads
+        reads += 1
+        return real(*a, **kw)
+
+    monkeypatch.setattr(pq, "read_table", counting)
+
+    first = load_curve(date(2026, 8, 28), tmp_path)
+    after_first = reads
+    assert after_first > 0
+    for _ in range(50):
+        again = load_curve(date(2026, 8, 28), tmp_path)
+        assert again is first
+    assert reads == after_first
+
+
+def test_a_different_date_or_root_is_a_different_curve(tmp_path: Path) -> None:
+    """The cache key carries both, so neither can serve the other's answer."""
+    from ingest.common import rates as rates_mod
+
+    other = dict(CURVE_2026_08_28, date="2026-08-27", yield_1_month=1.00)
+    _land(tmp_path, CURVE_2026_08_28, other)
+    rates_mod.clear_curve_cache()
+
+    assert load_curve(date(2026, 8, 28), tmp_path).date == "2026-08-28"
+    assert load_curve(date(2026, 8, 27), tmp_path).date == "2026-08-27"
+    assert rate_for(date(2026, 8, 27), 1 / 12, tmp_path) == pytest.approx(0.01)
+
+
+def test_clearing_the_cache_picks_up_a_newly_landed_curve(tmp_path: Path) -> None:
+    """Writing a curve mid-process is invisible until the cache is dropped."""
+    from ingest.common import rates as rates_mod
+
+    _land(tmp_path, CURVE_2026_08_28)
+    rates_mod.clear_curve_cache()
+    assert load_curve(date(2026, 8, 29), tmp_path).date == "2026-08-28"
+
+    landing.write_clean(
+        "treasury_yields", date(2026, 9, 1),
+        [dict(CURVE_2026_08_28, date="2026-08-29", yield_1_month=2.00)],
+        job="rates_sync", data_root=tmp_path,
+    )
+    assert load_curve(date(2026, 8, 29), tmp_path).date == "2026-08-28"  # stale, by design
+    rates_mod.clear_curve_cache()
+    assert load_curve(date(2026, 8, 29), tmp_path).date == "2026-08-29"

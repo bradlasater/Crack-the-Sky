@@ -12,6 +12,7 @@ import pytest
 from ingest.common import landing
 from marketdata.opra import parse_opra
 from pricing.bsm import price as bsm_price
+from pricing.engine import crr_price
 from pricing.from_market import (
     CHAIN_SCHEMA,
     ChainError,
@@ -51,6 +52,23 @@ def _spy_last(asof_ns: int = ASOF_NS, sigma: float = SIGMA, q: float = 0.01) -> 
     contract = parse_opra(SPY)
     T = year_fraction(contract, asof_ns)
     return float(bsm_price(S_SPY, 500.0, T, R, sigma, "call", q=q))
+
+
+def _spy_last_american(
+    asof_ns: int = ASOF_NS, sigma: float = SIGMA, q: float = 0.01, n_steps: int = 21
+) -> float:
+    """A SPY price built on the same tree that will invert it.
+
+    SPY is American and carries a dividend yield, so its CRR price sits above
+    the European one and inverting a BSM-built price on the tree returns a
+    lower sigma. Where a test wants an exact round-trip it has to start from
+    the tree, at the same ``n_steps`` the chain will use.
+    """
+    contract = parse_opra(SPY)
+    T = year_fraction(contract, asof_ns)
+    return float(
+        crr_price(S_SPY, 500.0, T, R, sigma, "call", q=q, n_steps=n_steps, american=True)
+    )
 
 
 def _spy_forward(asof_ns: int = ASOF_NS, q: float = 0.01) -> float:
@@ -368,6 +386,71 @@ def test_spy_atm_subset_is_explicit(tmp_path: Path) -> None:
     assert by_ticker[far]["greeks_engine"] == "european_bsm"
 
 
+def test_iv_engine_tracks_the_engine_through_the_downgrade(tmp_path: Path) -> None:
+    """sigma must be inverted with whatever engine reprices the row.
+
+    _chain_engine hands a far-from-the-money SPY strike to EuropeanBSM even
+    though the contract is American. If the inverter followed exercise_style
+    instead, that row would be inverted on the tree and repriced in closed
+    form, putting the early-exercise premium back into the reprice residual --
+    which is the whole reason the American solver was wired in.
+    """
+    last_atm = _spy_last_american(n_steps=21)
+    far = "O:SPY260918C00540000"
+    rec_far = _spy_snap(last_atm, ticker=far, strike=540.0)
+    contract = parse_opra(far)
+    T = year_fraction(contract, ASOF_NS)
+    rec_far["last_trade_price"] = float(bsm_price(S_SPY, 540.0, T, R, SIGMA, "call", q=0.01))
+    rec_far["day_close"] = rec_far["last_trade_price"]
+    _write(
+        tmp_path,
+        snap=[_spy_snap(last_atm), rec_far],
+        fwd=[forward_row(underlying="SPY", expiry=EXPIRY, forward=_spy_forward(), asof_ns=ASOF_NS)],
+        underlying="SPY",
+    )
+    table = greeks_asof(
+        DT,
+        ASOF_NS,
+        r=R,
+        data_root=tmp_path,
+        roots=("SPY",),
+        crr_steps=21,
+        spy_american_moneyness=0.05,
+    )
+    by_ticker = {r["ticker"]: r for r in table.to_pylist()}
+    for row in by_ticker.values():
+        assert row["iv_engine"] == row["greeks_engine"], row["ticker"]
+    assert by_ticker[SPY]["iv_engine"] == "american_crr"
+    assert by_ticker[far]["iv_engine"] == "european_bsm"
+
+    # Each row round-trips through its own engine: the ATM price was built on
+    # the tree, the far one in closed form, and both recover SIGMA.
+    assert by_ticker[SPY]["own_iv"] == pytest.approx(SIGMA, rel=1e-4)
+    assert by_ticker[far]["own_iv"] == pytest.approx(SIGMA, rel=1e-6)
+
+
+def test_euro_iv_pins_american_rows_back_to_the_closed_form(tmp_path: Path) -> None:
+    """The A/B escape hatch reproduces the pre-solver behaviour exactly."""
+    last = _spy_last_american(n_steps=21)
+    _write(
+        tmp_path,
+        snap=[_spy_snap(last)],
+        fwd=[forward_row(underlying="SPY", expiry=EXPIRY, forward=_spy_forward(), asof_ns=ASOF_NS)],
+        underlying="SPY",
+    )
+    kw = {"data_root": tmp_path, "roots": ("SPY",), "crr_steps": 21}
+    amer = greeks_asof(DT, ASOF_NS, r=R, **kw).to_pylist()[0]
+    euro = greeks_asof(DT, ASOF_NS, r=R, european_iv=True, **kw).to_pylist()[0]
+
+    assert amer["iv_engine"] == "american_crr"
+    assert euro["iv_engine"] == "european_bsm"
+    # Both are still priced on the tree, so only the sigma differs -- and the
+    # European invert reads the early-exercise premium as extra volatility.
+    assert amer["greeks_engine"] == euro["greeks_engine"] == "american_crr"
+    assert euro["own_iv"] > amer["own_iv"]
+    assert amer["own_iv"] == pytest.approx(SIGMA, rel=1e-4)
+
+
 def test_empty_allowlisted_root_fails(tmp_path: Path) -> None:
     last = _spy_last()
     _write(
@@ -515,7 +598,7 @@ def test_q_column_uses_the_resolved_rate_in_curve_mode(
         job="rates_sync",
         data_root=tmp_path,
     )
-    last = _spy_last()
+    last = _spy_last_american(n_steps=21)
     _write(
         tmp_path,
         snap=[_spy_snap(last)],
@@ -528,7 +611,10 @@ def test_q_column_uses_the_resolved_rate_in_curve_mode(
     assert row["r"] == pytest.approx(0.05)
     assert math.isfinite(row["q"])
     assert row["q"] == pytest.approx(0.01, rel=1e-6)
-    assert row["own_iv"] == pytest.approx(SIGMA, rel=1e-6)
+    # Round-trips because the price was built on the same 21-step tree the
+    # American inverter uses; sigma accuracy is bounded by the tree, not the
+    # solver, so the tolerance is looser than the European rows above.
+    assert row["own_iv"] == pytest.approx(SIGMA, rel=1e-4)
 
 
 def test_max_rows_does_not_starve_spy_after_spx_file(tmp_path: Path) -> None:

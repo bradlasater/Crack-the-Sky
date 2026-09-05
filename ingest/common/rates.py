@@ -29,6 +29,7 @@ from __future__ import annotations
 import bisect
 import os
 from datetime import date
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -107,13 +108,40 @@ def load_curve(
     """Most recent curve at or before ``on_or_before``.
 
     The par curve is published on business days, so a Monday option is priced
-    off Friday's curve. Scans partitions newest-first and stops at the first
-    match rather than reading the whole warehouse.
+    off Friday's curve.
+
+    Memoised, because the read underneath is not cheap and the callers ask for
+    the same curve over and over. Every partition must be scanned (see below),
+    and ``pricing.from_market.resolve_r`` calls this once per *quote* -- so
+    pricing one chain re-read the whole ``treasury_yields`` history, back to
+    1962, several hundred times. ``pricing.term_structure.build_for_date``
+    already works around it by hoisting the curve out of its expiry loop, and
+    its docstring records what that was worth: a full-history backfill went
+    from ~63 minutes to a few. Caching here fixes the rest of the callers
+    without each having to know.
+
+    The cache is per process and every consumer is a short-lived job, so a
+    curve landed by ``rates_sync`` mid-run is picked up by the next one.
+    Anything that writes a curve and then reads it back in the same process --
+    a long-lived service, or a test -- must call :func:`clear_curve_cache`
+    rather than assume freshness.
     """
+    want = on_or_before.isoformat() if isinstance(on_or_before, date) else str(on_or_before)
+    # lru_cache needs hashable, stable keys; a PathLike would otherwise make
+    # equal roots miss each other.
+    return _load_curve_cached(want, str(_data_root(data_root)))
+
+
+def clear_curve_cache() -> None:
+    """Drop the memoised curves. Call after landing a new ``treasury_yields``."""
+    _load_curve_cached.cache_clear()
+
+
+@lru_cache(maxsize=64)
+def _load_curve_cached(want: str, data_root: str) -> RateCurve:
     import pyarrow.parquet as pq
 
-    want = on_or_before.isoformat() if isinstance(on_or_before, date) else str(on_or_before)
-    root = _data_root(data_root) / "clean" / DATASET
+    root = Path(data_root) / "clean" / DATASET
     if not root.is_dir():
         raise RateCurveError(
             f"no {DATASET} data under {root}; run `python -m ingest.jobs.rates_sync`"

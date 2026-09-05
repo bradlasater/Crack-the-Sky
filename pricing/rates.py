@@ -13,6 +13,7 @@ from ingest.common.rates import (
     TENORS,
     RateCurve,
     RateCurveError,
+    clear_curve_cache,
     load_curve,
     rate_for,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "TENORS",
     "RateCurve",
     "RateCurveError",
+    "clear_curve_cache",
     "load_curve",
     "rate_for",
 ]

@@ -37,6 +37,7 @@
             <li><a href="pricing.html#pricing-catalog">Named catalog</a></li>
             <li><a href="pricing.html#pricing-euro-american">European vs American</a></li>
             <li><a href="pricing.html#pricing-iv-invert">IV invert</a></li>
+            <li><a href="pricing.html#pricing-iv-tree">The tree is part of the answer</a></li>
           </ol>
         </li>
         <li><a href="warehouse-math.html">Warehouse → math</a></li>
@@ -81,14 +82,41 @@
         <dd>
           <code>Engine</code> protocol: <code>EuropeanBSM</code> closed-form;
           <code>AmericanCRR</code> tree with bump-and-revalue Greeks.
-          Style comes from the contract (SPY American, SPX/SPXW European).
+          Style comes from the contract (SPY American, SPX/SPXW European), but
+          the <em>engine</em> is what an IV invert follows: a chain downgrades
+          far-from-the-money SPY strikes to <code>EuropeanBSM</code>, and a row
+          inverted on one engine and repriced on the other carries the
+          early-exercise premium as residual.
         </dd>
         <dt id="pricing-iv-invert">IV invert</dt>
         <dd>
-          Newton with bounds, Brent fallback. Price outside discounted
-          no-arbitrage bounds → <code>ValueError</code>.
-          <strong>Never returns NaN.</strong> European BSM only — there is no
-          American IV solver.
+          One inverter per exercise style, matching the two engines.
+          <code>implied_vol</code> inverts European BSM: Newton with bounds,
+          Brent fallback, closed-form vega for the Newton step.
+          <code>implied_vol_american</code> inverts the American CRR tree with
+          Brent alone &mdash; the tree has no closed-form vega, and a
+          central-difference one costs two extra trees per Newton step, more
+          evaluations than the bracketed search it was meant to accelerate.
+          Bounds differ with the style, so each has its own:
+          <code>discounted_bounds</code> and <code>american_bounds</code>
+          (undiscounted intrinsic below, and <code>K</code> rather than
+          <code>Ke<sup>-rT</sup></code> above, for a put).
+          A price outside them &rarr; <code>ValueError</code>.
+          <strong>Neither returns NaN.</strong>
+        </dd>
+        <dt id="pricing-iv-tree">The tree is part of the answer</dt>
+        <dd>
+          An American sigma is the value that reprices the contract
+          <em>on a given tree</em>, so the inverter takes the engine's own
+          <code>n_steps</code>; invert an 801-step price on a 401-step tree and
+          sigma moves by more than the solver tolerance. Accuracy is bounded by
+          discretisation, not by <code>xtol</code>. The search also starts
+          above <code>|r-q|&radic;dt</code>, below which the CRR tree is not
+          arbitrage-free and refuses to price at all.
+          <code>implied_vol_american</code> returns <code>0.0</code> for a
+          price with no time value &mdash; a deep ITM American put is
+          exercised now and is worth <code>K-S</code> at every sigma, which is
+          a property of the contract, not a solver failure.
         </dd>
       </dl>
 

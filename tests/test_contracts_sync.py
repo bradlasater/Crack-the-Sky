@@ -12,6 +12,7 @@ from datetime import date
 
 from ingest.common import landing
 from ingest.common.config import Settings
+from ingest.jobs import contracts_sync
 from ingest.jobs.contracts_sync import _previous_tickers
 
 YESTERDAY = date(2026, 9, 1)
@@ -105,3 +106,46 @@ def test_baseline_ignores_partitions_after_the_run_date(tmp_path) -> None:
     _land(tmp_path, YESTERDAY, "SPX", ["O:SPX1"])
     _land(tmp_path, date(2026, 9, 10), "SPX", ["O:SPX_FUTURE"])
     assert _previous_tickers(settings, "contracts", TODAY, "SPX") == {"O:SPX1"}
+
+
+# ---------------------------------------------------------------------------
+# The expired pass and the trading-day gate
+# ---------------------------------------------------------------------------
+
+
+def _argv_handed_to_run_job(monkeypatch, argv: list[str]) -> list[str]:
+    """What ``main`` passes to ``run_job``, without running the job."""
+    seen: list[str] = []
+
+    def fake_run_job(job_name, main_fn, parsed):
+        seen.extend(parsed)
+
+    monkeypatch.setattr(contracts_sync, "run_job", fake_run_job)
+    contracts_sync.main(argv)
+    return seen
+
+
+def test_the_expired_pass_forces_past_the_trading_day_gate(monkeypatch) -> None:
+    """The regression: a Saturday-only job that the Saturday gate discarded.
+
+    ``--expired`` is scheduled ``00 09 * * 6`` and nothing else. Saturday is
+    never a trading day, so ``run_job``'s gate raised SystemExit(0) before any
+    work -- and because that exit pings Healthchecks *ok* (so market holidays
+    do not page), the check stayed green while ``clean/contracts_expired`` was
+    never created at all.
+    """
+    assert "--force" in _argv_handed_to_run_job(monkeypatch, ["--expired"])
+
+
+def test_the_weekday_passes_stay_gated(monkeypatch) -> None:
+    """08:00 and 16:30 fire Mon-Fri, market calendar or not.
+
+    Forcing those too would write a contracts partition on Thanksgiving, which
+    is the exact thing the gate exists to prevent. Only the expired pass --
+    reference data whose subject is the universe, not a session -- opts out.
+    """
+    assert "--force" not in _argv_handed_to_run_job(monkeypatch, [])
+
+
+def test_an_explicit_force_is_not_duplicated(monkeypatch) -> None:
+    assert _argv_handed_to_run_job(monkeypatch, ["--expired", "--force"]).count("--force") == 1

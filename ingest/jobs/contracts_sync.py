@@ -8,7 +8,8 @@ and diffs the new contract set against the previous clean partition for the
 same underlying, logging ``{event: "contracts_diff", new: n, gone: n}``.
 
 ``--expired`` adds an ``expired=true`` pass written to the separate
-``contracts_expired`` dataset (same schema).
+``contracts_expired`` dataset (same schema), and injects ``--force`` --
+see :func:`main` for why that is not optional.
 """
 
 from __future__ import annotations
@@ -130,8 +131,32 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger, expired: bool):
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Entry point: ``python -m ingest.jobs.contracts_sync [--expired]``."""
+    """Entry point: ``python -m ingest.jobs.contracts_sync [--expired]``.
+
+    ``--expired`` injects ``--force``, because otherwise the expired pass can
+    never run at all. It is scheduled once a week, on Saturday, and Saturday
+    is never a trading day -- so ``run_job``'s market gate raised
+    ``SystemExit(0)`` before any work happened. The failure was silent by
+    design twice over: the gate exits *quietly* so market holidays do not page,
+    and ``run_job`` answers that exit with a Healthchecks *success* ping
+    ("exited early (not a trading day, or nothing to do)"), so the check stayed
+    green while ``clean/contracts_expired`` was never created. Observed
+    2026-09-05: ``job_start`` logged at 09:00:01, process gone one second
+    later, no ``job_end``, no partition.
+
+    Injecting it here rather than in ``deploy/crontab`` keeps a hand-run
+    ``python -m ingest.jobs.contracts_sync --expired`` on a weekend from
+    falling into the same hole, and lets CI assert the invariant.
+
+    The plain weekday runs stay gated on purpose: 08:00 and 16:30 fire Mon-Fri
+    regardless of the market calendar, and must not write a contracts
+    partition on Thanksgiving. Only the expired pass -- reference data whose
+    subject is the universe, not a session -- bypasses the calendar, the same
+    way ``holidays_sync`` does.
+    """
     argv, expired = strip_flag(list(sys.argv[1:] if argv is None else argv), "--expired")
+    if expired and "--force" not in argv:
+        argv.append("--force")
 
     def main_fn(a, s, log):
         return _main_fn(a, s, log, expired)

@@ -239,7 +239,7 @@
             <td class="job">contracts_sync --expired<br><span class="tag rest">rest</span></td>
             <td class="when">09:00</td>
             <td>Saturday</td>
-            <td>Expired-contract pass into <code>contracts_expired</code> <span class="badge writeonly">write-only</span>.</td>
+            <td>Expired-contract pass into <code>contracts_expired</code> <span class="badge writeonly">write-only</span>. Code injects <code>--force</code> so the trading-day gate does not skip Saturday — without it this job exited 0 before doing anything and still pinged Healthchecks <em>ok</em>, so it monitored as healthy having never written a partition.</td>
           </tr>
           <tr>
             <td class="job">prune_raw.sh --apply</td>

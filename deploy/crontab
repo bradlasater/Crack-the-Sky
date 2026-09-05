@@ -34,6 +34,13 @@ LOG=/data/massive/logs/cron.log
 00 08 * * 1-5    cd $REPO && bash scripts/cronjob.sh contracts_sync $PY -m ingest.jobs.contracts_sync >> $LOG 2>&1
 30 16 * * 1-5    cd $REPO && bash scripts/cronjob.sh contracts_sync $PY -m ingest.jobs.contracts_sync >> $LOG 2>&1
 00 08 * * 1-5    cd $REPO && bash scripts/cronjob.sh dividends_sync $PY -m ingest.jobs.dividends_sync >> $LOG 2>&1
+# Saturday is never a trading day, so this line did nothing at all until the
+# job learned to inject --force for the expired pass: run_job's gate exited 0
+# before any work, and answered with a Healthchecks *ok* ping, so a job that
+# had never once produced a partition monitored as healthy. The --force lives
+# in contracts_sync.main(), not here, so a hand-run on a weekend behaves the
+# same way. Do NOT add --expired to the Mon-Fri lines above: those must stay
+# gated or they write a contracts partition on market holidays.
 00 09 * * 6      cd $REPO && bash scripts/cronjob.sh contracts_sync $PY -m ingest.jobs.contracts_sync --expired >> $LOG 2>&1
 00 07 * * 0      cd $REPO && bash scripts/cronjob.sh holidays_sync $PY -m ingest.jobs.holidays_sync >> $LOG 2>&1
 

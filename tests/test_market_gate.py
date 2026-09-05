@@ -9,6 +9,8 @@ The frozen holiday calendar (tests/fixtures/holidays.json, derived from a real
 
 from __future__ import annotations
 
+import importlib
+import re
 import shutil
 from datetime import date
 from pathlib import Path
@@ -113,3 +115,72 @@ def test_require_trading_day_force_bypasses(data_root: Path) -> None:
 def test_missing_calendar_fails_open_on_weekday(tmp_path: Path) -> None:
     assert market_gate.is_trading_day(date(2026, 9, 8), tmp_path)  # no holidays.json
     assert not market_gate.is_trading_day(date(2026, 9, 5), tmp_path)  # still weekend
+
+
+# ---------------------------------------------------------------------------
+# Weekend-only cron lines vs. the gate
+# ---------------------------------------------------------------------------
+#
+# The gate exits 0 *quietly* so market holidays do not page, and run_job
+# answers that exit with a Healthchecks success ping for the same reason. Put
+# those two together on a job scheduled only on a Saturday or a Sunday and you
+# get a job that can never run and monitors as healthy forever -- which is
+# precisely what `contracts_sync --expired` did until 2026-09-05, having never
+# once written a clean/contracts_expired partition.
+#
+# So: every weekend-only line in deploy/crontab must reach its work, either by
+# forcing past the gate (holidays_sync, contracts_sync --expired) or by
+# resolving its run date to a trading day (history_audit).
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+WEEKEND_DOW = {"0", "6", "7"}  # cron accepts both 0 and 7 for Sunday
+
+
+def _weekend_only_cron_jobs() -> list[tuple[str, str, list[str]]]:
+    """(line, module, args) for deploy/crontab lines that only ever fire on a weekend."""
+    found = []
+    for line in (REPO_ROOT / "deploy" / "crontab").read_text().splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        fields = line.split()
+        if len(fields) < 6 or not fields[0][0].isdigit():
+            continue  # env assignment, not a schedule
+        dow = fields[4]
+        if dow == "*" or not set(dow.split(",")) <= WEEKEND_DOW:
+            continue
+        m = re.search(r"-m (ingest\.jobs\.\w+|pricing\.\w+)((?: --[\w-]+)*)", line)
+        if not m:
+            continue  # a bash script, which does not use run_job
+        found.append((line, m.group(1), m.group(2).split()))
+    return found
+
+
+def test_the_crontab_has_weekend_only_lines_to_check() -> None:
+    """Guard the guard: a parser that silently matches nothing proves nothing."""
+    assert len(_weekend_only_cron_jobs()) >= 2
+
+
+@pytest.mark.parametrize(
+    ("module_path", "args"),
+    [(mod, args) for _, mod, args in _weekend_only_cron_jobs()],
+    ids=[f"{mod.rsplit('.', 1)[-1]}{''.join(args)}" for _, mod, args in _weekend_only_cron_jobs()],
+)
+def test_a_weekend_only_job_survives_its_own_schedule(monkeypatch, module_path, args) -> None:
+    """It must force past the gate, or gate on a date that is a trading day."""
+    module = importlib.import_module(module_path)
+    seen: list[str] = []
+    monkeypatch.setattr(module, "run_job", lambda job, main_fn, argv: seen.extend(argv))
+
+    module.main(list(args))
+
+    gate_date = next(
+        (a.split("=", 1)[1] for a in seen if a.startswith("--date=")),
+        seen[seen.index("--date") + 1] if "--date" in seen else None,
+    )
+    assert "--force" in seen or (
+        gate_date is not None and market_gate.is_trading_day(date.fromisoformat(gate_date))
+    ), (
+        f"{module_path} {' '.join(args)} is scheduled only on a weekend, but neither forces "
+        f"past the trading-day gate nor resolves --date to a trading day, so every run will "
+        f"exit 0 before doing any work -- and ping Healthchecks green while doing it."
+    )

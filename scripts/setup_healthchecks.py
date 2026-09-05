@@ -42,51 +42,56 @@ API_KEY_ENV = "HEALTHCHECKS_API_KEY"
 
 # job -> (cron schedule, grace_minutes, description)
 #
-# Schedules mirror deploy/crontab. Where a job runs on several cron lines, the
-# expression below is the one that must hold during the trading session; the
-# grace absorbs the rest. Timezone is set per check to America/New_York.
-JOBS: dict[str, tuple[str, int, str]] = {
-    "contracts_sync":   ("0 8 * * 1-5",     90,  "SPY/SPX contract universe (also runs 16:30)"),
-    "dividends_sync":   ("0 8 * * 1-5",     90,  "SPY dividends and splits"),
-    "holidays_sync":    ("0 7 * * 0",       240, "Market calendar refresh (weekly)"),
-    "snapshot_sweep":   ("* 10-15 * * 1-5", 10,  "1/min full-chain snapshots - THE irreplaceable dataset"),
-    # Grace covers the gap between the 09:25 start and the terminal ping at
-    # the ~16:35 capture end (market_gate.option_capture_end_et), plus ~50
-    # minutes of margin. It was 600 (10h), which pushed detection of a missing
-    # terminal ping to 19:25; 480 brings it to 17:25 the same day.
-    "ws_minute_bars":   ("25 9 * * 1-5",    480, "Delayed options websocket capture (long-running)"),
-    # The run check above can only answer "did today's capture finish", so a
-    # process that dies mid-session stays green until that terminal ping is
-    # overdue. This second check is pinged from the job's 5-minute stats tick.
-    #
-    # On coverage, precisely: capture runs 09:25 -> ~16:35 and the first stats
-    # tick lands ~09:30, but one cron expression cannot say "every 5 minutes
-    # from 09:30 to 16:35" -- the minute field applies to every hour in the
-    # hour field. Expecting pings outside the capture window would alarm every
-    # single day, so the schedule is the widest band that sits entirely
-    # inside it. That gives ~10-minute detection between 10:00 and 15:55; a
-    # death in the first 35 minutes surfaces at 10:10, and one after 15:55 is
-    # left to the run check above at 17:25. Covering those two tails exactly
-    # would take a second and third check for ~55 minutes of the session,
-    # which is not worth the alert surface.
-    "ws_minute_bars_alive": ("*/5 10-15 * * 1-5", 10, "Websocket capture liveness (5-min stats tick; covers 10:00-15:55)"),
-    "trades_watchlist": ("*/5 10-15 * * 1-5", 20, "Same-day option trades for the liquid watchlist"),
-    "underlying_bars":  ("5 8 * * 2-6",     90,  "SPY minute bars, T-1 only"),
-    "grouped_daily":    ("10 8 * * 2-6",    90,  "Whole-market daily bars (SPY + VIX proxies)"),
-    "rates_sync":       ("20 8 * * 2-6",    90,  "Treasury curve - the discount rate every IV inversion uses"),
-    "flatfile_pull":    ("5 11 * * 2-6",    120, "T-1 S3 flat files - the authoritative record"),
-    "reconcile":        ("30 11 * * 2-6",   120, "Rewrite minute bars from the flat file"),
-    "ibkr_executions":  ("30 18 * * 1-5",   120, "Broker fills via IBKR Flex (no gateway)"),
-    "term_structure":   ("0 12 * * 2-6",    120, "ATM vol term structure from T-1 day bars (derived, rebuildable)"),
-    "coverage_audit":   ("30 12 * * 2-6",   180, "Did yesterday actually land? Fails loudly if not"),
-    "history_audit":    ("0 13 * * 6",      300, "Is the whole archive still complete? Weekly, vendor-verified"),
-    # Chips away at the rolling ~2-year equity-aggregate window. Without its
-    # own check a dead backfill would stay invisible until coverage_audit's
-    # *_window check escalated a gap to FAIL at the 30-day edge -- far too
-    # late for data that cannot be re-fetched afterwards.
-    "backfill_underlying": ("30 2 * * *",   60,  "Underlying history backfill (expiring window)"),
-    "drift_check":      ("0 17 * * 1-5",    60,  "Own IV/Greeks identity canary (vendor diffs diagnostic). After EOD snapshot."),
-}
+# The data lives in deploy/schedule.json -- the canonical schedule the systemd
+# timers are also generated from -- so monitoring cannot drift from what is
+# installed. Where a job runs on several cron lines, the check's schedule is
+# the expression that must hold during the trading session; the grace absorbs
+# the rest. Timezone is set per check to America/New_York.
+#
+# Rationale that used to sit next to the values, preserved:
+#
+# ws_minute_bars (grace 480): covers the gap between the 09:25 start and the
+# terminal ping at the ~16:35 capture end (market_gate.option_capture_end_et),
+# plus ~50 minutes of margin. It was 600 (10h), which pushed detection of a
+# missing terminal ping to 19:25; 480 brings it to 17:25 the same day.
+#
+# ws_minute_bars_alive (extra check, no schedule line of its own): the run
+# check above can only answer "did today's capture finish", so a process that
+# dies mid-session stays green until that terminal ping is overdue. This second
+# check is pinged from the job's 5-minute stats tick.
+#
+# On coverage, precisely: capture runs 09:25 -> ~16:35 and the first stats tick
+# lands ~09:30, but one cron expression cannot say "every 5 minutes from 09:30
+# to 16:35" -- the minute field applies to every hour in the hour field.
+# Expecting pings outside the capture window would alarm every single day, so
+# the schedule is the widest band that sits entirely inside it. That gives
+# ~10-minute detection between 10:00 and 15:55; a death in the first 35 minutes
+# surfaces at 10:10, and one after 15:55 is left to the run check above at
+# 17:25. Covering those two tails exactly would take a second and third check
+# for ~55 minutes of the session, which is not worth the alert surface.
+#
+# backfill_underlying: chips away at the rolling ~2-year equity-aggregate
+# window. Without its own check a dead backfill would stay invisible until
+# coverage_audit's *_window check escalated a gap to FAIL at the 30-day edge --
+# far too late for data that cannot be re-fetched afterwards.
+SCHEDULE_JSON = Path(__file__).resolve().parents[1] / "deploy" / "schedule.json"
+
+
+def load_jobs(path: Path = SCHEDULE_JSON) -> dict[str, tuple[str, int, str]]:
+    """job -> (cron schedule, grace_minutes, description), from deploy/schedule.json."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    jobs: dict[str, tuple[str, int, str]] = {}
+    for unit in data["units"]:
+        check = unit.get("healthchecks")
+        if check is not None:
+            jobs[unit["job"]] = (check["schedule"], check["grace_min"], check["desc"])
+    for name, check in data["extra_checks"].items():
+        jobs[name] = (check["schedule"], check["grace_min"], check["desc"])
+    return jobs
+
+
+JOBS: dict[str, tuple[str, int, str]] = load_jobs()
+
 
 SLUG_PREFIX = "massive-"
 TZ = "America/New_York"

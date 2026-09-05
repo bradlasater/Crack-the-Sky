@@ -82,7 +82,7 @@
           </tr>
           <tr>
             <td class="job">tests/</td>
-            <td>Offline pytest: ingest, <code>tests/marketdata/</code>, <code>tests/pricing/</code>, plus Healthchecks/crontab drift tests.</td>
+            <td>Offline pytest: ingest, <code>tests/marketdata/</code>, <code>tests/pricing/</code>, plus Healthchecks/schedule drift tests.</td>
           </tr>
           <tr>
             <td class="job">docs/</td>
@@ -90,7 +90,7 @@
           </tr>
           <tr>
             <td class="job">deploy/</td>
-            <td><code>crontab</code> (source of schedule) and an optional systemd unit for the websocket job.</td>
+            <td><code>schedule.json</code> (source of schedule), <code>crontab</code> (kept installed through the timer cutover), the Ansible playbook + unit templates that generate the systemd timers, and an optional systemd unit for the websocket job.</td>
           </tr>
           <tr>
             <td class="job">scripts/</td>

@@ -35,6 +35,7 @@
             <li><a href="box-operations.html#box-layout">Layout the repo assumes</a></li>
             <li><a href="box-operations.html#box-secrets">Secrets (.env)</a></li>
             <li><a href="box-operations.html#box-schedule">Installed schedule</a></li>
+            <li><a href="box-operations.html#box-timers">Systemd job timers</a></li>
             <li><a href="box-operations.html#box-runner">GitHub Actions runner</a></li>
             <li><a href="box-operations.html#box-healthchecks">Healthchecks.io</a></li>
             <li><a href="box-operations.html#box-ibkr-flex">IBKR Flex Web Service</a></li>
@@ -88,13 +89,44 @@
       <code>scripts/setup_healthchecks.py --api-key …</code>.</p>
 
       <h2 id="box-schedule">Installed schedule</h2>
-      <p><span class="tag ok">active</span> The box crontab is installed directly from the repo
+      <p><span class="tag ok">active</span> The canonical schedule is
+      <code>deploy/schedule.json</code> — one entry per job, each carrying the
+      schedule twice (<code>cron</code> and <code>on_calendar</code> forms,
+      machine-checked against each other in CI). The Ansible playbook
+      (<code>deploy/ansible/playbook.yml</code>) templates a user-level
+      <code>.service</code>/<code>.timer</code> pair per entry into
+      <code>~/.config/systemd/user/</code> and enables the timers.</p>
+      <p>The box crontab is still installed directly from the repo
       (<code>crontab deploy/crontab</code> — the placeholder path already matches the box user, no
-      <code>sed</code> rewrite needed) and is byte-identical to <code>deploy/crontab</code> on
-      <code>main</code>. The <code>box.yml</code> “Crontab drift” step fails the build if these
-      diverge; that alarm fired on 2026-09-01 when PRs #10/#11 added <code>rates_sync</code> and
-      <code>ibkr_executions</code> before the crontab was re-installed. Fix is always the same:
-      pull <code>main</code>, re-install the crontab.</p>
+      <code>sed</code> rewrite needed) as a fallback while the timers take over. The overlap is
+      safe: both paths go through <code>scripts/cronjob.sh</code> and share
+      <code>/tmp/massive-&lt;job&gt;.lock</code>, so whichever fires first runs and the other logs
+      <code>job_skipped</code> and exits 0 — and every timer sets <code>AccuracySec=1s</code>, so
+      the loser fires inside the winner's runtime rather than a minute later. After a clean day
+      of timer runs, a follow-up PR removes the crontab and this paragraph. The
+      <code>box.yml</code> “Crontab drift” step fails the build if the installed crontab diverges
+      from the repo; that alarm fired on 2026-09-01 when PRs #10/#11 added
+      <code>rates_sync</code> and <code>ibkr_executions</code> before the crontab was
+      re-installed. Fix is always the same: pull <code>main</code>, re-install the crontab.</p>
+
+      <h2 id="box-timers">Systemd job timers</h2>
+      <p><span class="tag ok">active</span> One <code>massive-&lt;job&gt;.timer</code> +
+      <code>massive-&lt;job&gt;.service</code> pair per schedule entry, generated — never
+      hand-edited on the box; change <code>deploy/schedule.json</code> and re-run the playbook.
+      Variants get their own unit but share the job's lock and Healthchecks check:
+      <code>massive-contracts-sync-expired</code> runs <code>contracts_sync --expired</code>,
+      <code>massive-snapshot-sweep-eod</code> runs <code>snapshot_sweep --eod</code>.</p>
+      <ul>
+        <li><code>Type=oneshot</code> services through <code>scripts/cronjob.sh</code>; logs still append to <code>/data/massive/logs/cron.log</code>, and journald keeps unit start/stop/exit status — <code>journalctl --user -u massive-coverage-audit</code>.</li>
+        <li><code>AccuracySec=1s</code> + <code>Persistent=false</code> + <code>RandomizedDelaySec=0</code> on every timer. The 1s accuracy is load-bearing for the crontab overlap (systemd's default is 1&nbsp;min — a timer firing up to 60s late would double-capture <code>snapshot_sweep</code>); no persistence because a missed sweep is worthless an hour later and catch-up would stampede the day's backlog after a reboot.</li>
+        <li><code>Restart=on-failure</code> with <code>StartLimitBurst=3</code> / <code>StartLimitIntervalSec=1800</code> only on low-frequency jobs — cross-run retry, the thing cron never had. The 1/min and 5/min jobs get no retry: the next tick is closer than any sane delay.</li>
+        <li><code>OnFailure=massive-alert@&lt;check-slug&gt;.service</code> pings the check's <code>/fail</code> for deaths the job cannot report itself (OOM kill, unit start failure, exhausted restarts). Ordinary non-zero exits already ping <code>/fail</code> from the job.</li>
+        <li>Timers elapse in the box's local time, which must stay America/New_York — the playbook fails loudly if the system timezone drifts.</li>
+      </ul>
+      <pre><code>systemctl --user list-timers 'massive-*'     # next/last fire per job
+journalctl --user -u massive-snapshot-sweep -n 50
+ansible-playbook -i deploy/ansible/inventory.ini deploy/ansible/playbook.yml  # (re)converge
+ansible-playbook deploy/ansible/render_units.yml  # render to /tmp only, no install</code></pre>
 
       <h2 id="box-runner">GitHub Actions self-hosted runner</h2>
       <p><span class="tag ok">active</span> Installed 2026-09-01 to replace Buildkite. Registered to the
@@ -111,12 +143,16 @@ loginctl enable-linger brad-lasater          # survives logout/reboot</code></pr
       single-owner repo with 2FA; the keys are read-only and no brokerage access is reachable.</p>
 
       <h2 id="box-healthchecks">Healthchecks.io</h2>
-      <p><span class="tag ok">active</span> Fifteen checks, one per cron job, named
-      <code>massive-&lt;job&gt;</code>. Jobs ping via the ping key in <code>.env</code>; schedules and grace
-      periods were aligned to the crontab with <code>scripts/setup_healthchecks.py</code> on
-      2026-09-01 (without that step, auto-created checks get a default daily schedule and
-      false-alarm over weekends on the weekday-only jobs). A notification channel
-      (email/Slack) must exist in the Healthchecks UI or alerts go nowhere.</p>
+      <p><span class="tag ok">active</span> Nineteen scheduled jobs report here, mapped to
+      eighteen checks: the expired-contracts and EOD-snapshot passes share their parent job's
+      check (19 jobs → 17 scheduled checks, named <code>massive-&lt;job&gt;</code>), and the extra
+      liveness check <code>massive-ws-minute-bars-alive</code> is pinged by the running capture
+      rather than scheduled. Jobs ping via the ping key in <code>.env</code>; schedules and grace
+      periods come from <code>deploy/schedule.json</code> via
+      <code>scripts/setup_healthchecks.py</code> (without that step, auto-created checks get a
+      default daily schedule and false-alarm over weekends on the weekday-only jobs). A
+      notification channel (email/Slack) must exist in the Healthchecks UI or alerts go
+      nowhere.</p>
 
       <h2 id="box-ibkr-flex">IBKR Flex Web Service</h2>
       <p><span class="tag ok">active</span> Verified live 2026-09-01: token + query id authenticate, the
@@ -144,6 +180,7 @@ gh api repos/{owner}/{repo}/actions/runners --jq '.runners[] | {name,status}'
 
 # schedule matches the repo?
 crontab -l | diff - deploy/crontab
+systemctl --user list-timers 'massive-*'
 
 # entitlements + payload shapes, live?
 venv/bin/python -m ingest.entitlements

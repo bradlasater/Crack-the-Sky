@@ -51,10 +51,11 @@ Two classes of data, opposite treatment:
 
 ## Operations
 
-- Runs on an Ubuntu headless box; `cron` + `flock` is the whole scheduler
-  (`deploy/crontab` is the source of truth). Every line goes through
-  `scripts/cronjob.sh`, so a run dropped for overlapping the previous one
-  logs `job_skipped` rather than vanishing.
+- Runs on an Ubuntu headless box. The schedule lives in `deploy/schedule.json`
+  and is rendered into user-level systemd timer+service units by
+  `deploy/ansible/playbook.yml` (the crontab stays installed through the
+  cutover). Every run goes through `scripts/cronjob.sh`, so a run dropped for
+  overlapping the previous one logs `job_skipped` rather than vanishing.
 - Every job has its own Healthchecks.io check — a dead job pages, it doesn't
   hide. A daily `coverage_audit` alarms on any capture gap, and on the disk
   runway left at the current rate of snapshot growth.
@@ -75,8 +76,11 @@ multi-page, one file per section). Machine state the repo can't declare
 
 On the box: `bash scripts/bootstrap.sh`, fill in `.env` from `.env.example`,
 probe the plan with `venv/bin/python -m ingest.entitlements`, then install the
-schedule — rewriting the placeholder home path first, since cron does not
-expand `~`/`$HOME`:
+schedule — `ansible-playbook -i deploy/ansible/inventory.ini deploy/ansible/playbook.yml`
+templates the systemd user timers from `deploy/schedule.json` and installs the
+crontab (still in place as a fallback during the timer cutover). A hand crontab
+install works too — rewriting the placeholder home path first, since cron does
+not expand `~`/`$HOME`:
 
 ```
 sed "s|/home/brad-lasater|$HOME|g" deploy/crontab | crontab -

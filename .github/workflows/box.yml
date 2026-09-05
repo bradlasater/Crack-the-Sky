@@ -69,9 +69,68 @@ jobs:
 
       - name: Crontab drift
         # The installed crontab must match the repo (modulo the $HOME rewrite).
+        # Kept green through the timer cutover: the crontab stays installed as
+        # a fallback until the follow-up PR removes it.
         run: |
           sed "s|/home/brad-lasater|$HOME|g" deploy/crontab > /tmp/expected.crontab
           diff <(crontab -l) /tmp/expected.crontab
+
+      - name: Timer drift
+        # The generated user units must match a fresh render of
+        # deploy/schedule.json, and every timer must be loaded by systemd.
+        # ansible-core is installed into the CI venv only (it is a no-op when
+        # already present); the units are rendered by the same templates the
+        # install playbook uses. Skipped entirely while no massive timer is
+        # installed: the units land at cutover (the playbook run after this
+        # merges), and a red build before then would block the PR that
+        # installs them.
+        run: |
+          if ! ls "$HOME"/.config/systemd/user/massive-*.timer >/dev/null 2>&1; then
+            echo "::notice::massive timers not installed on the box yet (pre-cutover) -- skipping"
+            exit 0
+          fi
+          venv/bin/pip install --quiet ansible-core
+          rm -rf /tmp/massive-units-rendered
+          venv/bin/ansible-playbook deploy/ansible/render_units.yml -e out_dir=/tmp/massive-units-rendered
+          venv/bin/python - <<'EOF'
+          import json
+          import pathlib
+          import subprocess
+          import sys
+
+          schedule = json.loads(pathlib.Path("deploy/schedule.json").read_text())
+          rendered = pathlib.Path("/tmp/massive-units-rendered")
+          installed = pathlib.Path.home() / ".config" / "systemd" / "user"
+          failed = False
+
+          names = [f"{u['unit']}.{ext}" for u in schedule["units"] for ext in ("service", "timer")]
+          names.append("massive-alert@.service")
+          for name in names:
+              got = installed / name
+              if not got.exists():
+                  print(f"MISSING: {got}")
+                  failed = True
+                  continue
+              diff = subprocess.run(
+                  ["diff", "-u", str(rendered / name), str(got)],
+                  capture_output=True, text=True,
+              )
+              if diff.returncode:
+                  print(diff.stdout)
+                  failed = True
+
+          timers = subprocess.run(
+              ["systemctl", "--user", "list-timers", "--all", "--no-legend", "--plain"],
+              capture_output=True, text=True,
+          ).stdout
+          for u in schedule["units"]:
+              timer = f"{u['unit']}.timer"
+              if timer not in timers:
+                  print(f"NOT LOADED: {timer}")
+                  failed = True
+
+          sys.exit(1 if failed else 0)
+          EOF
 
       - name: Coverage audit (T-1)
         # The gate that matters on the daily scheduled run: did yesterday's

@@ -17,6 +17,15 @@
     - name: daemon-reload user units
       ansible.builtin.command: systemctl --user daemon-reload
 
+    - name: re-arm massive job timers
+      # daemon-reload alone does not recompute an active timer's next elapse
+      # from a changed OnCalendar; restarting the timers does, and restarting a
+      # timer is harmless (Persistent=false means nothing is owed).
+      ansible.builtin.shell: >-
+        systemctl --user list-units --all --no-legend --plain 'massive-*.timer'
+        | awk '{print $1}'
+        | xargs --no-run-if-empty systemctl --user restart
+
     - name: restart actions-runner
       ansible.builtin.command: systemctl --user restart actions-runner.service
 
@@ -56,8 +65,76 @@
     - name: Crontab installed from the repo
       # Installing the same file again is a no-op in effect, so just always do
       # it; the box.yml "Crontab drift" step verifies the result.
+      # Cutover note: the crontab STAYS installed while the systemd timers
+      # below take over. Both paths go through scripts/cronjob.sh and share
+      # /tmp/massive-<job>.lock, so the loser of each race logs job_skipped and
+      # exits 0. The timers' AccuracySec=1s keeps the loser's fire inside every
+      # job's runtime, so there is no double capture. A follow-up PR removes
+      # the crontab after a clean day of timer runs.
       ansible.builtin.command:
         cmd: crontab {{ repo_dir }}/deploy/crontab
+
+    - name: Schedule definition (one canonical file for crontab + timers)
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../schedule.json"
+        name: schedule
+      tags: [timers]
+
+    - name: System timezone is America/New_York (OnCalendar fires in local time)
+      # Timers have no per-unit timezone: they elapse in the system's local
+      # time. The schedule is written in ET, so a box reimaged to UTC would
+      # fire every job hours off -- fail loudly instead.
+      ansible.builtin.command: timedatectl show -p Timezone --value
+      register: system_timezone
+      changed_when: false
+      failed_when: system_timezone.stdout != "America/New_York"
+      tags: [timers]
+
+    - name: User unit directory exists
+      ansible.builtin.file:
+        path: "{{ user_unit_dir }}"
+        state: directory
+        mode: "0755"
+      tags: [timers]
+
+    - name: Job service units generated from schedule.json
+      ansible.builtin.template:
+        src: massive-job.service.j2
+        dest: "{{ user_unit_dir }}/{{ item.unit }}.service"
+        mode: "0644"
+      loop: "{{ schedule.units }}"
+      notify:
+        - daemon-reload user units
+        - re-arm massive job timers
+      tags: [timers]
+
+    - name: Job timer units generated from schedule.json
+      ansible.builtin.template:
+        src: massive-job.timer.j2
+        dest: "{{ user_unit_dir }}/{{ item.unit }}.timer"
+        mode: "0644"
+      loop: "{{ schedule.units }}"
+      notify:
+        - daemon-reload user units
+        - re-arm massive job timers
+      tags: [timers]
+
+    - name: Failure-alert template unit (OnFailure hook for the job services)
+      ansible.builtin.template:
+        src: massive-alert@.service.j2
+        dest: "{{ user_unit_dir }}/massive-alert@.service"
+        mode: "0644"
+      notify:
+        - daemon-reload user units
+      tags: [timers]
+
+    - name: Job timers enabled and started
+      # Idempotent state assertion; the box.yml "Timer drift" step verifies the
+      # rendered files and that every timer is loaded.
+      ansible.builtin.command: systemctl --user enable --now {{ item.unit }}.timer
+      loop: "{{ schedule.units }}"
+      changed_when: false
+      tags: [timers]
 
     - name: Linger state
       ansible.builtin.command: loginctl show-user {{ ansible_facts['env']['USER'] }} -p Linger --value

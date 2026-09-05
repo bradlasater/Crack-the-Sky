@@ -47,16 +47,16 @@ COVERAGE_NAME = "coverage.json"
 def _clean_root(settings: Settings, dataset: str) -> Path:
     return Path(settings.data_root) / "clean" / dataset
 
-# Sweep cadence the crontab installs (one per minute during the session).
+# Sweep cadence the schedule installs (one per minute during the session).
 SWEEP_INTERVAL_S = 60
 # Fraction of expected sweeps below which the day is a FAIL.
 SWEEP_MIN_RATIO = 0.95
 # Largest tolerated hole between consecutive sweeps.
 MAX_SWEEP_GAP_S = 180
 
-# The crontab schedules three *different* things into one partition, and
-# conflating them is what made this check useless: it reported a WARN on SPY
-# and SPX every single day, on a healthy box.
+# The schedule (deploy/schedule.json) schedules three *different* things into
+# one partition, and conflating them is what made this check useless: it
+# reported a WARN on SPY and SPX every single day, on a healthy box.
 #
 #   05 09            one pre-open sweep, for the prior session's settled OI
 #   30-59 9 / 10-15 / 0-30 16   the continuous 1-minute cadence
@@ -71,10 +71,11 @@ MAX_SWEEP_GAP_S = 180
 # So: the cadence numbers below are computed over the continuous window only,
 # and the two deliberate singletons are asserted separately.
 SWEEP_WINDOW_OPEN_ET = time(9, 30)
-# Continuous cadence runs to close + 30 min (crontab "0-30 16"). This is
-# deliberately *not* market_gate.option_capture_end_et (close + 35): that is
-# the websocket job's deadline, sized for when the delayed feed *delivers* the
-# last bar, and has nothing to do with when the sweep cron stops firing. The
+# Continuous cadence runs to close + 30 min (the schedule's "0-30 16" line).
+# This is deliberately *not* market_gate.option_capture_end_et (close + 35):
+# that is the websocket job's deadline, sized for when the delayed feed
+# *delivers* the last bar, and has nothing to do with when the sweep stops
+# firing. The
 # two were briefly the same number, which is how borrowing it here once
 # understated the expected count by ten sweeps a day.
 SWEEP_TAIL = timedelta(minutes=30)

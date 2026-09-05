@@ -38,6 +38,7 @@
             <li><a href="pricing.html#pricing-euro-american">European vs American</a></li>
             <li><a href="pricing.html#pricing-iv-invert">IV invert</a></li>
             <li><a href="pricing.html#pricing-iv-tree">The tree is part of the answer</a></li>
+            <li><a href="pricing.html#pricing-surface">SVI surface</a></li>
           </ol>
         </li>
         <li><a href="warehouse-math.html">Warehouse → math</a></li>
@@ -61,9 +62,9 @@
       </header>
 
       <p>
-        Calculators. Not a surface, not an interpolator. Pass
+        Calculators, plus the one fitted object: the SVI vol surface. Pass
         <code>S, K, T, r, q</code> (or <code>F</code>) and <code>sigma</code>
-        explicitly.
+        explicitly to the calculators.
       </p>
       <dl class="notes">
         <dt id="pricing-conventions">GreeksConventions</dt>
@@ -117,6 +118,26 @@
           price with no time value &mdash; a deep ITM American put is
           exercised now and is worth <code>K-S</code> at every sigma, which is
           a property of the contract, not a solver failure.
+        </dd>
+        <dt id="pricing-surface">SVI surface</dt>
+        <dd>
+          <code>pricing.surface</code> fits raw SVI (Gatheral),
+          <code>w(k) = a + b(ρ(k−m) + √((k−m)² + σ²))</code> over
+          <code>k = ln(K/F)</code>, per (date, root, expiry) on own-IV OTM
+          strikes from <code>option_day_bars</code> — calls above the parity
+          forward, puts below, same chain and same F as the ATM curve.
+          SPX/SPXW only: SPY strikes invert on the American tree
+          (<code>implied_vol_american</code>) and this fit path is European
+          end to end — an SPY smile is follow-up, not a flag. Box bounds plus the
+          non-negative-total-variance domain constraint; deterministic
+          data-derived seed. Butterfly (<code>g(k) ≥ 0</code>) and calendar
+          (total variance non-decreasing in T) violations raise
+          <code>SurfaceArbitrageError</code>. <code>Surface.vol(K, T)</code>
+          interpolates linearly in total variance between bracketing expiries,
+          flat outside, exact on a fitted expiry. CLI:
+          <code>python -m pricing.surface --date … --underlying SPXW</code>;
+          archive: <code>scripts/build_surface.py</code> →
+          <code>vol_surface</code>. Deliberately unscheduled.
         </dd>
       </dl>
 

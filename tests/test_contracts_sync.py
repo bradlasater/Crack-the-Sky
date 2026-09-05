@@ -9,9 +9,11 @@ structurally always zero.
 from __future__ import annotations
 
 from datetime import date
+from types import SimpleNamespace
 
 from ingest.common import landing
 from ingest.common.config import Settings
+from ingest.jobs import contracts_sync
 from ingest.jobs.contracts_sync import _previous_tickers
 
 YESTERDAY = date(2026, 9, 1)
@@ -105,3 +107,110 @@ def test_baseline_ignores_partitions_after_the_run_date(tmp_path) -> None:
     _land(tmp_path, YESTERDAY, "SPX", ["O:SPX1"])
     _land(tmp_path, date(2026, 9, 10), "SPX", ["O:SPX_FUTURE"])
     assert _previous_tickers(settings, "contracts", TODAY, "SPX") == {"O:SPX1"}
+
+
+# ---------------------------------------------------------------------------
+# The expired pass and the trading-day gate
+# ---------------------------------------------------------------------------
+
+
+def _argv_handed_to_run_job(monkeypatch, argv: list[str]) -> list[str]:
+    """What ``main`` passes to ``run_job``, without running the job."""
+    seen: list[str] = []
+
+    def fake_run_job(job_name, main_fn, parsed):
+        seen.extend(parsed)
+
+    monkeypatch.setattr(contracts_sync, "run_job", fake_run_job)
+    contracts_sync.main(argv)
+    return seen
+
+
+def test_the_expired_pass_forces_past_the_trading_day_gate(monkeypatch) -> None:
+    """The regression: a Saturday-only job that the Saturday gate discarded.
+
+    ``--expired`` is scheduled ``00 09 * * 6`` and nothing else. Saturday is
+    never a trading day, so ``run_job``'s gate raised SystemExit(0) before any
+    work -- and because that exit pings Healthchecks *ok* (so market holidays
+    do not page), the check stayed green while ``clean/contracts_expired`` was
+    never created at all.
+    """
+    assert "--force" in _argv_handed_to_run_job(monkeypatch, ["--expired"])
+
+
+def test_the_weekday_passes_stay_gated(monkeypatch) -> None:
+    """08:00 and 16:30 fire Mon-Fri, market calendar or not.
+
+    Forcing those too would write a contracts partition on Thanksgiving, which
+    is the exact thing the gate exists to prevent. Only the expired pass --
+    reference data whose subject is the universe, not a session -- opts out.
+    """
+    assert "--force" not in _argv_handed_to_run_job(monkeypatch, [])
+
+
+def test_an_explicit_force_is_not_duplicated(monkeypatch) -> None:
+    assert _argv_handed_to_run_job(monkeypatch, ["--expired", "--force"]).count("--force") == 1
+
+
+SATURDAY = date(2026, 9, 5)
+TUESDAY = date(2026, 9, 8)
+
+
+def _run_events(monkeypatch, tmp_path, *, run_date, expired, user_forced) -> list[tuple]:
+    """Events a run logs, with the network stubbed out."""
+
+    class _StubClient:
+        def __init__(self, *a, **kw) -> None: ...
+
+        def paginate(self, *a, **kw):
+            return iter(())
+
+    class _Log:
+        def __init__(self) -> None:
+            self.events: list[tuple[str, dict]] = []
+
+        def log(self, event, **kw) -> None:
+            self.events.append((event, kw))
+
+    monkeypatch.setattr(contracts_sync, "MassiveClient", _StubClient)
+    log = _Log()
+    args = SimpleNamespace(
+        date=run_date.isoformat(), force=user_forced, limit=None,
+        dry_run=True, underlying="SPY",
+    )
+    contracts_sync._main_fn(args, _settings(tmp_path), log, expired, user_forced)
+    return log.events
+
+
+def _datasets(events: list[tuple]) -> set[str]:
+    return {kw["dataset"] for event, kw in events if event == "contracts_diff"}
+
+
+def test_the_injected_force_does_not_leak_into_the_live_pass(monkeypatch, tmp_path) -> None:
+    """--force clears run_job's gate for the *invocation*, not for both passes.
+
+    Without this the Saturday cron line would write a `contracts` partition
+    dated a non-trading day -- the live universe is per-session data, and the
+    whole reason the weekday lines stay gated is to keep session partitions off
+    days that had no session.
+    """
+    events = _run_events(
+        monkeypatch, tmp_path, run_date=SATURDAY, expired=True, user_forced=False
+    )
+    assert _datasets(events) == {"contracts_expired"}
+    assert any(e == "contracts_live_pass_skipped" for e, _ in events)
+
+
+def test_a_force_the_caller_typed_still_runs_both_passes(monkeypatch, tmp_path) -> None:
+    """--force means what it has always meant when a human types it."""
+    events = _run_events(
+        monkeypatch, tmp_path, run_date=SATURDAY, expired=True, user_forced=True
+    )
+    assert _datasets(events) == {"contracts", "contracts_expired"}
+
+
+def test_a_trading_day_runs_both_passes(monkeypatch, tmp_path) -> None:
+    events = _run_events(
+        monkeypatch, tmp_path, run_date=TUESDAY, expired=True, user_forced=False
+    )
+    assert _datasets(events) == {"contracts", "contracts_expired"}

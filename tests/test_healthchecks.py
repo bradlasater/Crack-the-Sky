@@ -50,6 +50,22 @@ def _no_retry_sleep(monkeypatch) -> None:
     monkeypatch.setattr(cli.time, "sleep", lambda s: None)
 
 
+@pytest.fixture(autouse=True)
+def _market_is_open(monkeypatch) -> None:
+    """Hold the trading-day gate open, because these tests run on the real clock.
+
+    Every ``run_job`` call below passes an empty argv, so the run date is
+    ``today``. On a Saturday the market gate raises SystemExit(0) before
+    ``main_fn`` is ever called and eighteen tests here fail -- not for anything
+    they are testing, but because it is the weekend. The suite passed Monday to
+    Friday and went red every Saturday and Sunday, which on a repo whose CI
+    also runs from a self-hosted box on a weekend schedule is a standing false
+    alarm. The gate has its own coverage in tests/test_market_gate.py; the
+    subject here is pings and retries.
+    """
+    monkeypatch.setattr(cli.market_gate, "is_trading_day", lambda *a, **k: True)
+
+
 # ---------------------------------------------------------------------------
 # Slug / URL construction
 # ---------------------------------------------------------------------------

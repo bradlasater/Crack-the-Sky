@@ -8,7 +8,8 @@ and diffs the new contract set against the previous clean partition for the
 same underlying, logging ``{event: "contracts_diff", new: n, gone: n}``.
 
 ``--expired`` adds an ``expired=true`` pass written to the separate
-``contracts_expired`` dataset (same schema).
+``contracts_expired`` dataset (same schema), and injects ``--force`` --
+see :func:`main` for why that is not optional.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from itertools import islice
 from typing import Any
 
 from ingest import schemas
-from ingest.common import landing, ratelimit
+from ingest.common import landing, market_gate, ratelimit
 from ingest.common.cli import run_job
 from ingest.common.config import Settings
 from ingest.common.http_client import MassiveClient
@@ -112,15 +113,28 @@ def _sync_pass(
     return {"rows": len(records), **diff}
 
 
-def _main_fn(args, settings: Settings, logger: JsonlLogger, expired: bool):
+def _main_fn(args, settings: Settings, logger: JsonlLogger, expired: bool, user_forced: bool):
     client = MassiveClient(settings, priority=ratelimit.LOW)
     underlyings = parse_underlyings(args.underlying, DEFAULT_UNDERLYINGS)
     totals = {"rows": 0, "new": 0, "gone": 0, "expired_rows": 0}
+    # The live-universe pass is per-session data and belongs to sessions only.
+    # ``--expired`` injects ``--force`` to clear run_job's gate (see main), and
+    # letting that injected force reach this pass would write a `contracts`
+    # partition dated a Saturday -- the exact thing main's docstring promises
+    # it will not do. So this pass re-checks the calendar itself, and only a
+    # force the *caller* typed overrides it. Result: the injected force
+    # un-gates the expired pass and nothing else.
+    run_date = run_date_from_args(args)
+    sync_live = user_forced or market_gate.is_trading_day(run_date, settings.data_root)
+    if not sync_live:
+        logger.log("contracts_live_pass_skipped", date=run_date.isoformat(),
+                   reason="not a trading day; expired pass only")
     for underlying in underlyings:
-        counters = _sync_pass(client, settings, logger, args, underlying, "contracts", False)
-        totals["rows"] += counters["rows"]
-        totals["new"] += counters["new"]
-        totals["gone"] += counters["gone"]
+        if sync_live:
+            counters = _sync_pass(client, settings, logger, args, underlying, "contracts", False)
+            totals["rows"] += counters["rows"]
+            totals["new"] += counters["new"]
+            totals["gone"] += counters["gone"]
         if expired:
             counters = _sync_pass(
                 client, settings, logger, args, underlying, "contracts_expired", True
@@ -130,11 +144,36 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger, expired: bool):
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Entry point: ``python -m ingest.jobs.contracts_sync [--expired]``."""
+    """Entry point: ``python -m ingest.jobs.contracts_sync [--expired]``.
+
+    ``--expired`` injects ``--force``, because otherwise the expired pass can
+    never run at all. It is scheduled once a week, on Saturday, and Saturday
+    is never a trading day -- so ``run_job``'s market gate raised
+    ``SystemExit(0)`` before any work happened. The failure was silent by
+    design twice over: the gate exits *quietly* so market holidays do not page,
+    and ``run_job`` answers that exit with a Healthchecks *success* ping
+    ("exited early (not a trading day, or nothing to do)"), so the check stayed
+    green while ``clean/contracts_expired`` was never created. Observed
+    2026-09-05: ``job_start`` logged at 09:00:01, process gone one second
+    later, no ``job_end``, no partition.
+
+    Injecting it here rather than in ``deploy/crontab`` keeps a hand-run
+    ``python -m ingest.jobs.contracts_sync --expired`` on a weekend from
+    falling into the same hole, and lets CI assert the invariant.
+
+    The plain weekday runs stay gated on purpose: 08:00 and 16:30 fire Mon-Fri
+    regardless of the market calendar, and must not write a contracts
+    partition on Thanksgiving. Only the expired pass -- reference data whose
+    subject is the universe, not a session -- bypasses the calendar, the same
+    way ``holidays_sync`` does.
+    """
     argv, expired = strip_flag(list(sys.argv[1:] if argv is None else argv), "--expired")
+    user_forced = "--force" in argv
+    if expired and not user_forced:
+        argv.append("--force")
 
     def main_fn(a, s, log):
-        return _main_fn(a, s, log, expired)
+        return _main_fn(a, s, log, expired, user_forced)
 
     run_job(JOB, main_fn, argv)
 

@@ -10,7 +10,7 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   (`rows`, `bytes`, `job`, `duration_s`) crashes `job_end` logging *after*
   succeeding, turning a good run into `job_error` + a `/fail` ping. Latent
   today. Fix: filter reserved keys from the `**extras` merge.
-- `ingest/jobs/ws_minute_bars.py:612` — a 0-row capture pings healthcheck
+- `ingest/jobs/ws_minute_bars.py:648` — a 0-row capture pings healthcheck
   `/fail` but `main` still exits 0. Exit code and monitoring disagree; decide
   whether cron mail or Healthchecks is the alert channel, then align them.
 - `ingest/jobs/eod_dayaggs_rest.py:91` — non-watchlist mode does one sequential
@@ -25,7 +25,8 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   0/1/2/3 today). Use a rarer code or a lock-taken marker file.
 - `marketdata/types.py:96` — `Quote.asof_ns` collapses three timestamps into
   one (underlying stamp first). `market_price` (last trade) can be far staler
-  than the asof implies. Carry both stamps or document the choice.
+  than the asof implies. Carry both stamps or document the choice. The measured
+  cost of this is issue #44 (stale SPY last prints inverting to fabricated IVs).
 - `marketdata/opra.py:106` vs `ingest/jobs/__init__.py:85` — two OPRA year-pivot
   decoders disagree on `yy >= 80` (19xx vs 20xx). Unreachable today; hoist one
   shared decoder before the universe widens.
@@ -36,12 +37,14 @@ conservative audit pass. Grouped by area, roughly highest-value first.
 
 ## Monitoring gaps
 
-- `deploy/crontab:111` + `scripts/setup_healthchecks.py:48` — the monthly
-  `prune` job is unmonitored: no Healthchecks check exists and the drift test
-  doesn't see it. The one job that deletes data could silently stop running.
-  Add curl pings to `prune_raw.sh` (or ping support in `cronjob.sh`), register
-  "prune" in `JOBS`, extend the drift-test regex.
-- `pricing/drift_check.py:801` — `date.fromisoformat(args.date)` runs before
+- `deploy/schedule.json` (`prune` entry) + `deploy/crontab:148` — the monthly
+  `prune` job is unmonitored: it has no `healthchecks` block, so no
+  Healthchecks check exists and the schedule schema test doesn't see it. The
+  one job that deletes data could silently stop running. Add curl pings to
+  `prune_raw.sh` (or ping support in `cronjob.sh`), then give the entry a
+  `healthchecks` block. #40 deliberately gave `prune` no `OnFailure=` unit —
+  the alert's `?create=1` would auto-create a check nobody maintains.
+- `pricing/drift_check.py:811` — `date.fromisoformat(args.date)` runs before
   the logger and `/start` ping, so a malformed `--date` dies with a bare
   traceback and no Healthchecks signal. Decide: argparse `type=` validation
   (exit 2 to cron mail) or logging against a fallback date.
@@ -52,10 +55,6 @@ conservative audit pass. Grouped by area, roughly highest-value first.
 
 ## Performance
 
-- `pricing/from_market.py:569` + `ingest/common/rates.py:103` — `resolve_r`
-  re-reads every `treasury_yields` partition (history back to 1962) per quote.
-  Memoize `load_curve` per `(date, data_root)` or hoist the curve into the
-  chain loop, as `term_structure.build_for_date` already does.
 - `pricing/engine.py:_bump_greeks` — ~45 CRR tree evaluations per `greeks()`
   call (each higher-order greek re-bumps from scratch). A shared-bump refactor
   could cut the drift canary's dominant cost roughly in half; too invasive for
@@ -82,7 +81,7 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   urgency; add mtime invalidation.
 - `ingest/common/landing.py:212` — `quarantine_prior` uses `Path.replace`,
   overwriting a same-named quarantined file. Rare; collision-nudge the target.
-- `ingest/jobs/coverage_audit.py:120` + `deploy/crontab:46` — on 13:00
+- `ingest/jobs/coverage_audit.py:120` + `deploy/crontab:57` — on 13:00
   early-close days the cron cadence still runs to 16:30, so ~178 post-close
   sweeps read as "stray" and the 13:32–16:30 window is unchecked. Decide which
   side owns early closes: crontab stops early, or the audit treats the full
@@ -108,7 +107,7 @@ conservative audit pass. Grouped by area, roughly highest-value first.
 
 ## Docs / site
 
-- `pricing/from_market.py:146` — `expiry_instant` docstring omits VIX/VIXW
+- `pricing/from_market.py:168` — `expiry_instant` docstring omits VIX/VIXW
   settlement conventions.
 - `docs/404.html` uses relative asset paths; if it's ever served as a
   server-level 404 for deep URLs, switch to root-relative paths or a `<base>`

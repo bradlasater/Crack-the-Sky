@@ -86,7 +86,10 @@
         <dd>
           Snapshot-derived. Vendor IV/greeks copied as diagnostics
           (<code>vendor_*</code>). <code>market_price</code> = last if present,
-          else day close. Pricing must ignore vendor columns.
+          else day close; the trade's own stamp rides along as
+          <code>last_trade_asof_ns</code> so consumers can age-filter
+          (<code>asof_ns</code> stays the underlying/snapshot clock). Pricing
+          must ignore vendor columns.
         </dd>
         <dt id="md-asof">As-of</dt>
         <dd>

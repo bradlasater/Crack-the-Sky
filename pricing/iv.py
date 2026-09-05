@@ -33,6 +33,15 @@ _NEWTON_ITERS = 50
 _PRICE_TOL = 1e-12
 
 
+class BelowIntrinsicError(ValueError):
+    """Market price below the no-arbitrage lower bound.
+
+    A ``ValueError`` so existing ``except ValueError`` handling is unchanged;
+    the subclass lets a caller (e.g. the drift canary) tell stale
+    below-intrinsic prints apart from other uninvertible rows.
+    """
+
+
 def discounted_bounds(
     S: float,
     K: float,
@@ -93,7 +102,7 @@ def implied_vol(
     # Tiny slack for floating point; a price outside bounds is not invertible.
     slack = 1e-10 * max(S_, 1.0)
     if target < lower - slack:
-        raise ValueError(f"price {target} below intrinsic bound {lower} (S={S_} K={K_} T={T_})")
+        raise BelowIntrinsicError(f"price {target} below intrinsic bound {lower} (S={S_} K={K_} T={T_})")
     if target > upper + slack:
         raise ValueError(f"price {target} above max bound {upper} (S={S_} K={K_} T={T_})")
     if target <= lower + slack:
@@ -258,7 +267,7 @@ def implied_vol_american(
     lower, upper = american_bounds(S_, K_, T_, r_, call_put, q=qv)
     slack = 1e-10 * max(S_, 1.0)
     if target < lower - slack:
-        raise ValueError(f"price {target} below intrinsic bound {lower} (S={S_} K={K_} T={T_})")
+        raise BelowIntrinsicError(f"price {target} below intrinsic bound {lower} (S={S_} K={K_} T={T_})")
     if target > upper + slack:
         raise ValueError(f"price {target} above max bound {upper} (S={S_} K={K_} T={T_})")
 

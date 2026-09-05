@@ -23,10 +23,6 @@ conservative audit pass. Grouped by area, roughly highest-value first.
 - `scripts/cronjob.sh:29` — exit-code collision: if the wrapped command exits
   99 it is misreported as `job_skipped` and exits 0. Latent (jobs only exit
   0/1/2/3 today). Use a rarer code or a lock-taken marker file.
-- `marketdata/types.py:96` — `Quote.asof_ns` collapses three timestamps into
-  one (underlying stamp first). `market_price` (last trade) can be far staler
-  than the asof implies. Carry both stamps or document the choice. The measured
-  cost of this is issue #44 (stale SPY last prints inverting to fabricated IVs).
 - `marketdata/opra.py:106` vs `ingest/jobs/__init__.py:85` — two OPRA year-pivot
   decoders disagree on `yy >= 80` (19xx vs 20xx). Unreachable today; hoist one
   shared decoder before the universe widens.

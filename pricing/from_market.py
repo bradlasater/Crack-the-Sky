@@ -35,12 +35,20 @@ Three things here are load-bearing on this data feed:
   - The usual liquidity screen -- discard quotes wider than some threshold --
     is unavailable, because there is no width to measure. Volume and open
     interest are the substitutes the snapshot does carry.
-  - A last trade can be arbitrarily stale on an illiquid strike. The trade's
-    own timestamp is in ``option_snapshots.last_trade_sip_timestamp_ns``, but
-    it is *not* reachable through ``Quote``: ``Quote.asof_ns`` prefers
-    ``underlying_last_updated_ns`` and only falls back to the trade stamp, so
-    a fresh-looking ``asof_ns`` says nothing about the age of ``last``. A
-    staleness filter has to read the raw column.
+  - A last trade can be arbitrarily stale on an illiquid strike. The median
+    last print on the traded SPY chain at the 16:40 ET as-of was 7-25 h old
+    (measured 2026-09-01..04), and a print that old inverted against today's
+    spot is a fabricated IV, not an observation -- see issue #44 for the
+    below-intrinsic tail this produced. ``Quote`` therefore carries the
+    trade's own stamp (``last_trade_asof_ns``, from
+    ``option_snapshots.last_trade_sip_timestamp_ns``) alongside
+    ``asof_ns`` -- which still prefers ``underlying_last_updated_ns``, the
+    right clock for spot and rates -- and :func:`greeks_asof` skips
+    last-priced rows whose trade is older than ``max_trade_age_ns`` (default
+    ``DEFAULT_MAX_TRADE_AGE_MIN`` minutes), counting them in
+    ``ChainCounts.n_stale``. There is no ``day_close`` fallback: the reprice
+    identity needs a contemporaneous market price and a stale one is not
+    one. Rows priced off ``day_close`` are unaffected.
 
 * **The discount rate comes from the landed Treasury curve** when the caller
   passes ``r=None``, interpolated to the contract's own maturity
@@ -60,7 +68,10 @@ This warehouse is not entitled to option NBBO (no bid/ask on
 ``option_snapshots``). Invert ``last_trade_price`` when it is present, else
 ``day_close`` (see :attr:`marketdata.types.Quote.market_price`). A missing
 price is skipped (nothing to invert). A price outside discounted no-arbitrage
-bounds raises ``ValueError`` — never NaN.
+bounds raises ``ValueError`` — never NaN. A last trade older than
+``max_trade_age_ns`` at the as-of is stale and skipped (counted, never a
+``day_close`` fallback); below-intrinsic rejects are counted separately
+inside the uninvertible tally.
 
 Greeks engine per root
 ----------------------
@@ -104,6 +115,7 @@ from pricing.conventions import (
     GreeksConventions,
 )
 from pricing.engine import AmericanCRR, Engine, EuropeanBSM
+from pricing.iv import BelowIntrinsicError
 from pricing.iv import implied_vol as invert_iv
 from pricing.iv import implied_vol_american as invert_iv_american
 from pricing.rates import RateCurveError, rate_for
@@ -124,6 +136,17 @@ _ENGINES: dict[str, Engine] = {
 # chain at that depth is not a reasonable CLI. 51 steps stays American.
 CHAIN_CRR_STEPS = 51
 
+# A last-priced row whose trade printed more than this long before the as-of
+# is stale and skipped. Measured on 2026-09-01..04 at the canary's 16:40 ET
+# as-of: the freshest print in the warehouse is ~25 min old (the last sweep
+# before the cutoff is ~16:15 ET), so anything under ~30 min would skip
+# every row; the median traded SPY contract last printed ~7-25 h earlier;
+# and 74-100% of the session's below-intrinsic SPY put prints (issue #44)
+# were more than 60 min old. One hour clears the sweep cadence and catches
+# that population without needing the arbitrage violation to trigger first.
+DEFAULT_MAX_TRADE_AGE_MIN = 60.0
+DEFAULT_MAX_TRADE_AGE_NS = int(DEFAULT_MAX_TRADE_AGE_MIN * 60 * 1e9)
+
 # Vendor snapshot units differ from ours: theta is per calendar day, vega per
 # 1% vol. Same conversions as pricing.drift_check (kept here to avoid a cycle).
 _VENDOR_THETA_TO_YEAR = float(CALENDAR_DAYS_PER_YEAR)
@@ -140,9 +163,11 @@ class ChainError(ValueError):
 class ChainCounts:
     """Skip / priced tallies from one :func:`greeks_asof` pass.
 
-    Expired (T≤0), missing last/close, outside no-arbitrage bounds, and
-    (when ``moneyness`` is set) far-OTM rows are omitted from the table
-    rather than written as NaN. The daily drift job reports these counts.
+    Expired (T≤0), missing last/close, stale last-trade (``n_stale``),
+    outside no-arbitrage bounds (``n_uninvertible``; the below-intrinsic
+    subset is ``n_below_intrinsic``), and (when ``moneyness`` is set) far-OTM
+    rows are omitted from the table rather than written as NaN. The daily
+    drift job reports these counts.
     """
 
     n_quotes: int = 0
@@ -150,6 +175,8 @@ class ChainCounts:
     n_expired: int = 0
     n_no_price: int = 0
     n_uninvertible: int = 0
+    n_below_intrinsic: int = 0
+    n_stale: int = 0
     n_no_asof: int = 0
     n_otm: int = 0
 
@@ -509,6 +536,7 @@ def greeks_asof(
     moneyness: float | None = None,
     uninvertible: Uninvertible = "raise",
     max_rows: int | None = None,
+    max_trade_age_ns: int | None = DEFAULT_MAX_TRADE_AGE_NS,
     conventions: GreeksConventions = DEFAULT_CONVENTIONS,
     counts: ChainCounts | None = None,
     european_iv: bool = False,
@@ -532,6 +560,11 @@ def greeks_asof(
     parity forward so a cron CRR pass can stay on an ATM slice.
     ``max_rows`` (if set) caps **American CRR** rows only; remaining American
     names are European-priced so an SPX-first file concat cannot starve SPY.
+    ``max_trade_age_ns`` skips last-priced rows whose trade stamp is older
+    than the as-of by more than that many ns (stale prints invert to
+    fabricated IVs; there is deliberately no ``day_close`` fallback). Rows
+    priced off ``day_close``, and ``last`` prints with no trade stamp, are
+    not age-filtered. Pass ``None`` to disable.
     """
     # r=None means "resolve per contract from the Treasury curve"; only an
     # explicitly supplied rate has to be finite.
@@ -546,6 +579,8 @@ def greeks_asof(
         raise ChainError("max_rows must be positive")
     if moneyness is not None and moneyness <= 0:
         raise ChainError("moneyness must be positive")
+    if max_trade_age_ns is not None and max_trade_age_ns <= 0:
+        raise ChainError("max_trade_age_ns must be positive (None disables)")
 
     snapshots = read_asof("option_snapshots", dt, asof_ns=asof_ns, data_root=data_root)
     forwards_table = read_asof("forwards", dt, asof_ns=asof_ns, data_root=data_root)
@@ -565,6 +600,8 @@ def greeks_asof(
     n_no_price = 0
     n_no_asof = 0
     n_skipped = 0
+    n_below_intrinsic = 0
+    n_stale = 0
     n_otm = 0
     n_crr = 0
 
@@ -594,6 +631,22 @@ def greeks_asof(
 
         if qte.market_price is None:
             n_no_price += 1
+            continue
+
+        # A last trade older than the threshold at this as-of is stale: the
+        # reprice identity needs a contemporaneous market price, and a print
+        # from hours or days ago inverted against today's spot fabricates an
+        # IV (issue #44). Skip, count, and do NOT fall back to day_close --
+        # a stale close is not a contemporaneous price either. Rows priced
+        # off day_close (last is None) and prints with no trade stamp are
+        # not age-filtered.
+        if (
+            max_trade_age_ns is not None
+            and qte.last is not None
+            and qte.last_trade_asof_ns is not None
+            and int(priced_asof) - qte.last_trade_asof_ns > max_trade_age_ns
+        ):
+            n_stale += 1
             continue
 
         try:
@@ -657,9 +710,11 @@ def greeks_asof(
             own_vega = _finite(catalog.vega, "own_vega")
         except ChainError:
             raise
-        except ValueError:
+        except ValueError as exc:
             if uninvertible == "raise":
                 raise
+            if isinstance(exc, BelowIntrinsicError):
+                n_below_intrinsic += 1
             n_skipped += 1
             continue
 
@@ -726,13 +781,15 @@ def greeks_asof(
         counts.n_no_price = n_no_price
         counts.n_no_asof = n_no_asof
         counts.n_uninvertible = n_skipped
+        counts.n_below_intrinsic = n_below_intrinsic
+        counts.n_stale = n_stale
         counts.n_otm = n_otm
 
     if not rows:
         raise ChainError(
             "no contracts priced "
             f"(expired={n_expired} no_price={n_no_price} "
-            f"uninvertible={n_skipped} otm={n_otm})"
+            f"uninvertible={n_skipped} stale={n_stale} otm={n_otm})"
         )
     return pa.Table.from_pylist(rows, schema=CHAIN_SCHEMA)
 
@@ -799,6 +856,16 @@ def main(argv: list[str] | None = None) -> int:
         help="cap American CRR rows; remaining American names are European BSM",
     )
     parser.add_argument(
+        "--max-trade-age-min",
+        type=float,
+        default=DEFAULT_MAX_TRADE_AGE_MIN,
+        help=(
+            "skip last-priced rows whose trade is older than this many "
+            f"minutes at the as-of (default {DEFAULT_MAX_TRADE_AGE_MIN:g}; "
+            "0 disables the staleness filter)"
+        ),
+    )
+    parser.add_argument(
         "--skip-uninvertible",
         action="store_true",
         help="omit rows whose last/close sits outside no-arbitrage bounds",
@@ -821,6 +888,11 @@ def main(argv: list[str] | None = None) -> int:
 
     dt = date.fromisoformat(args.date)
     uninvertible: Uninvertible = "skip" if args.skip_uninvertible else "raise"
+    max_trade_age_ns = (
+        None
+        if args.max_trade_age_min <= 0
+        else int(args.max_trade_age_min * 60 * 1e9)
+    )
     try:
         table = greeks_asof(
             dt,
@@ -832,6 +904,7 @@ def main(argv: list[str] | None = None) -> int:
             spy_american_moneyness=args.spy_atm_pct,
             uninvertible=uninvertible,
             max_rows=args.max_rows,
+            max_trade_age_ns=max_trade_age_ns,
             european_iv=args.euro_iv,
         )
     except (CatalogError, SchemaError, ChainError, ValueError) as exc:

@@ -38,12 +38,12 @@ conservative audit pass. Grouped by area, roughly highest-value first.
 ## Monitoring gaps
 
 - `deploy/schedule.json` (`prune` entry) + `deploy/crontab:148` — the monthly
-  `prune` job is unmonitored: it has no `healthchecks` block, so no
-  Healthchecks check exists and the schedule schema test doesn't see it. The
-  one job that deletes data could silently stop running. Add curl pings to
-  `prune_raw.sh` (or ping support in `cronjob.sh`), then give the entry a
-  `healthchecks` block. #40 deliberately gave `prune` no `OnFailure=` unit —
-  the alert's `?create=1` would auto-create a check nobody maintains.
+  `prune` job is deliberately unmonitored: it has no `healthchecks` block, so
+  no Healthchecks check exists. `tests/test_schedule.py:59` currently requires
+  shell jobs to remain unmonitored, and the Healthchecks parity test excludes
+  them. Add ping support to `prune_raw.sh` or `cronjob.sh`, update those tests,
+  and give the entry a `healthchecks` block; the generated unit will then gain
+  a maintained `OnFailure=` target as well.
 - `pricing/drift_check.py:811` — `date.fromisoformat(args.date)` runs before
   the logger and `/start` ping, so a malformed `--date` dies with a bare
   traceback and no Healthchecks signal. Decide: argparse `type=` validation

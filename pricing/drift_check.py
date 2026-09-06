@@ -220,7 +220,9 @@ def is_atm(row: Mapping[str, Any], atm_pct: float) -> bool:
     strike = _opt(row.get("strike"))
     if fwd is None or strike is None or fwd <= 0:
         return False
-    return abs(strike / fwd - 1.0) <= atm_pct
+    # |K/F − 1| ≤ atm_pct. Compare in strike units so 1.05 F is inside a 5%
+    # band in IEEE-754 (105/100 − 1 rounds above 0.05).
+    return abs(strike - fwd) <= atm_pct * fwd
 
 
 def _thr_for(thresholds: Thresholds, greek: str) -> tuple[float, float]:

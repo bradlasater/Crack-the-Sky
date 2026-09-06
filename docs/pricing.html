@@ -38,13 +38,16 @@
             <li><a href="pricing.html#pricing-euro-american">European vs American</a></li>
             <li><a href="pricing.html#pricing-iv-invert">IV invert</a></li>
             <li><a href="pricing.html#pricing-iv-tree">The tree is part of the answer</a></li>
+            <li><a href="pricing.html#pricing-term">ATM term structure</a></li>
             <li><a href="pricing.html#pricing-surface">SVI surface</a></li>
           </ol>
         </li>
         <li><a href="warehouse-math.html">Warehouse → math</a></li>
         <li><a href="canary.html">Daily canary</a></li>
+        <li><a href="red-day.html">Red day</a></li>
         <li><a href="conventions.html">Desk conventions</a></li>
         <li><a href="not-built.html">Not built</a></li>
+        <li><a href="latent.html">Latent holes</a></li>
         <li><a href="formula-stubs.html">Formula stubs</a></li>
         <li><a href="knobs.html">Documented knobs</a></li>
         <li class="toc-sep"></li>
@@ -62,7 +65,8 @@
       </header>
 
       <p>
-        Calculators, plus the one fitted object: the SVI vol surface. Pass
+        Calculators, plus two derived objects: the ATM term structure and the
+        SVI vol surface. Pass
         <code>S, K, T, r, q</code> (or <code>F</code>) and <code>sigma</code>
         explicitly to the calculators.
       </p>
@@ -119,6 +123,14 @@
           exercised now and is worth <code>K-S</code> at every sigma, which is
           a property of the contract, not a solver failure.
         </dd>
+        <dt id="pricing-term">ATM term structure</dt>
+        <dd>
+          <code>pricing.term_structure</code> reduces <code>option_day_bars</code>
+          to one row per (date, root, expiry): parity forward, ATM strike, both
+          leg IVs. Same chain the surface fits. Scheduled Tue–Sat 12:00 ET;
+          archive rebuild via <code>scripts/build_term_structure.py</code>.
+          A stale or crossed ATM print is written null, never as zero vol.
+        </dd>
         <dt id="pricing-surface">SVI surface</dt>
         <dd>
           <code>pricing.surface</code> fits raw SVI (Gatheral),
@@ -131,8 +143,9 @@
           end to end — an SPY smile is follow-up, not a flag. OTM closes at or
           below <code>MIN_TIME_VALUE_FRAC</code> of the forward are dropped
           before inversion (an OTM close <em>is</em> time value; a
-          near-worthless one is a tick-dominated stale print, and no trade-age
-          signal exists yet). Box bounds plus the
+          near-worthless one is a tick-dominated stale print, and day bars
+          carry no trade-age signal — that filter lives on snapshots via
+          <code>last_trade_asof_ns</code>). Box bounds plus the
           non-negative-total-variance domain constraint; deterministic
           data-derived seed; <code>MAX_NFEV</code> raised past scipy's default
           because real chains exhaust it long before the 1e-12 tolerances are
@@ -150,7 +163,8 @@
           flat outside, exact on a fitted expiry. CLI:
           <code>python -m pricing.surface --date … --underlying SPXW</code>;
           archive: <code>scripts/build_surface.py</code> →
-          <code>vol_surface</code>. Deliberately unscheduled.
+          <code>vol_surface</code>. Deliberately unscheduled. No VIX surface:
+          those options are on the VX future, a different modelling question.
         </dd>
       </dl>
 

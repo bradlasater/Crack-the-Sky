@@ -7,7 +7,7 @@ so these assert both directions explicitly.
 from __future__ import annotations
 
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from ingest.common import landing
@@ -55,7 +55,12 @@ def test_expected_sweeps_regular_session(tmp_path: Path) -> None:
     # 09:30 -> 16:30 (close + the crontab's 30-minute tail), both endpoints
     # firing, = 421 sweeps. Not close + 20: that is the websocket deadline,
     # and borrowing it here understated the day by ten sweeps.
-    assert audit.expected_sweeps(RUN_DATE, tmp_path) == 421
+    cadence_start = datetime(2026, 8, 28, 9, 30)
+    cadence_end = datetime(2026, 8, 28, 16, 0) + timedelta(minutes=30)
+    minutes = int((cadence_end - cadence_start).total_seconds() // 60)
+    assert minutes + 1 == 421
+    assert audit.SWEEP_INTERVAL_S == 60
+    assert audit.expected_sweeps(RUN_DATE, tmp_path) == minutes + 1
 
 
 def test_expected_sweeps_shrinks_on_early_close(tmp_path: Path) -> None:
@@ -71,6 +76,29 @@ def test_expected_sweeps_shrinks_on_early_close(tmp_path: Path) -> None:
     market_gate._holiday_cache.clear()
     assert audit.expected_sweeps(early, tmp_path) < audit.expected_sweeps(RUN_DATE, tmp_path)
     market_gate._holiday_cache.clear()
+
+
+def test_expected_sweeps_early_close_is_inclusive_minutes_to_close_plus_tail(
+    tmp_path: Path,
+) -> None:
+    """13:00 close + 30 min tail: 09:30 through 13:30 inclusive = 241."""
+    early = date(2026, 11, 27)
+    meta = tmp_path / "_meta"
+    meta.mkdir(parents=True, exist_ok=True)
+    (meta / "holidays.json").write_text(json.dumps([
+        {"date": early.isoformat(), "exchange": "NYSE",
+         "name": "Thanksgiving", "status": "early-close"}
+    ]), encoding="utf-8")
+    from ingest.common import market_gate
+    market_gate._holiday_cache.clear()
+    cadence_start = datetime(2026, 11, 27, 9, 30)
+    cadence_end = datetime(2026, 11, 27, 13, 0) + timedelta(minutes=30)
+    minutes = int((cadence_end - cadence_start).total_seconds() // 60)
+    try:
+        assert minutes + 1 == 241
+        assert audit.expected_sweeps(early, tmp_path) == minutes + 1
+    finally:
+        market_gate._holiday_cache.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +355,22 @@ def test_disk_runway_passes_with_headroom(tmp_path: Path, monkeypatch) -> None:
     check = audit.check_disk(_settings(tmp_path), RUN_DATE)[0]
     assert check.status == audit.PASS
     assert check.data["days_remaining"] == 500.0
+
+
+def test_disk_runway_days_are_free_bytes_divided_by_daily_growth(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """days_remaining = free_bytes / daily_growth, rounded to 1 decimal.
+
+    Integer division of these inputs is 3, and a 365-day conversion is huge.
+    """
+    growth = 2_000_000
+    free = 7_000_000
+    _land_snapshot_bytes(tmp_path, RUN_DATE, growth)
+    _fake_usage(monkeypatch, free=free)
+    check = audit.check_disk(_settings(tmp_path), RUN_DATE)[0]
+    assert check.data["days_remaining"] == round(free / growth, 1)
+    assert check.data["days_remaining"] == 3.5
 
 
 def test_disk_runway_warns_then_fails_as_it_shrinks(tmp_path: Path, monkeypatch) -> None:

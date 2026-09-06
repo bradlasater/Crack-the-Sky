@@ -33,6 +33,7 @@
         <li><a href="pricing.html">pricing</a></li>
         <li><a href="warehouse-math.html">Warehouse → math</a></li>
         <li><a href="canary.html">Daily canary</a></li>
+        <li><a href="red-day.html">Red day</a></li>
         <li><a href="conventions.html">Desk conventions</a></li>
         <li>
           <a href="not-built.html" class="active">Not built</a>
@@ -42,6 +43,7 @@
             <li><a href="not-built.html#nb-infra-stack">Infra and stack</a></li>
           </ol>
         </li>
+        <li><a href="latent.html">Latent holes</a></li>
         <li><a href="formula-stubs.html">Formula stubs</a></li>
         <li><a href="knobs.html">Documented knobs</a></li>
         <li class="toc-sep"></li>
@@ -69,7 +71,7 @@
           <tr>
             <td>Vol surfaces / interpolator</td>
             <td><span class="badge shipped">built</span></td>
-            <td><code>pricing.surface</code> fits raw SVI (Gatheral) per (date, root, expiry) over own-IV OTM strikes from <code>option_day_bars</code> — calls above the parity forward, puts below — SPX/SPXW only: SPY strikes invert on the American tree (<code>implied_vol_american</code>) and this fit path is European end to end, so an SPY smile is follow-up. Butterfly (<code>g(k) ≥ 0</code>) and calendar (total variance non-decreasing in T) guards raise <code>SurfaceArbitrageError</code> rather than write an arbitrageable slice. <code>Surface.vol(K, T)</code> interpolates linearly in total variance between expiries, flat outside — alongside the ATM curve, not replacing it. Rebuilds over the archive via <code>scripts/build_surface.py</code> into <code>vol_surface</code>. Still not built: the calibration consumers (drift_check's off-ATM slice).</td>
+            <td><code>pricing.surface</code> fits raw SVI (Gatheral) per (date, root, expiry) over own-IV OTM strikes from <code>option_day_bars</code> — calls above the parity forward, puts below — SPX/SPXW only. Butterfly (<code>g(k) ≥ 0</code>) and calendar (total variance non-decreasing in T) are repaired inside the fit; an unrepairable slice raises <code>SurfaceArbitrageError</code> rather than write an arbitrageable smile. <code>Surface.vol(K, T)</code> interpolates linearly in total variance between expiries, flat outside — alongside the ATM curve, not replacing it. Rebuilds over the archive via <code>scripts/build_surface.py</code> into <code>vol_surface</code>. Still not built: an SPY smile (American strikes under a European fit path — follow-up, not a flag), a VIX surface (options on the VX future), a scheduled surface job, and the calibration consumers (drift_check's off-ATM slice).</td>
           </tr>
           <tr>
             <td>Rates warehouse / curve</td>

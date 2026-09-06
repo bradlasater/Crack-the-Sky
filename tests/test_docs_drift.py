@@ -4,6 +4,10 @@ The docs pages are written by hand, so nothing regenerates them when the
 schedule, the environment variables, or the box layout change. These tests
 fail CI when deploy/schedule.json, .env.example, or the page cross-links move
 without the handbook being updated to match.
+
+They also pin a few facts that have already gone stale in prose while CI
+stayed green — allowlisted roots, the canary rate default, the American IV
+solver. Substring checks, not NLP: if you rename a page, update the pin.
 """
 
 from __future__ import annotations
@@ -179,3 +183,86 @@ def test_box_path_matches_ops_page() -> None:
     checkout = m.group(1)
     ops = (DOCS_DIR / "box-operations.html").read_text()
     assert checkout in ops, f"checkout name {checkout!r} not in docs/box-operations.html"
+
+
+# ---------------------------------------------------------------------------
+# Facts that have already gone stale in prose
+# ---------------------------------------------------------------------------
+
+
+def test_every_scheduled_job_named_on_ingest_page() -> None:
+    """ingest.html must name every schedule.json job, not just ingest.jobs.*."""
+    ingest = (DOCS_DIR / "ingest.html").read_text()
+    missing = sorted({u["job"] for u in _schedule_units() if u["job"] not in ingest})
+    assert not missing, f"scheduled jobs not named in docs/ingest.html: {missing}"
+
+
+def test_opra_allowlist_on_marketdata_page() -> None:
+    """The marketdata page must list every live root. Caught the VIX miss."""
+    from ingest.jobs import OPTION_ROOTS
+    from marketdata.opra import ALLOWED_ROOTS
+
+    assert OPTION_ROOTS == ALLOWED_ROOTS
+    text = (DOCS_DIR / "marketdata.html").read_text()
+    missing = [root for root in ALLOWED_ROOTS if root not in text]
+    assert not missing, f"ALLOWED_ROOTS missing from docs/marketdata.html: {missing}"
+
+
+def test_surface_roots_on_pricing_page() -> None:
+    from pricing.surface import SURFACE_ROOTS
+
+    text = (DOCS_DIR / "pricing.html").read_text()
+    missing = [root for root in SURFACE_ROOTS if root not in text]
+    assert not missing, f"SURFACE_ROOTS missing from docs/pricing.html: {missing}"
+    assert "implied_vol_american" in text
+
+
+def test_drift_check_r_is_override_not_the_curve(monkeypatch) -> None:
+    """DRIFT_CHECK_R is optional; unset means the Treasury curve, not 0.04."""
+    from pricing.drift_check import DEFAULT_R, default_r
+
+    monkeypatch.delenv("DRIFT_CHECK_R", raising=False)
+    assert DEFAULT_R == 0.04
+    assert default_r({}) is None
+    knobs = (DOCS_DIR / "knobs.html").read_text()
+    canary = (DOCS_DIR / "canary.html").read_text()
+    for name, text in (("knobs.html", knobs), ("canary.html", canary)):
+        assert "DRIFT_CHECK_R" in text, name
+        assert "Treasury curve" in text, f"{name} must say the canary defaults to the curve"
+
+
+def test_from_market_docstring_does_not_deny_american_iv() -> None:
+    """A stale module docstring must not unteach implied_vol_american."""
+    src = (REPO_ROOT / "pricing" / "from_market.py").read_text()
+    assert "there is no American IV solver" not in src
+    assert "implied_vol_american" in src
+    # expiry_instant / module docstring must name VIX settlement, not just SPX.
+    assert "VIX" in src.split("from __future__")[0]
+
+
+def test_red_day_page_names_repair_and_snapshots() -> None:
+    text = (DOCS_DIR / "red-day.html").read_text()
+    assert "repair.sh" in text
+    assert "snapshots cannot be repaired" in text
+    assert "prune_raw.sh" in text
+    assert 'id="red-early"' in text
+
+
+def test_latent_page_points_at_improvements() -> None:
+    assert (REPO_ROOT / "IMPROVEMENTS.md").is_file()
+    text = (DOCS_DIR / "latent.html").read_text()
+    assert "IMPROVEMENTS.md" in text
+    assert "job_end" in text
+    assert "deliberately unmonitored" in text
+
+
+def test_handbook_nav_includes_red_day_and_latent() -> None:
+    missing = []
+    for name, text in _doc_pages().items():
+        if name == "404.html":
+            continue
+        if "red-day.html" not in text:
+            missing.append(f"{name} missing red-day.html")
+        if "latent.html" not in text:
+            missing.append(f"{name} missing latent.html")
+    assert not missing, missing

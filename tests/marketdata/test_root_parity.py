@@ -21,6 +21,13 @@ def test_allowlists_are_identical() -> None:
 
 def test_every_allowed_root_has_a_settlement_time() -> None:
     assert set(SETTLEMENT_ET) == set(ALLOWED_ROOTS)
+    assert SETTLEMENT_ET == {
+        "SPY": (16, 0),
+        "SPXW": (16, 0),
+        "SPX": (9, 30),
+        "VIX": (9, 30),
+        "VIXW": (9, 30),
+    }
 
 
 @pytest.mark.parametrize(

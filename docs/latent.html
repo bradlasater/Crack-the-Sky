@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Crack the Sky — latent holes</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;family=Newsreader:opsz,wght@6..72,500;6..72,600&amp;display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="site.css">
+</head>
+<body id="top">
+  <a class="skip" href="#main">Skip to content</a>
+  <div class="shell">
+    <nav class="toc" aria-label="Handbook index">
+      <div class="toc-kicker">Crack the Sky</div>
+      <div class="toc-title">System handbook</div>
+      <ol>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="repo-layout.html">Repo layout</a></li>
+        <li><a href="data-flow.html">Data flow</a></li>
+        <li>
+          <a href="ingest.html">Ingest</a>
+          <ol class="sub">
+            <li><a href="ingest.html#ingest-constraints">Massive / Polygon constraints</a></li>
+            <li><a href="ingest.html#ingest-jobs">Jobs that exist</a></li>
+            <li><a href="ingest.html#ingest-cron">NY cron</a></li>
+            <li><a href="ingest.html#ingest-session">Weekday session</a></li>
+            <li><a href="ingest.html#ingest-entitlements">Entitlements</a></li>
+          </ol>
+        </li>
+        <li><a href="marketdata.html">marketdata</a></li>
+        <li><a href="pricing.html">pricing</a></li>
+        <li><a href="warehouse-math.html">Warehouse → math</a></li>
+        <li><a href="canary.html">Daily canary</a></li>
+        <li><a href="red-day.html">Red day</a></li>
+        <li><a href="conventions.html">Desk conventions</a></li>
+        <li><a href="not-built.html">Not built</a></li>
+        <li>
+          <a href="latent.html" class="active">Latent holes</a>
+          <ol class="sub">
+            <li><a href="latent.html#latent-source">Source of truth</a></li>
+            <li><a href="latent.html#latent-silent">Silent failure</a></li>
+            <li><a href="latent.html#latent-monitor">Monitoring</a></li>
+            <li><a href="latent.html#latent-ops">Ops / consistency</a></li>
+          </ol>
+        </li>
+        <li><a href="formula-stubs.html">Formula stubs</a></li>
+        <li><a href="knobs.html">Documented knobs</a></li>
+        <li class="toc-sep"></li>
+        <li><a href="box-operations.html">Box operations (off-repo)</a></li>
+      </ol>
+    </nav>
+
+    <main id="main">
+      <header class="doc">
+        <div>
+          <div class="kicker">Crack the Sky</div>
+          <h1>Latent holes</h1>
+        </div>
+        <div class="meta"><a href="index.html">← overview</a></div>
+      </header>
+
+      <h2 id="latent-source">Source of truth</h2>
+      <p>
+        These are in the tree — not missing files. They were found in the
+        2026-09-02 audit and <strong>deliberately not fixed</strong>: each
+        needs an owner decision, spans a module boundary, or is too invasive
+        for a conservative pass. The running list is
+        <code>IMPROVEMENTS.md</code> at the repo root. This page is the desk
+        index of the ones that change how you read a green check or a red day.
+        If the markdown and this page disagree, the markdown wins.
+      </p>
+      <p>
+        Contrast <a href="not-built.html">not built</a>: that page is absence.
+        This page is presence with a known failure mode.
+      </p>
+
+      <h2 id="latent-silent">Silent failure</h2>
+      <table>
+        <thead>
+          <tr><th>Where</th><th>What happens</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="job">ingest/common/cli.py</td>
+            <td>A job whose summary dict contains a reserved key (<code>rows</code>, <code>bytes</code>, <code>job</code>, <code>duration_s</code>) crashes <code>job_end</code> logging <em>after</em> succeeding → <code>job_error</code> + a <code>/fail</code> ping. Latent today.</td>
+          </tr>
+          <tr>
+            <td class="job">ws_minute_bars</td>
+            <td>A 0-row capture pings Healthchecks <code>/fail</code> but <code>main</code> still exits 0. Exit code and monitoring disagree.</td>
+          </tr>
+          <tr>
+            <td class="job">grouped_daily</td>
+            <td>Empty <code>records</code> on a trading day logs <code>grouped_empty</code> and exits 0 (green healthcheck).</td>
+          </tr>
+          <tr>
+            <td class="job">scripts/cronjob.sh</td>
+            <td>If the wrapped command exits 99 it is misreported as <code>job_skipped</code> and exits 0. Latent (jobs only exit 0/1/2/3 today).</td>
+          </tr>
+          <tr>
+            <td class="job">snapshot_sweep</td>
+            <td>One failing chain (e.g. VIX 403s) fails the whole run; the in-process retry re-fetches SPY+SPX and lands duplicate per-underlying files.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2 id="latent-monitor">Monitoring</h2>
+      <table>
+        <thead>
+          <tr><th>Where</th><th>What happens</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="job">prune</td>
+            <td>Monthly <code>prune_raw.sh --apply</code> is deliberately unmonitored: no <code>healthchecks</code> block, so no check exists. Tests currently require shell jobs to stay that way. A skipped prune will not page. See <a href="red-day.html#red-disk">red day / disk</a>.</td>
+          </tr>
+          <tr>
+            <td class="job">drift_check --date</td>
+            <td><code>date.fromisoformat</code> runs before the logger and the <code>/start</code> ping, so a malformed <code>--date</code> dies with a bare traceback and no Healthchecks signal.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2 id="latent-ops">Ops / consistency</h2>
+      <table>
+        <thead>
+          <tr><th>Where</th><th>What happens</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="job">coverage_audit + crontab</td>
+            <td>On 13:00 early-close days the cron cadence still runs to 16:30, so ~178 post-close sweeps read as stray and the 13:32–16:30 window is unchecked. Do not repair those strays — <a href="red-day.html#red-early">red day / early close</a>.</td>
+          </tr>
+          <tr>
+            <td class="job">coverage_audit / reconcile T-1</td>
+            <td>Default T-1 is computed without <code>data_root</code> (unlike <code>history_audit</code>), so a non-standard <code>DATA_ROOT</code> picks T-1 against the wrong holiday calendar.</td>
+          </tr>
+          <tr>
+            <td class="job">marketdata.opra vs ingest.jobs</td>
+            <td>Two OPRA year-pivot decoders disagree on <code>yy >= 80</code> (19xx vs 20xx). Unreachable at today's roots; hoist one shared decoder before the universe widens.</td>
+          </tr>
+        </tbody>
+      </table>
+      <p>
+        Also in <code>IMPROVEMENTS.md</code> and not copied here: the
+        unbounded <code>trades_cursor.json</code>, first-run
+        <code>contracts_sync</code> baseline, CRR shared-bump cost, holiday
+        cache with no mtime check, and the macOS-vs-Ubuntu
+        <code>test_prune_raw</code> coreutils split. Read the file when
+        touching those modules.
+      </p>
+
+      <footer>
+        docs/latent.html — Crack the Sky handbook.
+        Source of list: IMPROVEMENTS.md. Index: index.html. Do not commit .env.
+      </footer>
+    </main>
+  </div>
+</body>
+</html>

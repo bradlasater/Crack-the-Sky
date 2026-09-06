@@ -39,8 +39,10 @@
         <li><a href="pricing.html">pricing</a></li>
         <li><a href="warehouse-math.html">Warehouse → math</a></li>
         <li><a href="canary.html">Daily canary</a></li>
+        <li><a href="red-day.html">Red day</a></li>
         <li><a href="conventions.html">Desk conventions</a></li>
         <li><a href="not-built.html">Not built</a></li>
+        <li><a href="latent.html">Latent holes</a></li>
         <li><a href="formula-stubs.html">Formula stubs</a></li>
         <li><a href="knobs.html">Documented knobs</a></li>
         <li class="toc-sep"></li>
@@ -60,8 +62,9 @@
       <h2 id="repo-toplevel">Top level</h2>
       <p>
         Three Python packages plus tests and ops scripts. Jobs are
-        <code>python -m ingest.jobs.&lt;name&gt;</code> from a venv, not an
-        installed distribution.
+        <code>python -m ingest.jobs.&lt;name&gt;</code> from the venv
+        (<code>pip install -e .</code> so imports do not depend on cwd). No
+        console-script entry points.
       </p>
       <table>
         <thead>
@@ -86,7 +89,7 @@
           </tr>
           <tr>
             <td class="job">docs/</td>
-            <td>This handbook: <code>index.html</code> plus one page per section, and <code>box-operations.html</code> for off-repo machine state.</td>
+            <td>This handbook: <code>index.html</code> plus one page per section, <code>red-day.html</code> / <code>latent.html</code>, and <code>box-operations.html</code> for off-repo machine state. Known holes that are in the tree live in <code>IMPROVEMENTS.md</code>.</td>
           </tr>
           <tr>
             <td class="job">deploy/</td>
@@ -94,7 +97,7 @@
           </tr>
           <tr>
             <td class="job">scripts/</td>
-            <td>bootstrap, backfill, repair, prune_raw, Healthchecks setup, <code>build_term_structure.py</code> (rebuilds the ATM curve over the archive), <code>build_surface.py</code> (same for the SVI surface). Not a package.</td>
+            <td>bootstrap, backfill, backfill_underlying, repair, prune_raw, Healthchecks setup, <code>build_term_structure.py</code> (rebuilds the ATM curve over the archive), <code>build_surface.py</code> (same for the SVI surface). Not a package.</td>
           </tr>
         </tbody>
       </table>

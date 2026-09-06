@@ -40,8 +40,10 @@
         <li><a href="pricing.html">pricing</a></li>
         <li><a href="warehouse-math.html">Warehouse → math</a></li>
         <li><a href="canary.html">Daily canary</a></li>
+        <li><a href="red-day.html">Red day</a></li>
         <li><a href="conventions.html">Desk conventions</a></li>
         <li><a href="not-built.html">Not built</a></li>
+        <li><a href="latent.html">Latent holes</a></li>
         <li><a href="formula-stubs.html">Formula stubs</a></li>
         <li><a href="knobs.html">Documented knobs</a></li>
         <li class="toc-sep"></li>
@@ -75,7 +77,7 @@
         </div>
         <div class="step">
           <div class="n">3 own IV</div>
-          <p>European BSM invert of last/close. Never NaN; never vendor σ</p>
+          <p>Own invert of last/close — European BSM or American CRR. Never NaN; never vendor σ</p>
         </div>
         <div class="step">
           <div class="n">4 own Greeks</div>
@@ -98,7 +100,7 @@
       <h2 id="flow-write-only">Write-only and derived</h2>
       <dl class="notes">
         <dt>Write-only today</dt>
-        <dd><code>contracts_expired</code>, <code>underlying_day_bars</code>. Captured; nothing in pricing/marketdata consumes them yet.</dd>
+        <dd><code>contracts_expired</code>, <code>underlying_day_bars</code>, <code>ibkr_executions</code>. Captured; nothing in pricing/marketdata consumes them yet.</dd>
         <dt>Now consumed</dt>
         <dd><code>forwards</code> is no longer write-only — <code>from_market</code> joins per-expiry parity F.</dd>
         <dt>Derived</dt>

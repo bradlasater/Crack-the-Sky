@@ -155,6 +155,15 @@
       "restart": {"sec": 120}
     },
     {
+      "job": "spy_spot",
+      "unit": "massive-spy-spot",
+      "command": ["-m", "signals.spot"],
+      "cron": ["05 12 * * 2-6"],
+      "on_calendar": ["Tue-Sat 12:05:00"],
+      "healthchecks": {"schedule": "5 12 * * 2-6", "grace_min": 120, "desc": "SPY spot: bar close, else shortest-DTE parity proxy"},
+      "restart": {"sec": 120}
+    },
+    {
       "job": "surface",
       "unit": "massive-surface",
       "command": ["-m", "pricing.surface"],

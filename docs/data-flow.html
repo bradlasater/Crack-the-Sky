@@ -100,11 +100,11 @@
       <h2 id="flow-write-only">Write-only and derived</h2>
       <dl class="notes">
         <dt>Write-only today</dt>
-        <dd><code>contracts_expired</code>, <code>underlying_day_bars</code>, <code>ibkr_executions</code>. Captured; nothing in pricing/marketdata consumes them yet.</dd>
+        <dd><code>contracts_expired</code>, <code>ibkr_executions</code>. Captured; nothing in pricing/marketdata/signals consumes them yet.</dd>
         <dt>Now consumed</dt>
-        <dd><code>forwards</code> is no longer write-only — <code>from_market</code> joins per-expiry parity F.</dd>
+        <dd><code>forwards</code> is no longer write-only — <code>from_market</code> joins per-expiry parity F. <code>underlying_day_bars</code> and <code>dividends</code> feed <code>signals.spot</code>.</dd>
         <dt>Derived</dt>
-        <dd><code>atm_term_structure</code> — one row per (date, root, expiry), built from <code>option_day_bars</code> by <code>pricing.term_structure</code> at 12:00 ET. Not captured: the whole archive rebuilds in ~7 minutes via <code>scripts/build_term_structure.py</code>, so it is safe to delete and safe to recompute after any change to the reduction. Built from day bars rather than snapshots precisely because day bars reach back to 2022-08-31 while snapshots only begin in 2026. <code>vol_surface</code> is the same shape one dimension up: one raw-SVI smile fit per (date, root, expiry) off the same day bars, scheduled at 12:15 ET, rebuilt by <code>scripts/build_surface.py</code>, read back by <code>load_surface</code>.</dd>
+        <dd><code>atm_term_structure</code> — one row per (date, root, expiry), built from <code>option_day_bars</code> by <code>pricing.term_structure</code> at 12:00 ET. Not captured: the whole archive rebuilds in ~7 minutes via <code>scripts/build_term_structure.py</code>, so it is safe to delete and safe to recompute after any change to the reduction. Built from day bars rather than snapshots precisely because day bars reach back to 2022-08-31 while snapshots only begin in 2026. <code>vol_surface</code> is the same shape one dimension up: one raw-SVI smile fit per (date, root, expiry) off the same day bars, scheduled at 12:15 ET, rebuilt by <code>scripts/build_surface.py</code>, read back by <code>load_surface</code>. <code>spy_spot</code> is one row per session: SPY close from <code>underlying_day_bars</code> where it exists, else <code>S = F e^{-(r-q)T}</code> from the shortest-DTE SPY term-structure row and the dividend stream; scheduled 12:05 ET, rebuilt by <code>scripts/build_spy_spot.py --force</code>, which also writes the overlap calibration to <code>_meta/spy_spot_calibration.json</code>.</dd>
       </dl>
 
       <footer>

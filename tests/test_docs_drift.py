@@ -208,6 +208,18 @@ def test_opra_allowlist_on_marketdata_page() -> None:
     assert not missing, f"ALLOWED_ROOTS missing from docs/marketdata.html: {missing}"
 
 
+def test_spy_spot_is_documented() -> None:
+    """The new signals package must be findable from the handbook."""
+    ingest = (DOCS_DIR / "ingest.html").read_text()
+    layout = (DOCS_DIR / "repo-layout.html").read_text()
+    flow = (DOCS_DIR / "data-flow.html").read_text()
+    assert "spy_spot" in ingest
+    assert "signals.spot" in ingest
+    assert "signals/" in layout
+    assert "spy_spot" in flow
+    assert "build_spy_spot.py" in layout
+
+
 def test_surface_roots_on_pricing_page() -> None:
     from pricing.surface import SURFACE_ROOTS
 

@@ -61,8 +61,10 @@
 
       <h2 id="repo-toplevel">Top level</h2>
       <p>
-        Three Python packages plus tests and ops scripts. Jobs are
-        <code>python -m ingest.jobs.&lt;name&gt;</code> from the venv
+        Four Python packages plus tests and ops scripts. Jobs are
+        <code>python -m ingest.jobs.&lt;name&gt;</code> (or
+        <code>python -m pricing.term_structure</code> /
+        <code>python -m signals.spot</code>) from the venv
         (<code>pip install -e .</code> so imports do not depend on cwd). No
         console-script entry points.
       </p>
@@ -84,6 +86,10 @@
             <td>Calculators plus the one fitted object. BSM catalog, IV invert, Engine (European analytic / American CRR), <code>from_market</code>, <code>drift_check</code>, <code>term_structure</code> (the ATM curve), <code>surface</code> (raw-SVI smile per expiry over the own-IV chain, with arb guards and term interpolation).</td>
           </tr>
           <tr>
+            <td class="job">signals/</td>
+            <td>Derived market series that sit on ingest + pricing reductions. <code>signals.spot</code> writes <code>spy_spot</code> — SPY cash level from the day-bar close, else the shortest-DTE parity proxy.</td>
+          </tr>
+          <tr>
             <td class="job">tests/</td>
             <td>Offline pytest: ingest, <code>tests/marketdata/</code>, <code>tests/pricing/</code>, plus Healthchecks/schedule drift tests.</td>
           </tr>
@@ -97,7 +103,7 @@
           </tr>
           <tr>
             <td class="job">scripts/</td>
-            <td>bootstrap, backfill, backfill_underlying, repair, prune_raw, Healthchecks setup, <code>build_term_structure.py</code> (rebuilds the ATM curve over the archive), <code>build_surface.py</code> (same for the SVI surface). Not a package.</td>
+            <td>bootstrap, backfill, backfill_underlying, repair, prune_raw, Healthchecks setup, <code>build_term_structure.py</code> (rebuilds the ATM curve over the archive), <code>build_surface.py</code> (same for the SVI surface), <code>build_spy_spot.py</code> (SPY spot series + overlap calibration). Not a package.</td>
           </tr>
         </tbody>
       </table>

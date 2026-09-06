@@ -32,6 +32,7 @@ DATASETS = [
     "forwards",
     "atm_term_structure",
     "vol_surface",
+    "spy_spot",
     "dividends",
     "splits",
 ]
@@ -224,6 +225,22 @@ def test_timestamp_fields_use_ns_ms_suffixes() -> None:
                 assert field.name.endswith(("_ns", "_ms")), (
                     f"{dataset}.{field.name} epoch field must end _ns/_ms"
                 )
+
+
+def test_spy_spot_schema_roundtrip() -> None:
+    records = [{
+        "date": "2026-09-02",
+        "spot": 765.16,
+        "forward": 765.51,
+        "dte": 1,
+        "rate": 0.0385,
+        "q": 0.0,
+        "src": "bars",
+        "resid": 0.269,
+    }]
+    table = check_records("spy_spot", records)
+    assert table["src"].to_pylist() == ["bars"]
+    assert table["spot"].to_pylist()[0] == pytest.approx(765.16)
 
 
 def test_src_column_on_bars_and_trades() -> None:

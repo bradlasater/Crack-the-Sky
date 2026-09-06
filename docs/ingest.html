@@ -230,6 +230,12 @@
             <td>Reduces <code>option_day_bars</code> to <code>atm_term_structure</code>: one row per (root, expiry) with the parity forward, the ATM strike and both leg IVs. Lives in <code>pricing/</code>, not <code>ingest/</code> — it needs numpy/scipy. Derived, so a missed day is rebuilt with <code>scripts/build_term_structure.py</code>; scheduled anyway because a reduction that stops producing is as invisible as a capture that stops.</td>
           </tr>
           <tr>
+            <td class="job">spy_spot<br><span class="tag">derived</span></td>
+            <td class="when">12:05 · default date = T-1</td>
+            <td>Tue–Sat</td>
+            <td>One SPY cash level per session into <code>spy_spot</code>. Prefers <code>underlying_day_bars</code> close (<code>src=bars</code>); otherwise inverts the shortest-DTE SPY parity forward with <code>q</code> from <code>resolve_q</code> and the <code>dividends</code> stream (<code>src=parity</code>). <code>resid</code> is proxy minus actual on overlap. Lives in <code>signals.spot</code>. Rebuild + overlap calibration: <code>scripts/build_spy_spot.py --force</code> (without <code>--force</code>, already-written parity rows are skipped).</td>
+          </tr>
+          <tr>
             <td class="job">surface<br><span class="tag">derived</span></td>
             <td class="when">12:15 · default date = T-1</td>
             <td>Tue–Sat</td>

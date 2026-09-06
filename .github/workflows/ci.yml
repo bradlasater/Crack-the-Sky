@@ -39,10 +39,10 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Lint
-        run: ruff check ingest marketdata pricing tests scripts
+        run: ruff check ingest marketdata pricing signals tests scripts
 
       - name: Syntax check
-        run: python -m compileall -q ingest marketdata pricing
+        run: python -m compileall -q ingest marketdata pricing signals
 
       - name: Tests
         # No MASSIVE_API_KEY on purpose: any test that reaches the network

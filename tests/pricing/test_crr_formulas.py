@@ -210,15 +210,25 @@ def test_deep_itm_american_put_is_immediate_exercise() -> None:
 
 
 def test_arb_free_boundary_is_abs_r_minus_q_sqrt_dt() -> None:
-    """p ∈ [0,1] iff d ≤ exp((r-q)dt) ≤ u iff σ ≥ |r-q|√dt. Equality is p=0 or 1."""
+    """p ∈ [0,1] iff d ≤ exp((r-q)dt) ≤ u iff σ ≥ |r-q|√dt.
+
+    Exact equality is p=0 or 1 in reals. IEEE-754 is not: ``sqrt(dt)**2`` is
+    not ``dt``, so at σ = |r-q|√dt the engine can see p a few ulps outside
+    [0, 1] (CPython 3.11 CI: p ≈ −5.55e-15) and refuse rather than clip.
+    Pin the inequality the tree actually enforces: below the floor raises;
+    a hair above prices.
+    """
     T, n = 1.0, 50
     dt = T / n
     for r, q in ((0.5, 0.0), (0.0, 0.5)):
         floor = abs(r - q) * math.sqrt(dt)
         with pytest.raises(ValueError, match="not arbitrage-free"):
             crr_price(100.0, 100.0, T, r, floor * 0.99, "call", q=q, n_steps=n)
-        # p = 0 or 1 is allowed (never clipped). A p=0 call can be worth 0.
-        px = crr_price(100.0, 100.0, T, r, floor, "put", q=q, n_steps=n, american=False)
+        # Relative 1e-9 is ~1e4× the observed ulp miss; still the boundary,
+        # not the 1.5× safety used by ``crr_vol_floor``.
+        px = crr_price(
+            100.0, 100.0, T, r, floor * (1.0 + 1e-9), "put", q=q, n_steps=n, american=False
+        )
         assert px >= 0.0
 
 

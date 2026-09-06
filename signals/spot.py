@@ -20,11 +20,12 @@ stored spot is the actual close). Elsewhere ``resid`` is null.
 
 Measured 2022-08-31..2026-09-04 (1007 sessions, 169 overlap — the SPY
 day-bar backfill is still filling the ~2-year entitlement window):
-median |resid| $0.36, p90 $1.10, max $5.91, lag-1 autocorr −0.07.
+median |resid| $0.35, p90 $1.01, max $5.91, lag-1 autocorr −0.09.
 That is 11% of the median |daily SPY move|, below
 ``ROLL_DEBIAS_FRAC`` (0.25), so Stage 1.1 should **not** Roll-debias.
-Re-run ``scripts/build_spy_spot.py`` after the day-bar backfill catches
-up; the report is ``_meta/spy_spot_calibration.json``.
+Re-run ``scripts/build_spy_spot.py --force`` after the day-bar backfill
+catches up (without ``--force`` already-written parity rows are skipped);
+the report is ``_meta/spy_spot_calibration.json``.
 
 Run: ``python -m signals.spot [--date YYYY-MM-DD]`` (default: previous
 trading day). Archive + calibration: ``scripts/build_spy_spot.py``.
@@ -44,7 +45,7 @@ from ingest.common import landing, market_gate
 from ingest.common.cli import run_job
 from ingest.common.config import Settings
 from ingest.common.logging_utils import JsonlLogger
-from ingest.jobs import latest_clean_records, read_partition
+from ingest.jobs import latest_clean_records, partition_dates, read_partition
 from pricing.bsm import resolve_q
 
 JOB = "spy_spot"
@@ -185,10 +186,19 @@ def assemble(
 
 
 def _median(values: list[float]) -> float | None:
+    """Statistical median: average the two middle values when ``n`` is even.
+
+    Matches :func:`ingest.jobs._median` / :func:`pricing.drift_check._median`.
+    Taking ``ordered[n // 2]`` alone is the upper middle and would pin the
+    four-residual overlap test at 0.2 instead of 0.15.
+    """
     if not values:
         return None
     ordered = sorted(values)
-    return ordered[len(ordered) // 2]
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
 
 
 def _p90(values: list[float]) -> float | None:
@@ -220,10 +230,19 @@ def calibrate(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     overlap = [r for r in ordered if r.get("resid") is not None]
     abs_err = [abs(float(r["resid"])) for r in overlap]
     signed = [float(r["resid"]) for r in overlap]
-    bars = [r for r in ordered if r.get("src") == SRC_BARS and r.get("spot") is not None]
+    # Only consecutive *calendar-adjacent bar rows* count as a daily move.
+    # Dropping parity fills first would treat two bars with a hole between
+    # them as a one-day change and inflate median_abs_daily_move.
     moves: list[float] = []
-    for i in range(1, len(bars)):
-        moves.append(abs(float(bars[i]["spot"]) - float(bars[i - 1]["spot"])))
+    for i in range(1, len(ordered)):
+        prev, cur = ordered[i - 1], ordered[i]
+        if (
+            prev.get("src") == SRC_BARS
+            and cur.get("src") == SRC_BARS
+            and prev.get("spot") is not None
+            and cur.get("spot") is not None
+        ):
+            moves.append(abs(float(cur["spot"]) - float(prev["spot"])))
     median_err = _median(abs_err)
     median_move = _median(moves)
     ratio = (
@@ -268,11 +287,54 @@ def write_calibration(
     return path
 
 
-def build_for_date(settings: Settings, d: date) -> dict[str, Any] | None:
-    """Read the day's bars + term structure + latest dividends → one row."""
+def rewrite_calibration(settings: Settings) -> dict[str, Any]:
+    """Re-read every landed ``spy_spot`` partition and rewrite the report."""
+    rows: list[dict[str, Any]] = []
+    for d in partition_dates(settings, DATASET):
+        rows.extend(read_partition(settings, DATASET, d))
+    report = calibrate(rows)
+    write_calibration(settings, report)
+    return report
+
+
+def load_dividends(
+    settings: Settings,
+    on_or_before: date | None = None,
+) -> list[dict[str, Any]]:
+    """One full-history SPY dividend snapshot.
+
+    Each ``dividends_sync`` partition is the whole stream, not that day's
+    events. ``on_or_before`` is the scheduled job's as-of. If no partition
+    exists at or before that date — every archive session before the first
+    sync — fall back to the latest snapshot so ``pv_dividends`` still sees
+    historical ex-dates.
+    """
+    if on_or_before is not None:
+        rows = latest_clean_records(settings, "dividends", on_or_before)
+        if rows:
+            return rows
+    dates = partition_dates(settings, "dividends")
+    if not dates:
+        return []
+    return read_partition(settings, "dividends", dates[-1])
+
+
+def build_for_date(
+    settings: Settings,
+    d: date,
+    *,
+    dividends: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """Read the day's bars + term structure + a dividend snapshot → one row.
+
+    Pass ``dividends`` to reuse one snapshot across an archive walk. The
+    scheduled job leaves it ``None`` and takes the as-of snapshot, falling
+    back to the latest if this date predates the first sync.
+    """
     bars = read_partition(settings, "underlying_day_bars", d)
     terms = read_partition(settings, "atm_term_structure", d)
-    dividends = latest_clean_records(settings, "dividends", d)
+    if dividends is None:
+        dividends = load_dividends(settings, on_or_before=d)
     return assemble(
         d,
         close=spy_close(bars),

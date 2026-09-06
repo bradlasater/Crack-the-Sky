@@ -17,8 +17,10 @@ from signals.spot import (
     assemble,
     build_for_date,
     calibrate,
+    load_dividends,
     proxy_spot,
     pv_dividends,
+    rewrite_calibration,
     shortest_spy_term,
     spy_close,
     write_row,
@@ -174,8 +176,8 @@ def test_calibrate_reports_overlap_and_roll_threshold() -> None:
     assert report["n_bars"] == 4
     assert report["n_parity"] == 1
     assert report["n_overlap"] == 4
-    abs_err = sorted([0.2, 0.1, 0.4, 0.0])
-    assert report["median_abs_error"] == pytest.approx(abs_err[len(abs_err) // 2])
+    # even n=4: (0.1 + 0.2) / 2, not ordered[n//2] == 0.2
+    assert report["median_abs_error"] == pytest.approx(0.15)
     assert report["max_abs_error"] == pytest.approx(0.4)
     assert report["median_abs_daily_move"] == pytest.approx(1.0)  # 1, 2, 1
     assert report["error_vs_move"] == pytest.approx(report["median_abs_error"] / 1.0)
@@ -183,6 +185,18 @@ def test_calibrate_reports_overlap_and_roll_threshold() -> None:
         report["error_vs_move"] >= ROLL_DEBIAS_FRAC
     )
     assert report["autocorr_lag1"] is not None
+
+
+def test_calibrate_ignores_moves_across_parity_gaps() -> None:
+    """Two bars with a parity fill between them are not a one-day move."""
+    rows = [
+        {"date": "2026-09-01", "spot": 100.0, "src": SRC_BARS, "resid": 0.1},
+        {"date": "2026-09-02", "spot": 90.0, "src": SRC_PARITY, "resid": None},
+        {"date": "2026-09-03", "spot": 110.0, "src": SRC_BARS, "resid": 0.1},
+    ]
+    report = calibrate(rows)
+    assert report["n_bars"] == 2
+    assert report["median_abs_daily_move"] is None
 
 
 def test_calibrate_empty() -> None:
@@ -259,3 +273,101 @@ def test_build_for_date_reads_the_three_sources(tmp_path) -> None:
     assert row["src"] == SRC_BARS
     assert row["spot"] == pytest.approx(CLOSE)
     assert row["resid"] is not None
+
+
+def _write_term(tmp_path, session: date, expiry: date, forward: float, rate: float) -> None:
+    dte = (expiry - session).days
+    landing.write_clean(
+        "atm_term_structure",
+        session,
+        [{
+            "date": session.isoformat(), "underlying": "SPY",
+            "expiration_date": expiry.isoformat(), "dte": dte,
+            "t_years": dte / 365.0, "forward": forward, "atm_strike": forward,
+            "call_price": 1.0, "put_price": 1.0, "call_iv": 0.1, "put_iv": 0.1,
+            "atm_iv": 0.1, "rate": rate, "pairs": 3, "method": "parity",
+            "src": "day_bars",
+        }],
+        job="term_structure",
+        data_root=tmp_path,
+    )
+
+
+def test_build_for_date_falls_back_to_later_dividend_snapshot(tmp_path) -> None:
+    """Archive dates before the first dividends_sync still see historical ex-dates."""
+    settings = Settings(massive_api_key="k", data_root=tmp_path)
+    session = date(2022, 8, 31)
+    expiry = date(2022, 9, 16)
+    _write_term(tmp_path, session, expiry, 400.0, R)
+    landing.write_clean(
+        "dividends",
+        date(2026, 9, 4),
+        [_div("2022-09-02", 1.50)],
+        job="dividends_sync-SPY",
+        data_root=tmp_path,
+    )
+    assert load_dividends(settings, on_or_before=session)  # fallback, not empty
+    row = build_for_date(settings, session)
+    assert row is not None
+    term = {
+        "underlying": "SPY",
+        "expiration_date": expiry.isoformat(),
+        "dte": (expiry - session).days,
+        "t_years": (expiry - session).days / 365.0,
+        "forward": 400.0,
+        "rate": R,
+    }
+    without, _ = proxy_spot(term, [], session)
+    assert row["src"] == SRC_PARITY
+    assert row["spot"] > without
+
+
+def test_build_for_date_prefers_asof_dividend_snapshot(tmp_path) -> None:
+    """The scheduled job must not skip forward to a later sync when one exists as-of."""
+    settings = Settings(massive_api_key="k", data_root=tmp_path)
+    _write_term(tmp_path, SESSION, EXPIRY, F, R)
+    landing.write_clean(
+        "dividends",
+        date(2026, 9, 1),
+        [_div("2026-09-03", 1.50)],
+        job="dividends_sync-SPY",
+        data_root=tmp_path,
+    )
+    landing.write_clean(
+        "dividends",
+        date(2026, 9, 4),
+        [_div("2026-09-03", 9.99)],
+        job="dividends_sync-SPY",
+        data_root=tmp_path,
+    )
+    row = build_for_date(settings, SESSION)
+    assert row is not None
+    expected, _ = proxy_spot(_term(), [_div("2026-09-03", 1.50)], SESSION)
+    assert row["spot"] == pytest.approx(expected)
+
+
+def test_load_dividends_without_asof_is_the_latest_snapshot(tmp_path) -> None:
+    settings = Settings(massive_api_key="k", data_root=tmp_path)
+    landing.write_clean(
+        "dividends", date(2026, 9, 1), [_div("2026-06-18", 1.0)],
+        job="dividends_sync-SPY", data_root=tmp_path,
+    )
+    landing.write_clean(
+        "dividends", date(2026, 9, 4), [_div("2026-06-18", 2.0)],
+        job="dividends_sync-SPY", data_root=tmp_path,
+    )
+    rows = load_dividends(settings)
+    assert rows[0]["cash_amount"] == pytest.approx(2.0)
+
+
+def test_rewrite_calibration_from_what_did_land(tmp_path) -> None:
+    """A partial archive walk still gets a report matching on-disk rows."""
+    settings = Settings(massive_api_key="k", data_root=tmp_path)
+    row = assemble(SESSION, close=CLOSE, term=_term(), dividends=[])
+    assert row is not None
+    write_row(settings, SESSION, row)
+    report = rewrite_calibration(settings)
+    assert report["n_rows"] == 1
+    assert report["n_overlap"] == 1
+    meta = tmp_path / "_meta" / "spy_spot_calibration.json"
+    assert meta.is_file()

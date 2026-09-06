@@ -315,6 +315,31 @@ def test_underlying_coverage_passes_when_clean(tmp_path: Path) -> None:
     assert all(c.status == audit.PASS for c in checks)
 
 
+def test_vol_surface_fails_when_absent_and_passes_when_landed(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    assert audit.check_vol_surface(settings, RUN_DATE)[0].status == audit.FAIL
+    landing.write_clean(
+        "vol_surface", RUN_DATE,
+        [{
+            "date": RUN_DATE.isoformat(), "underlying": "SPXW",
+            "expiration_date": "2026-09-25", "dte": 28, "t_years": 28 / 365,
+            "forward": 7700.0, "svi_a": 0.0008, "svi_b": 0.02, "svi_rho": -0.4,
+            "svi_m": 0.01, "svi_sigma": 0.12, "k_min": -0.05, "k_max": 0.05,
+            "n_strikes": 21, "rms_error": 0.0, "min_g": 0.3, "rate": 0.04,
+            "src": "day_bars",
+        }],
+        job="surface", data_root=tmp_path,
+    )
+    got = audit.check_vol_surface(settings, RUN_DATE)[0]
+    assert got.status == audit.PASS
+    assert got.data["rows"] == 1
+
+
+def test_vol_surface_is_part_of_the_daily_run(tmp_path: Path) -> None:
+    names = {c.name for c in audit.run_checks(_settings(tmp_path), RUN_DATE, _logger())}
+    assert "vol_surface" in names
+
+
 def test_render_lists_every_check(tmp_path: Path) -> None:
     checks = [audit.Check("a", audit.PASS, "ok"), audit.Check("b", audit.FAIL, "bad")]
     out = audit._render(RUN_DATE, checks)

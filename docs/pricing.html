@@ -160,10 +160,13 @@
           data and <code>SurfaceArbitrageError</code> raises from the
           unchanged post-fit guards. <code>Surface.vol(K, T)</code>
           interpolates linearly in total variance between bracketing expiries,
-          flat outside, exact on a fitted expiry. CLI:
+          flat outside, exact on a fitted expiry. Scheduled Tue–Sat 12:15 ET
+          as <code>massive-surface</code> (after the ATM curve at 12:00, before
+          <code>coverage_audit</code> at 12:30). CLI:
           <code>python -m pricing.surface --date … --underlying SPXW</code>;
           archive: <code>scripts/build_surface.py</code> →
-          <code>vol_surface</code>. Deliberately unscheduled. No VIX surface:
+          <code>vol_surface</code>. Read back with <code>load_surface</code> /
+          <code>Surface.from_rows</code> — do not refit from day bars. No VIX surface:
           those options are on the VX future, a different modelling question.
         </dd>
       </dl>

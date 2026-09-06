@@ -15,6 +15,8 @@ of them fail, so cron, Healthchecks.io and the box CI workflow all surface it:
   * flat files -- all three datasets present in the manifest with rows kept.
   * ``contracts`` -- universe present, and per-underlying counts sane.
   * ``option_trades`` / bars -- partitions non-empty.
+  * ``vol_surface`` -- T-1 SVI fit landed (derived; a silent skip is as
+    invisible as a capture hole).
   * websocket capture -- raw files present and ``ws_gap`` events counted.
   * disk runway -- how many days of snapshot growth the volume still holds.
   * per-underlying ticker coverage -- so an SPX-shaped hole cannot again look
@@ -308,6 +310,21 @@ def check_partitions(settings: Settings, d: date) -> list[Check]:
     return checks
 
 
+def check_vol_surface(settings: Settings, d: date) -> list[Check]:
+    """Yesterday's fitted smile landed -- a silent skip is as invisible as a capture hole.
+
+    Derived, so a missed day is rebuilt with ``scripts/build_surface.py``
+    rather than lost. It is still a FAIL when the partition is missing:
+    ``coverage_audit`` is the job that notices a reduction that stopped.
+    """
+    rows = _partition_rows(settings, "vol_surface", d)
+    if rows < 0:
+        return [Check("vol_surface", FAIL, "unreadable parquet in partition", {})]
+    if rows == 0:
+        return [Check("vol_surface", FAIL, "partition missing or empty", {"rows": 0})]
+    return [Check("vol_surface", PASS, f"{rows:,} slices", {"rows": rows})]
+
+
 def check_underlying_coverage(settings: Settings, d: date) -> list[Check]:
     """Per-underlying ticker counts, so a one-sided hole cannot hide.
 
@@ -584,6 +601,7 @@ def run_checks(settings: Settings, d: date, logger: JsonlLogger) -> list[Check]:
     checks += check_snapshots(settings, d)
     checks += check_flatfiles(settings, d)
     checks += check_partitions(settings, d)
+    checks += check_vol_surface(settings, d)
     checks += check_underlying_coverage(settings, d)
     checks += check_underlying_window(settings, d)
     checks += check_websocket(settings, d, logger)

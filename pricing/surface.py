@@ -87,9 +87,11 @@ its own forward's log-moneyness, and holds the nearest slice flat outside the
 fitted term range. On a fitted expiry's own T it returns that slice exactly.
 
 Run: ``python -m pricing.surface [--date YYYY-MM-DD] [--underlying SPX,SPXW]``
-(default date: the previous trading day). For the archive, use
-``scripts/build_surface.py``. There is deliberately no scheduled job: the
-surface is a derived reduction and rebuilds from day bars on demand.
+(default date: the previous trading day). Scheduled Tue–Sat 12:15 ET as
+``massive-surface`` (after ``term_structure`` at 12:00, before
+``coverage_audit`` at 12:30). For the archive, use ``scripts/build_surface.py``.
+:func:`load_surface` / :meth:`Surface.from_rows` read the landed
+``vol_surface`` parameters back; consumers must not refit from day bars.
 """
 
 from __future__ import annotations
@@ -569,6 +571,62 @@ class Surface:
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"Surface({self.underlying} {self.date}, {len(self.slices)} slices)"
 
+    @classmethod
+    def from_rows(cls, rows: list[dict[str, Any]]) -> Surface:
+        """Project landed ``vol_surface`` records into a calendar-checked Surface.
+
+        ``Slice`` fields are the schema columns with the ``svi_`` prefix
+        stripped from the five parameters. ``date`` / ``underlying`` / ``src``
+        are Surface-level (or write-only). Mixed dates or roots fail loud --
+        a partition holds every root for the session, and each Surface is
+        one root. Construction still runs :meth:`_check_calendar`, so a
+        tampered parquet cannot evaluate as a smile.
+        """
+        if not rows:
+            raise SurfaceError("no vol_surface rows")
+        dates = {str(r["date"])[:10] for r in rows}
+        underlyings = {str(r["underlying"]) for r in rows}
+        if len(dates) != 1 or len(underlyings) != 1:
+            raise SurfaceError(
+                f"from_rows expects one (date, underlying), got "
+                f"dates={sorted(dates)} underlyings={sorted(underlyings)}"
+            )
+        d = date.fromisoformat(dates.pop())
+        underlying = underlyings.pop()
+        if underlying not in SURFACE_ROOTS:
+            raise SurfaceError(
+                f"surface fits the European index roots {SURFACE_ROOTS}, "
+                f"got {underlying!r}"
+            )
+        slices = [_slice_from_row(r) for r in rows]
+        expiries = [s.expiration_date for s in slices]
+        if len(expiries) != len(set(expiries)):
+            raise SurfaceError(
+                f"duplicate expiries in vol_surface rows for {underlying} on {d}"
+            )
+        return cls(d, underlying, slices)
+
+
+def _slice_from_row(row: dict[str, Any]) -> Slice:
+    """One landed vol_surface record → Slice. Prefix map is the schema contract."""
+    return Slice(
+        expiration_date=str(row["expiration_date"])[:10],
+        dte=int(row["dte"]),
+        t_years=float(row["t_years"]),
+        forward=float(row["forward"]),
+        a=float(row["svi_a"]),
+        b=float(row["svi_b"]),
+        rho=float(row["svi_rho"]),
+        m=float(row["svi_m"]),
+        sigma=float(row["svi_sigma"]),
+        k_min=float(row["k_min"]),
+        k_max=float(row["k_max"]),
+        n_strikes=int(row["n_strikes"]),
+        rms_error=float(row["rms_error"]),
+        min_g=float(row["min_g"]),
+        rate=float(row["rate"]),
+    )
+
 
 def _expiry_points(
     F: float, T: float, r: float, legs: dict[float, dict[str, float]],
@@ -755,6 +813,35 @@ def write_rows(settings: Settings, d: date, rows: list[dict[str, Any]]) -> Path:
     return path
 
 
+def load_surface(settings: Settings, d: date, underlying: str) -> Surface:
+    """Read one (date, root) smile back from the ``vol_surface`` partition.
+
+    The package writes SVI parameters and must be able to read them; without
+    this every consumer would refit from day bars. Missing partition, empty
+    root, or a parquet that fails the calendar guard raises
+    :class:`SurfaceError` / :class:`SurfaceArbitrageError` -- no silent
+    fallback to a refit.
+    """
+    import pyarrow.parquet as pq
+
+    if underlying not in SURFACE_ROOTS:
+        raise SurfaceError(
+            f"surface fits the European index roots {SURFACE_ROOTS}, "
+            f"got {underlying!r}"
+        )
+    part = Path(settings.data_root) / "clean" / DATASET / f"dt={d.isoformat()}"
+    paths = sorted(part.glob("*.parquet")) if part.is_dir() else []
+    if not paths:
+        raise SurfaceError(f"no {DATASET} partition for {d}")
+    rows: list[dict[str, Any]] = []
+    for path in paths:
+        rows.extend(pq.read_table(path).to_pylist())
+    filtered = [r for r in rows if r.get("underlying") == underlying]
+    if not filtered:
+        raise SurfaceError(f"no {DATASET} rows for {underlying} on {d}")
+    return Surface.from_rows(filtered)
+
+
 def _main_fn(args, settings: Settings, logger: JsonlLogger):
     d = date.fromisoformat(args.date)
     roots = tuple(parse_underlyings(args.underlying, list(SURFACE_ROOTS)))
@@ -785,13 +872,17 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger):
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI for a manual one-session fit; exits 0 on success, 1 on failure.
+    """CLI for the scheduled T-1 run; exits 0 on success, 1 on failure.
 
     Uses ``cli.run_job`` for the same reason term_structure does: the JSONL
     run log, the trading-day gate and the Healthchecks wiring come with it.
-    ``--date`` defaults to the previous trading day. Deliberately unscheduled
-    -- the issue scopes this to fit + evaluate + tests, and bulk history comes
-    from ``scripts/build_surface.py`` calling :func:`build_for_date` directly.
+    ``--date`` defaults to the previous trading day so the Tue-Sat cron line
+    needs no arguments and so a Saturday run gates on Friday's session, the
+    same convention ``term_structure`` and ``coverage_audit`` follow.
+
+    Bulk history does *not* come through here -- ``scripts/build_surface.py``
+    calls :func:`build_for_date` directly, so backfilling a thousand closed
+    days neither pings a monitor nor trips the gate.
     """
     argv = list(argv) if argv is not None else sys.argv[1:]
     if "--date" not in argv:

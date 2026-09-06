@@ -242,15 +242,22 @@ def _project_to_feasible(
     """Nearest point on the p0-to-flat segment that clears the guard margins.
 
     The flat slice (b = 0) has ``g == 1`` everywhere, and at a level above the
-    calendar floor it clears both guards, so some point of the segment always
-    qualifies; the scan keeps the one closest to p0, i.e. the most
-    data-faithful feasible start. SLSQP needs this: started infeasible it
-    slides to the degenerate flat slice rather than the good feasible fit
-    next to the data. Deterministic, like the seed itself.
+    calendar floor plus the margin it clears both guards, so some point of the
+    segment qualifies; the scan keeps the one closest to p0, i.e. the most
+    data-faithful feasible start. The one exception -- a calendar floor
+    peaking within the margin of the w0 box bound, where no flat seed is
+    feasible -- raises :class:`SurfaceArbitrageError` rather than returning an
+    infeasible start. SLSQP needs this: started infeasible it slides to the
+    degenerate flat slice rather than the good feasible fit next to the data.
+    Deterministic, like the seed itself.
     """
     level = float(np.mean(ws))
     if w_floor is not None:
-        level = max(level, float(np.max(w_floor)))
+        # The anchor must clear the floor by the margin, not sit on it: at
+        # exactly max(w_floor) the calendar difference is 0 there, so the
+        # "feasible" fallback would be infeasible by the G_REPAIR_MARGIN that
+        # both ok() and the SLSQP constraint require.
+        level = max(level, float(np.max(w_floor)) + 2 * G_REPAIR_MARGIN)
     flat = np.clip(np.array([level, 0.0, 0.0, 0.0, 0.1]), lower, upper)
 
     def ok(p: np.ndarray) -> bool:
@@ -265,6 +272,16 @@ def _project_to_feasible(
 
     if ok(p0):
         return p0
+    if not ok(flat):
+        # Reachable only when the calendar floor's maximum is within the
+        # margin of the w0 box bound: the flat slice has the highest minimum
+        # variance on the segment (any b > 0 dips below its w0), so no seed
+        # on it is feasible either. Fail loudly rather than hand SLSQP the
+        # infeasible start this projection exists to avoid.
+        raise SurfaceArbitrageError(
+            f"calendar floor peaks at {float(np.max(w_floor)):.6g}, within the "
+            f"repair margin of the w0 bound {upper[0]:g}: no feasible seed exists"
+        )
     for t in np.linspace(0.05, 1.0, 20):
         p = (1.0 - t) * p0 + t * flat
         if ok(p):

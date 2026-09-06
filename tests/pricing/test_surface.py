@@ -300,6 +300,81 @@ def test_calendar_wing_crossing_is_repaired_not_rejected() -> None:
     assert chained.rms_error < 1e-3  # and the repair stays on the data
 
 
+def test_build_surfaces_chains_the_calendar_repair() -> None:
+    """Copilot review on #49: cover the two-pass build wiring itself.
+
+    A later slice whose unconstrained fit dips below the earlier slice must
+    be repaired inside build_surfaces -- forwarding the predecessor, the
+    union grid, and the expiry ordering -- not just inside fit_slice.
+    """
+    delta = 2e-4
+    lower_smile = {**PARAMS, "a": PARAMS["a"] - delta}
+    bars = (_svi_bars()  # NEAR off the true smile
+            + _chain_bars(FAR, T_FAR, lambda k: math.sqrt(
+                _true_w(math.log(k / F), lower_smile) / T_FAR)))
+    surf = sf.build_surfaces(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate)["SPXW"]
+    assert len(surf.slices) == 2
+    near, far = surf.slices
+    grid = np.linspace(min(near.k_min, far.k_min), max(near.k_max, far.k_max),
+                       sf.G_POINTS)
+    near_w = sf._svi_w(grid, near.a, near.b, near.rho, near.m, near.sigma)
+    far_w = sf._svi_w(grid, far.a, far.b, far.rho, far.m, far.sigma)
+    assert float(np.min(far_w - near_w)) >= -sf.CAL_TOL  # calendar-clean
+    assert far.min_g >= 0.0
+
+    # The fixture really exercises the repair: the far slice's unconstrained
+    # fit on the same points does cross the near slice...
+    chain = sf.bars_to_chain(bars, "SPXW")
+    legs = ts._legs_by_expiry(chain)
+    fwd = next(f for f in sf.forward_from_parity(chain, lambda e: R, asof_date=DAY)
+               if f["expiration_date"].startswith(FAR.isoformat()))
+    ks, ws = sf._expiry_points(float(fwd["forward"]), T_FAR, R,
+                               legs[fwd["expiration_date"]])
+    solo = sf.fit_slice(ks, ws)  # no floor: the unchained fit
+    solo_w = sf._svi_w(grid, solo.a, solo.b, solo.rho, solo.m, solo.sigma)
+    assert float(np.min(solo_w - near_w)) < -sf.CAL_TOL
+    # ... and the repair stayed near the data rather than fabricating.
+    assert far.rms_error < sf.REPAIR_MAX_REL_RMS * float(np.mean(np.asarray(ws)))
+
+
+def test_flat_fallback_anchor_clears_the_floor_by_the_margin() -> None:
+    """Copilot review on #49: the flat anchor used to sit at exactly
+    max(w_floor), where the calendar difference is 0 -- infeasible by the
+    margin both the projection scan and the SLSQP constraint require, handing
+    SLSQP the infeasible start the projection exists to avoid."""
+    ks = np.linspace(-0.05, 0.05, 21)
+    ws = np.array([_true_w(float(k)) for k in ks])
+    grid = sf._butterfly_grid(float(ks[0]), float(ks[-1]))
+    cal_grid = np.linspace(float(ks[0]), float(ks[-1]), sf.G_POINTS)
+    # A floor far above the data: every segment point short of the flat
+    # anchor is infeasible, so the anchor itself is what must qualify.
+    w_floor = np.full(sf.G_POINTS, 0.5)
+    lower = np.array([0.0, 0.0, -0.999, -3.0, 1e-4])
+    upper = np.array([10.0, 10.0, 0.999, 3.0, 5.0])
+    p0 = np.array([max(float(ws.min()), 1e-8), 0.02, -0.4, 0.01, 0.12])
+    p = sf._project_to_feasible(p0, ws, grid, lower, upper, w_floor, cal_grid)
+    w0, b, rho, m, sigma = (float(v) for v in p)
+    a = w0 - b * sigma * math.sqrt(1.0 - rho * rho)
+    diff = sf._svi_w(cal_grid, a, b, rho, m, sigma) - w_floor
+    assert float(np.min(diff)) >= sf.G_REPAIR_MARGIN
+    assert sf._min_g(grid, p) >= sf.G_REPAIR_MARGIN
+
+
+def test_flat_fallback_raises_when_no_feasible_seed_exists() -> None:
+    """A calendar floor peaking past the w0 box bound leaves no feasible flat
+    seed; the projection must fail loudly, not return an infeasible start."""
+    ks = np.linspace(-0.05, 0.05, 21)
+    ws = np.array([_true_w(float(k)) for k in ks])
+    grid = sf._butterfly_grid(float(ks[0]), float(ks[-1]))
+    cal_grid = np.linspace(float(ks[0]), float(ks[-1]), sf.G_POINTS)
+    w_floor = np.full(sf.G_POINTS, 20.0)  # past the w0 box bound (10.0)
+    lower = np.array([0.0, 0.0, -0.999, -3.0, 1e-4])
+    upper = np.array([10.0, 10.0, 0.999, 3.0, 5.0])
+    p0 = np.array([max(float(ws.min()), 1e-8), 0.02, -0.4, 0.01, 0.12])
+    with pytest.raises(sf.SurfaceError, match="no feasible seed"):
+        sf._project_to_feasible(p0, ws, grid, lower, upper, w_floor, cal_grid)
+
+
 # ---------------------------------------------------------------------------
 # Term interpolation
 # ---------------------------------------------------------------------------

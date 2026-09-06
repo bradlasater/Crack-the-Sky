@@ -128,11 +128,24 @@
           forward, puts below, same chain and same F as the ATM curve.
           SPX/SPXW only: SPY strikes invert on the American tree
           (<code>implied_vol_american</code>) and this fit path is European
-          end to end — an SPY smile is follow-up, not a flag. Box bounds plus the
+          end to end — an SPY smile is follow-up, not a flag. OTM closes at or
+          below <code>MIN_TIME_VALUE_FRAC</code> of the forward are dropped
+          before inversion (an OTM close <em>is</em> time value; a
+          near-worthless one is a tick-dominated stale print, and no trade-age
+          signal exists yet). Box bounds plus the
           non-negative-total-variance domain constraint; deterministic
-          data-derived seed. Butterfly (<code>g(k) ≥ 0</code>) and calendar
-          (total variance non-decreasing in T) violations raise
-          <code>SurfaceArbitrageError</code>. <code>Surface.vol(K, T)</code>
+          data-derived seed; <code>MAX_NFEV</code> raised past scipy's default
+          because real chains exhaust it long before the 1e-12 tolerances are
+          met. The arbitrage guards are enforced <em>inside</em> the fit: a
+          slice whose unconstrained optimum violates butterfly
+          (<code>g(k) ≥ 0</code> on the padded grid) or dips below its
+          predecessor's total variance (calendar, chained in expiry order on
+          the guard's union grid) is refit by SLSQP under both as hard
+          constraints, from feasibility-projected seeds, and the repair is
+          kept only while it still explains the slice
+          (<code>REPAIR_MAX_REL_RMS</code>) — past that the arbitrage is in the
+          data and <code>SurfaceArbitrageError</code> raises from the
+          unchanged post-fit guards. <code>Surface.vol(K, T)</code>
           interpolates linearly in total variance between bracketing expiries,
           flat outside, exact on a fitted expiry. CLI:
           <code>python -m pricing.surface --date … --underlying SPXW</code>;

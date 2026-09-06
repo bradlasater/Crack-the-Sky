@@ -217,7 +217,10 @@ def _dst_shift_day(d: date) -> bool:
 def test_on_calendar_fires_at_the_same_instants_as_cron(unit: dict) -> None:
     # Two minutes of margin: systemd-analyze computes from its own now, so
     # instants right at the boundary could fall on either side of it.
-    threshold = (datetime.now() + timedelta(minutes=2)).replace(microsecond=0)
+    # Naive ET wall clock: systemd-analyze runs with TZ=America/New_York, so
+    # seed the cron side from ET too -- a UTC-local now (CI runners) can be a
+    # calendar day ahead and shift the whole comparison.
+    threshold = (datetime.now(ET) + timedelta(minutes=2)).replace(microsecond=0, tzinfo=None)
     for cron_expr, cal_expr in zip(unit["cron"], unit["on_calendar"], strict=True):
         cron_fires = _cron_fire_times(cron_expr, threshold, timedelta(days=9))
         if len(cron_fires) < 3:

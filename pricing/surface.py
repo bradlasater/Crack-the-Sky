@@ -254,9 +254,9 @@ def _project_to_feasible(
     level = float(np.mean(ws))
     if w_floor is not None:
         # The anchor must clear the floor by the margin, not sit on it: at
-        # exactly max(w_floor) the calendar difference is 0 there, so the
-        # "feasible" fallback would be infeasible by the G_REPAIR_MARGIN that
-        # both ok() and the SLSQP constraint require.
+        # exactly max(w_floor) the calendar difference is 0 there, and ok()
+        # requires the margin so the seed starts strictly feasible rather
+        # than on the constraint boundary.
         level = max(level, float(np.max(w_floor)) + 2 * G_REPAIR_MARGIN)
     flat = np.clip(np.array([level, 0.0, 0.0, 0.0, 0.1]), lower, upper)
 
@@ -330,7 +330,14 @@ def _repair_fit(
                 return False
         return True
 
-    guard = NonlinearConstraint(constraint, G_REPAIR_MARGIN, np.inf, jac="3-point")
+    # The margin applies to the butterfly rows only. Calendar rows need just
+    # w >= w_prev: broadcasting the margin to them would cumulatively lift
+    # total variance across chained repairs and can push an otherwise clean
+    # repair past the relative-RMS acceptance bound.
+    lb = np.full(len(grid), G_REPAIR_MARGIN)
+    if w_floor is not None:
+        lb = np.concatenate([lb, np.zeros(len(cal_grid))])
+    guard = NonlinearConstraint(constraint, lb, np.inf, jac="3-point")
     candidates: list[tuple[float, np.ndarray]] = []
     for start in (x0, seed):
         res = minimize(

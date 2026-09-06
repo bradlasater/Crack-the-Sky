@@ -76,7 +76,7 @@ multi-page, one file per section). Machine state the repo can't declare
 
 On the box: `bash scripts/bootstrap.sh`, fill in `.env` from `.env.example`,
 probe the plan with `venv/bin/python -m ingest.entitlements`, then install the
-schedule — `ansible-playbook -i deploy/ansible/inventory.ini deploy/ansible/playbook.yml`
+schedule — `ansible-playbook -i deploy/ansible/inventory_local.ini deploy/ansible/playbook.yml`
 templates the systemd user timers from `deploy/schedule.json` and installs the
 crontab (still in place as a fallback during the timer cutover). A hand crontab
 install works too — rewriting the placeholder home path first, since cron does

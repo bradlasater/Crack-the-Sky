@@ -134,6 +134,13 @@ LOG=/data/massive/logs/cron.log
 # forward; before coverage_audit (12:30). Rebuilds with scripts/build_spy_spot.py.
 05 12 * * 2-6    cd $REPO && bash scripts/cronjob.sh spy_spot $PY -m signals.spot >> $LOG 2>&1
 
+# --- derived: SVI vol surface ----------------------------------------------
+# Same T-1 day bars as the ATM curve, one raw-SVI smile per (root, expiry).
+# After term_structure (12:00) so the two reductions of the same chain share
+# a session; before coverage_audit (12:30) so a missed write is a FAIL the
+# same morning. Rebuilds with scripts/build_surface.py.
+15 12 * * 2-6    cd $REPO && bash scripts/cronjob.sh surface $PY -m pricing.surface >> $LOG 2>&1
+
 # --- did we actually capture everything? -----------------------------------
 # Runs after flatfile_pull (11:05) and reconcile (11:30) have settled T-1.
 # Exits non-zero on any gap, which pings Healthchecks /fail.

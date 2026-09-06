@@ -164,6 +164,15 @@
       "restart": {"sec": 120}
     },
     {
+      "job": "surface",
+      "unit": "massive-surface",
+      "command": ["-m", "pricing.surface"],
+      "cron": ["15 12 * * 2-6"],
+      "on_calendar": ["Tue-Sat 12:15:00"],
+      "healthchecks": {"schedule": "15 12 * * 2-6", "grace_min": 120, "desc": "SVI vol surface from T-1 day bars (derived, rebuildable)"},
+      "restart": {"sec": 120}
+    },
+    {
       "job": "coverage_audit",
       "unit": "massive-coverage-audit",
       "command": ["-m", "ingest.jobs.coverage_audit"],

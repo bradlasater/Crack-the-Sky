@@ -236,10 +236,16 @@
             <td>One SPY cash level per session into <code>spy_spot</code>. Prefers <code>underlying_day_bars</code> close (<code>src=bars</code>); otherwise inverts the shortest-DTE SPY parity forward with <code>q</code> from <code>resolve_q</code> and the <code>dividends</code> stream (<code>src=parity</code>). <code>resid</code> is proxy minus actual on overlap. Lives in <code>signals.spot</code>. Rebuild + overlap calibration: <code>scripts/build_spy_spot.py --force</code> (without <code>--force</code>, already-written parity rows are skipped).</td>
           </tr>
           <tr>
+            <td class="job">surface<br><span class="tag">derived</span></td>
+            <td class="when">12:15 · default date = T-1</td>
+            <td>Tue–Sat</td>
+            <td>Fits raw SVI per (root, expiry) from the same <code>option_day_bars</code> as the ATM curve into <code>vol_surface</code>. Lives in <code>pricing/</code>. <code>Surface.from_rows</code> / <code>load_surface</code> read the landed parameters back so consumers do not refit. Derived, so a missed day is rebuilt with <code>scripts/build_surface.py</code>; scheduled anyway because a reduction that stops producing is as invisible as a capture that stops. After <code>term_structure</code>, before <code>coverage_audit</code>.</td>
+          </tr>
+          <tr>
             <td class="job">coverage_audit</td>
             <td class="when">12:30 · default date = T-1</td>
             <td>Tue–Sat</td>
-            <td>Reports on the <em>absence</em> of a job: sweep counts vs <code>market_gate</code> schedule, largest gap, manifest, non-empty partitions, WS output, per-root ticker counts, and disk runway. Cadence is measured over the continuous 09:30–16:30 window <em>only</em>: the scheduled 09:05 pre-open and 16:35 EOD sweeps are asserted separately (<code>snapshots_preopen</code> / <code>snapshots_eod</code>), and sweeps run by hand outside the session are reported but never counted — folding all three together made SPY and SPX WARN every single day on a healthy box, and let out-of-hours runs pad the ratio over a real hole. Exit 1 → Healthchecks <code>/fail</code>. Looks at T-1 only — see <code>history_audit</code> for the archive.</td>
+            <td>Reports on the <em>absence</em> of a job: sweep counts vs <code>market_gate</code> schedule, largest gap, manifest, non-empty partitions, T-1 <code>vol_surface</code> freshness (both SPX and SPXW), WS output, per-root ticker counts, and disk runway. Cadence is measured over the continuous 09:30–16:30 window <em>only</em>: the scheduled 09:05 pre-open and 16:35 EOD sweeps are asserted separately (<code>snapshots_preopen</code> / <code>snapshots_eod</code>), and sweeps run by hand outside the session are reported but never counted — folding all three together made SPY and SPX WARN every single day on a healthy box, and let out-of-hours runs pad the ratio over a real hole. Exit 1 → Healthchecks <code>/fail</code>. Looks at T-1 only — see <code>history_audit</code> for the archive.</td>
           </tr>
           <tr>
             <td class="job">history_audit</td>
@@ -286,7 +292,7 @@
         </tbody>
       </table>
 
-      <p>On-demand: <code>python -m ingest.entitlements</code>, <code>scripts/backfill.sh</code>, <code>scripts/repair.sh</code>, <code>python -m pricing.from_market</code>, <code>python -m pricing.surface</code> (deliberately unscheduled; archive rebuild via <code>scripts/build_surface.py</code>).</p>
+      <p>On-demand: <code>python -m ingest.entitlements</code>, <code>scripts/backfill.sh</code>, <code>scripts/repair.sh</code>, <code>python -m pricing.from_market</code>. Archive rebuilds: <code>scripts/build_term_structure.py</code>, <code>scripts/build_surface.py</code>.</p>
 
       <h3 id="ingest-cron">NY cron</h3>
       <p>

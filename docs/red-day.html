@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Crack the Sky — red day</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;family=Newsreader:opsz,wght@6..72,500;6..72,600&amp;display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="site.css">
+</head>
+<body id="top">
+  <a class="skip" href="#main">Skip to content</a>
+  <div class="shell">
+    <nav class="toc" aria-label="Handbook index">
+      <div class="toc-kicker">Crack the Sky</div>
+      <div class="toc-title">System handbook</div>
+      <ol>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="repo-layout.html">Repo layout</a></li>
+        <li><a href="data-flow.html">Data flow</a></li>
+        <li>
+          <a href="ingest.html">Ingest</a>
+          <ol class="sub">
+            <li><a href="ingest.html#ingest-constraints">Massive / Polygon constraints</a></li>
+            <li><a href="ingest.html#ingest-jobs">Jobs that exist</a></li>
+            <li><a href="ingest.html#ingest-cron">NY cron</a></li>
+            <li><a href="ingest.html#ingest-session">Weekday session</a></li>
+            <li><a href="ingest.html#ingest-entitlements">Entitlements</a></li>
+          </ol>
+        </li>
+        <li><a href="marketdata.html">marketdata</a></li>
+        <li><a href="pricing.html">pricing</a></li>
+        <li><a href="warehouse-math.html">Warehouse → math</a></li>
+        <li><a href="canary.html">Daily canary</a></li>
+        <li>
+          <a href="red-day.html" class="active">Red day</a>
+          <ol class="sub">
+            <li><a href="red-day.html#red-which">Which red</a></li>
+            <li><a href="red-day.html#red-coverage">coverage_audit</a></li>
+            <li><a href="red-day.html#red-canary">drift_check</a></li>
+            <li><a href="red-day.html#red-disk">Disk / prune</a></li>
+            <li><a href="red-day.html#red-early">Early close</a></li>
+          </ol>
+        </li>
+        <li><a href="conventions.html">Desk conventions</a></li>
+        <li><a href="not-built.html">Not built</a></li>
+        <li><a href="latent.html">Latent holes</a></li>
+        <li><a href="formula-stubs.html">Formula stubs</a></li>
+        <li><a href="knobs.html">Documented knobs</a></li>
+        <li class="toc-sep"></li>
+        <li><a href="box-operations.html">Box operations (off-repo)</a></li>
+      </ol>
+    </nav>
+
+    <main id="main">
+      <header class="doc">
+        <div>
+          <div class="kicker">Crack the Sky</div>
+          <h1>Red day</h1>
+        </div>
+        <div class="meta"><a href="index.html">← overview</a></div>
+      </header>
+
+      <p>
+        A Healthchecks <code>/fail</code> or a red <code>box.yml</code> coverage
+        step is not one problem. Snapshots cannot be repaired; trades and bars
+        can. Do not run <code>repair.sh</code> at a canary FAIL.
+      </p>
+
+      <h2 id="red-which">Which red</h2>
+      <table>
+        <thead>
+          <tr><th>Signal</th><th>What it is</th><th>First move</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="job">massive-coverage-audit</td>
+            <td>T-1 capture gap. Report in <code>_meta/coverage.json</code>.</td>
+            <td>Read the table on stderr / the JSON. If it is trades/bars/WS, <code>bash scripts/repair.sh YYYY-MM-DD</code>.</td>
+          </tr>
+          <tr>
+            <td class="job">massive-drift-check</td>
+            <td>ATM identities broke (or too few ATM names, or data missing). Report in <code>_meta/drift_check.json</code>.</td>
+            <td>Read <code>failures[]</code>. Math, not a hole in the warehouse — see <a href="canary.html#canary-fail-means">what a FAIL means</a>.</td>
+          </tr>
+          <tr>
+            <td class="job">massive-snapshot-sweep</td>
+            <td>The irreplaceable dataset missed a minute (or a chain 403'd the whole run).</td>
+            <td>That minute is gone. Do not repair. Check the other chains landed; see <a href="latent.html">latent holes</a> for the all-chains-fail retry.</td>
+          </tr>
+          <tr>
+            <td class="job">massive-ws-minute-bars / _alive</td>
+            <td>Delayed AM capture died or logged zero rows.</td>
+            <td>Wait for tomorrow's <code>reconcile</code> — the flat file overwrites WS minute bars. The liveness check is so a 09:26 death does not stay green until evening.</td>
+          </tr>
+          <tr>
+            <td class="job">disk_runway FAIL</td>
+            <td>Inside <code>coverage_audit</code>: &lt; 60 days of snapshot growth left on the volume (WARN at 180).</td>
+            <td><code>bash scripts/prune_raw.sh</code> dry-run, then <code>--apply</code>. Never touches <code>clean/</code> or <code>raw/option_snapshots</code>.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2 id="red-coverage">coverage_audit → repair.sh</h2>
+      <p>
+        <code>bash scripts/repair.sh DATE</code> is the standard fix when the
+        audit reports a <em>backfillable</em> gap:
+      </p>
+      <ol>
+        <li><code>flatfile_pull --date DATE</code> — S3 wins, the authoritative record.</li>
+        <li><code>reconcile --date DATE</code> — rewrites clean <code>option_minute_bars</code> from that file; prior WS output is quarantined, not deleted.</li>
+        <li><code>coverage_audit --date DATE</code> — must go green, or the script exits 1 with <strong>snapshots cannot be repaired: they are only capturable live.</strong></li>
+      </ol>
+      <p>
+        A <code>snapshots[SPY]</code> FAIL (&lt; 95% of expected in-session
+        sweeps, or no in-session files at all) is that last line. Missing
+        <code>snapshots_preopen</code> / <code>snapshots_eod</code> is the same
+        class: those two singletons are not in the cadence ratio, and they
+        cannot be re-swept. A largest-gap WARN with a healthy ratio is
+        continuity, not a hole — do not repair it.
+      </p>
+
+      <h2 id="red-canary">drift_check</h2>
+      <p>
+        Re-running <code>python -m pricing.drift_check --date DATE</code>
+        after a FAIL is fine (it rewrites <code>_meta/drift_check.json</code>).
+        Re-running <code>repair.sh</code> will not change own IV. If
+        <code>n_stale</code> jumped, the filter did its job — the page is
+        <a href="warehouse-math.html#whm-skips">skip counts</a>, not a capture
+        gap. If identities broke on a full ATM set, the math drifted or the
+        as-of chain is junk; that is a code/data question, not a pull.
+      </p>
+
+      <h2 id="red-disk">Disk / prune</h2>
+      <p>
+        Monthly <code>massive-prune</code> runs <code>bash scripts/prune_raw.sh --apply</code>
+        at 03:15 on the 1st. It is <strong>deliberately unmonitored</strong> —
+        no Healthchecks block, so a silent skip is possible. Dry-run first.
+        Drops raw payloads older than <code>RETAIN_DAYS</code> (90) only when
+        the manifest records a replacing flat file with rows kept. Never
+        <code>clean/</code>, snapshots, or <code>raw/flatfiles</code> unless
+        you pass <code>--flatfiles</code> (365-day retain, opt-in).
+        Quarantine has its own clock (<code>QUARANTINE_RETAIN_DAYS</code> 30).
+      </p>
+
+      <h2 id="red-early">Early close</h2>
+      <p>
+        The audit window shrinks with <code>market_gate</code> (13:00 close →
+        13:30 end). The <em>schedule</em> still fires snapshot_sweep through
+        16:30, so those post-close files land as <code>stray</code> (reported,
+        never counted) and 13:32–16:30 is unchecked. That is a known hole in
+        <a href="latent.html">latent holes</a>, not a capture failure — do not
+        treat ~178 stray sweeps on a 13:00 day as something <code>repair.sh</code>
+        should fix.
+      </p>
+
+      <footer>
+        docs/red-day.html — Crack the Sky handbook.
+        Index: index.html. Do not commit .env.
+      </footer>
+    </main>
+  </div>
+</body>
+</html>

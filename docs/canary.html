@@ -37,11 +37,14 @@
           <ol class="sub">
             <li><a href="canary.html#canary-drift-check">What drift_check does</a></li>
             <li><a href="canary.html#canary-pass-fail">Identity-first pass/fail</a></li>
+            <li><a href="canary.html#canary-fail-means">What a FAIL means</a></li>
             <li><a href="canary.html#canary-alert-path">Alert path</a></li>
           </ol>
         </li>
+        <li><a href="red-day.html">Red day</a></li>
         <li><a href="conventions.html">Desk conventions</a></li>
         <li><a href="not-built.html">Not built</a></li>
+        <li><a href="latent.html">Latent holes</a></li>
         <li><a href="formula-stubs.html">Formula stubs</a></li>
         <li><a href="knobs.html">Documented knobs</a></li>
         <li class="toc-sep"></li>
@@ -86,6 +89,45 @@
         enough vendor-comparable ATM names. Still fail-loud on no snapshots,
         schema errors, foreign roots, empty allowlisted root, filesystem errors.
       </p>
+
+      <h2 id="canary-fail-means">What a FAIL means</h2>
+      <p>
+        Read <code>_meta/drift_check.json</code> <code>failures[]</code> first.
+        Re-running <code>repair.sh</code> will not change this. The identity
+        bands live on <code>pricing.drift_check.Thresholds</code>
+        (<code>reprice_median_abs = 0.05</code>, <code>fail_frac = 0.25</code>,
+        <code>min_compare = 20</code>, <code>iv_median_abs = 0.04</code>).
+      </p>
+      <table>
+        <thead>
+          <tr><th>failures[] looks like</th><th>What it actually is</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>only N ATM names to test identities (need ≥ 20)</td>
+            <td>The as-of chain is too thin after skips (stale, expired, uninvertible, SPY ATM cap). Not “vendor drifted.” Check <code>counts.stale</code> / <code>below_intrinsic</code> / <code>n_priced</code>. Empty or missing snapshots also fail-loud before this.</td>
+          </tr>
+          <tr>
+            <td>median |price − own_price| exceeds 0.05</td>
+            <td>The stored engine cannot reprice the input on the ATM slice. American rows round-trip through CRR; if this appeared only after dropping <code>--euro-iv</code>, the tree and the invert disagree. If it appeared with <code>--euro-iv</code>, closed-form BSM itself is off the traded price — stale print that leaked the age filter, or a rate/T/F bug.</td>
+          </tr>
+          <tr>
+            <td>N/M ATM names fail identities (&gt; 25%)</td>
+            <td>Reprice and/or European pair tests (Γ, vega, PCP on day-close legs) are breaking as a fraction of the ATM set. One name inside band never trips this. PCP is skipped when either leg used a last-trade.</td>
+          </tr>
+          <tr>
+            <td>median |ΔIV| exceeds 0.04, or vendor fraction &gt; 25%</td>
+            <td>Vendor diagnostic, and only after ≥ 20 ATM names carry vendor IV. Null vendor IV logs <code>vendor_compare_skipped</code> and still PASSes. A vendor FAIL with holding identities means the vendor moved, not us — still exit 1, still a page.</td>
+          </tr>
+        </tbody>
+      </table>
+      <p>
+        Skip counts on the report (<code>stale</code>, <code>below_intrinsic</code>,
+        <code>uninvertible</code>) are not FAILs by themselves. A jump in
+        <code>stale</code> is the age filter working. See
+        <a href="red-day.html#red-canary">red day</a> for whether to pull anything.
+      </p>
+
       <h2 id="canary-alert-path">Alert path</h2>
       <p>
         Cron bounds: <code>--spy-atm-pct 0.05</code>, <code>--max-rows 400</code>

@@ -14,10 +14,11 @@ columns are also carried unchanged.
 
 Three things here are load-bearing on this data feed:
 
-* **Expiry is an instant.** Settlement is 16:00 ET for SPY/SPXW and 09:30 ET
-  for AM-settled SPX (:data:`marketdata.opra.SETTLEMENT_ET`). Using the expiry
-  *date* at UTC midnight is 20:00 ET the day before, understating T at every
-  tenor and biasing inverted IV by ~108bp at 7 DTE.
+* **Expiry is an instant.** Settlement is 16:00 ET for SPY/SPXW (PM) and
+  09:30 ET for AM-settled SPX monthlies and both VIX series
+  (:data:`marketdata.opra.SETTLEMENT_ET`). Using the expiry *date* at UTC
+  midnight is 20:00 ET the day before, understating T at every tenor and
+  biasing inverted IV by ~108bp at 7 DTE.
 * **Every price here is a traded price, never a mid.** Option NBBO is 403 on
   this tier -- both ``/v3/quotes`` and the ``quotes_v1`` flat file -- so
   :attr:`marketdata.types.Quote.market_price` is the last trade, else the
@@ -75,11 +76,15 @@ inside the uninvertible tally.
 
 Greeks engine per root
 ----------------------
-SPX/SPXW → European BSM. SPY → American CRR (same invert is European BSM;
-there is no American IV solver in :mod:`pricing.iv`). Chain CRR uses
-``crr_steps`` (default 51, vs 401 on the single-quote engine) so a short
-ATM slice is tractable. Pass ``spy_american_moneyness`` to CRR-price only
-SPY strikes within that fraction of the forward and European-price the rest.
+SPX/SPXW/VIX/VIXW → European BSM. SPY → American CRR. The IV invert follows
+the *engine*, not the contract's exercise style: :func:`implied_vol_quote`
+routes American-engine rows to :func:`pricing.iv.implied_vol_american` so
+the reprice identity closes on the same tree. ``european_iv=True`` /
+``--euro-iv`` pins every invert back to closed-form BSM for an A/B.
+Chain CRR uses ``crr_steps`` (default 51, vs 401 on the single-quote engine)
+so a short ATM slice is tractable. Pass ``spy_american_moneyness`` to
+CRR-price only SPY strikes within that fraction of the forward and
+European-price the rest.
 """
 
 from __future__ import annotations
@@ -195,7 +200,8 @@ def engine_for(contract: Contract) -> Engine:
 def expiry_instant(contract: Contract) -> datetime:
     """The moment ``contract`` settles, as an aware UTC datetime.
 
-    16:00 ET for SPY and SPXW; 09:30 ET for AM-settled SPX.
+    16:00 ET for SPY and SPXW (PM-settled); 09:30 ET for AM-settled SPX
+    monthlies and both VIX series. See :data:`marketdata.opra.SETTLEMENT_ET`.
     """
     hour, minute = settlement_time_et(contract.root)
     local = datetime(

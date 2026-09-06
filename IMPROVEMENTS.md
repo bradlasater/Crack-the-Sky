@@ -103,8 +103,6 @@ conservative audit pass. Grouped by area, roughly highest-value first.
 
 ## Docs / site
 
-- `pricing/from_market.py:168` — `expiry_instant` docstring omits VIX/VIXW
-  settlement conventions.
 - `docs/404.html` uses relative asset paths; if it's ever served as a
   server-level 404 for deep URLs, switch to root-relative paths or a `<base>`
   tag depending on hosting.

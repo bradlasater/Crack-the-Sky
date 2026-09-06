@@ -40,8 +40,10 @@
         <li><a href="pricing.html">pricing</a></li>
         <li><a href="warehouse-math.html">Warehouse → math</a></li>
         <li><a href="canary.html">Daily canary</a></li>
+        <li><a href="red-day.html">Red day</a></li>
         <li><a href="conventions.html">Desk conventions</a></li>
         <li><a href="not-built.html">Not built</a></li>
+        <li><a href="latent.html">Latent holes</a></li>
         <li><a href="formula-stubs.html">Formula stubs</a></li>
         <li><a href="knobs.html">Documented knobs</a></li>
         <li class="toc-sep"></li>
@@ -67,8 +69,9 @@
         code on <code>main</code> and Brad’s mental model stay the same document.
       </p>
       <div class="callout">
-        <strong>Rule.</strong> If these pages and the Python disagree, the Python
-        on <code>origin/main</code> wins. Status chips mark
+        <strong>Rule.</strong> If these pages and the running code disagree, the
+        function body and the tests that import it win — not a stale module
+        docstring. Status chips mark
         <span class="badge shipped">shipped</span>
         <span class="badge writeonly">write-only</span>
         <span class="badge forbidden">403 / not entitled</span>
@@ -213,7 +216,11 @@
         </a>
         <a class="card" href="canary.html">
           <div class="card-title">Daily canary</div>
-          <p><code>drift_check</code> at 17:00 ET — identity-first pass/fail, alert path.</p>
+          <p><code>drift_check</code> at 17:00 ET — identity-first pass/fail, and what a FAIL means.</p>
+        </a>
+        <a class="card" href="red-day.html">
+          <div class="card-title">Red day</div>
+          <p>Which Healthcheck fired, whether <code>repair.sh</code> can help, early close, disk/prune.</p>
         </a>
         <a class="card" href="conventions.html">
           <div class="card-title">Desk conventions</div>
@@ -222,6 +229,10 @@
         <a class="card" href="not-built.html">
           <div class="card-title">Not built</div>
           <p>ClickHouse, VVIX, trading-day theta, SPY/VIX smiles — deliberately absent. SVI surface and the rates warehouse have shipped.</p>
+        </a>
+        <a class="card" href="latent.html">
+          <div class="card-title">Latent holes</div>
+          <p>In the tree, deliberately unfixed — the desk index of <code>IMPROVEMENTS.md</code>.</p>
         </a>
         <a class="card" href="formula-stubs.html">
           <div class="card-title">Formula stubs</div>

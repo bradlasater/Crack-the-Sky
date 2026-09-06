@@ -38,11 +38,15 @@
             <li><a href="warehouse-math.html#whm-asof-load">As-of load</a></li>
             <li><a href="warehouse-math.html#whm-own-iv">Own IV</a></li>
             <li><a href="warehouse-math.html#whm-own-greeks">Own greeks</a></li>
+            <li><a href="warehouse-math.html#whm-skips">Skip counts</a></li>
+            <li><a href="warehouse-math.html#whm-errors">What a nonzero exit means</a></li>
           </ol>
         </li>
         <li><a href="canary.html">Daily canary</a></li>
+        <li><a href="red-day.html">Red day</a></li>
         <li><a href="conventions.html">Desk conventions</a></li>
         <li><a href="not-built.html">Not built</a></li>
+        <li><a href="latent.html">Latent holes</a></li>
         <li><a href="formula-stubs.html">Formula stubs</a></li>
         <li><a href="knobs.html">Documented knobs</a></li>
         <li class="toc-sep"></li>
@@ -61,7 +65,9 @@
 
       <h2 id="whm-cli">CLI usage</h2>
       <p>
-        <code>python -m pricing.from_market --date YYYY-MM-DD --asof-ns N --r 0.04</code>
+        <code>python -m pricing.from_market --date YYYY-MM-DD [--asof-ns N] [--r 0.04]</code>
+        — <code>--r</code> is optional; without it the landed Treasury curve
+        interpolates per contract.
       </p>
 
       <h2 id="whm-asof-load">As-of load</h2>
@@ -106,11 +112,62 @@
         <li>Computes <strong>own</strong> Greeks. SPX/SPXW → European BSM; SPY → American CRR (default 51 tree steps on the chain).</li>
         <li><code>--spy-atm-pct</code> CRR-prices only ATM SPY and European-prices the rest. <code>--max-rows</code> caps American CRR rows only so an SPX-first concat cannot starve SPY.</li>
         <li>Vendor <code>greeks_*</code> / <code>implied_volatility</code> copied as diagnostics with signed diffs (own − vendor). Theta × 365 and vega × 100 for unit alignment. Never inputs.</li>
-        <li>T is ACT/365 from as-of to the settlement <em>instant</em> (not UTC midnight of the expiry date).</li>
+        <li>T is ACT/365 from as-of to the settlement <em>instant</em> (not UTC midnight of the expiry date): SPY/SPXW 16:00 ET, SPX monthlies and VIX/VIXW 09:30 ET.</li>
         <li><code>--r</code> pins a scalar rate; default is the landed Treasury curve via <code>rate_for</code>, interpolated to each maturity.</li>
         <li>SPX has no snapshot spot: parity forward → Black-76 via synthetic <code>S = F e^{-rT}</code>.</li>
-        <li>Exit nonzero on foreign roots, mixed underlyings, required-nulls, empty allowlisted root, schema drift, or (unless <code>--skip-uninvertible</code>) a price outside bounds.</li>
+        <li>Exit nonzero on foreign roots, mixed underlyings, required-nulls, empty allowlisted root, schema drift, or (unless <code>--skip-uninvertible</code>) a price outside bounds. <code>--euro-iv</code> pins every invert back to closed-form BSM for an A/B against the American solver.</li>
       </ul>
+
+      <h2 id="whm-skips">Skip counts</h2>
+      <p>
+        Rows are omitted rather than written as NaN.
+        <code>ChainCounts</code> is what the canary report echoes.
+        None of these is a FAIL by itself; an empty result after skips is a
+        <code>ChainError</code>.
+      </p>
+      <table>
+        <thead>
+          <tr><th>Count</th><th>Omitted because</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="job">n_expired</td><td>T ≤ 0 at the as-of (settlement instant already passed).</td></tr>
+          <tr><td class="job">n_no_price</td><td>No last and no day close — nothing to invert.</td></tr>
+          <tr><td class="job">n_stale</td><td>Last print older than <code>--max-trade-age-min</code> (default 60). No <code>day_close</code> fallback. Rows priced off close, and lasts with no trade stamp, are not age-filtered.</td></tr>
+          <tr><td class="job">n_uninvertible</td><td>Price outside no-arbitrage bounds. Default is raise (<code>--skip-uninvertible</code> counts and drops). The below-intrinsic subset is also <code>n_below_intrinsic</code>.</td></tr>
+          <tr><td class="job">n_below_intrinsic</td><td>Inside uninvertible: a traded price below the style's intrinsic floor. Issue #44's stale-print tail, now mostly caught as <code>n_stale</code> first.</td></tr>
+          <tr><td class="job">n_no_asof</td><td>Quote has no snapshot clock — cannot form T.</td></tr>
+          <tr><td class="job">n_otm</td><td>Only when a moneyness filter is set; far-from-the-money names dropped before invert.</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="whm-errors">What a nonzero exit means</h2>
+      <table>
+        <thead>
+          <tr><th>Symptom</th><th>What it actually is</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>foreign root / mixed underlyings / empty allowlisted root</td>
+            <td>The parquet is not this desk's universe, or <code>--roots</code> asked for a name that produced zero rows. Absence is failure.</td>
+          </tr>
+          <tr>
+            <td>SchemaError</td>
+            <td>Extra, missing, or mistyped column vs <code>ingest.schemas</code>. The warehouse moved without the reader.</td>
+          </tr>
+          <tr>
+            <td>AsOfError</td>
+            <td>No snapshot/forward file at or before the instant, or an unstamped filename. Wrong <code>--date</code> / <code>--asof-ns</code>, or the sweep never ran.</td>
+          </tr>
+          <tr>
+            <td>ValueError / ChainError on invert</td>
+            <td>A price outside bounds with the default raise policy — not a NaN. Pass <code>--skip-uninvertible</code> only to survey the tail.</td>
+          </tr>
+          <tr>
+            <td>empty table</td>
+            <td>Everything was skipped. Look at the counts above before assuming the partition is missing.</td>
+          </tr>
+        </tbody>
+      </table>
 
       <footer>
         docs/warehouse-math.html — Crack the Sky handbook.

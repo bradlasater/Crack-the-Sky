@@ -27,7 +27,7 @@ from pricing.drift_check import (
     main,
     run_drift,
 )
-from pricing.from_market import ChainCounts, greeks_asof
+from pricing.from_market import CHAIN_CRR_STEPS, ChainCounts, greeks_asof
 from tests.marketdata.conftest import forward_row
 from tests.pricing.test_from_market_chain import (
     ASOF_NS,
@@ -346,6 +346,31 @@ def test_cutoff_is_1640_et_on_the_partition_date() -> None:
     assert got.hour == 16 and got.minute == 40
 
 
+def test_cent_reprice_residual_fails_the_solver_band() -> None:
+    """A $0.01 invert/reprice break sat inside the old $0.05 nickel (issue #43)."""
+    row = _consistent_euro_row(ticker=SPXW, cp="call")
+    row["market_price"] = float(row["own_price"]) + 0.01
+    report = evaluate_drift(
+        pa.Table.from_pylist([row]), thresholds=LOOSE, dt=DT, asof_ns=ASOF_NS, r=R
+    )
+    assert report.status == "FAIL"
+    assert report.beyond_by_identity["reprice"] == 1
+    assert report.median_abs_reprice == pytest.approx(0.01)
+    assert any("own_price" in f for f in report.failures)
+
+
+def test_american_scale_reprice_residual_stays_inside_the_solver_band() -> None:
+    """Measured American p90 at 51 CRR steps is ~2e-6; that must not FAIL."""
+    row = _consistent_euro_row(ticker=SPXW, cp="call")
+    row["market_price"] = float(row["own_price"]) + 2e-6
+    report = evaluate_drift(
+        pa.Table.from_pylist([row]), thresholds=LOOSE, dt=DT, asof_ns=ASOF_NS, r=R
+    )
+    assert report.status == "PASS"
+    assert report.beyond_by_identity["reprice"] == 0
+    assert report.median_abs_reprice == pytest.approx(2e-6)
+
+
 def test_evaluate_does_not_trip_on_a_single_name_inside_band() -> None:
     """Far-OTM ticks are not the trigger; the rule is median / ATM fraction."""
     row = _consistent_euro_row(ticker=SPXW, cp="call")
@@ -393,9 +418,12 @@ def test_default_thresholds_are_the_documented_canary() -> None:
     assert t.theta_abs == 150.0
     assert t.theta_rel == 0.60
     assert t.iv_median_abs == 0.04
-    assert t.reprice_abs == 0.05
-    assert t.reprice_rel == 0.01
-    assert t.reprice_median_abs == 0.05
+    assert t.reprice_abs == 1e-3
+    assert t.reprice_rel == 0.0
+    assert t.reprice_median_abs == 1e-4
+    # Bands were measured at this tree depth (issue #43); a step change
+    # needs a new measurement, not a silent reuse of 1e-3 / 1e-4.
+    assert CHAIN_CRR_STEPS == 51
     assert t.gamma_pair_abs == 0.002
     assert t.gamma_pair_rel == 0.35
     assert t.vega_pair_abs == 10.0

@@ -2,8 +2,15 @@
 # documents. Idempotent; safe to re-run any time. No sudo: everything runs as
 # the box user (by design there is no passwordless sudo on the box).
 #
-#   ansible-playbook -i deploy/ansible/inventory.ini deploy/ansible/playbook.yml
+#   on the box:      ansible-playbook -i deploy/ansible/inventory_local.ini \
+#                        deploy/ansible/playbook.yml
+#   from elsewhere:  ansible-playbook -i deploy/ansible/inventory.ini \
+#                        deploy/ansible/playbook.yml
 #   add --check --diff for a dry run
+#
+# The two inventories are the same host. inventory.ini reaches it over the
+# `headless` SSH alias, which lives in a workstation's ~/.ssh/config and does
+# not resolve on the box; inventory_local.ini connects locally instead.
 - name: Crack the Sky ingest box
   hosts: headless
   gather_facts: true

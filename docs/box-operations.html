@@ -127,7 +127,8 @@
       </ul>
       <pre><code>systemctl --user list-timers 'massive-*'     # next/last fire per job
 journalctl --user -u massive-snapshot-sweep -n 50
-ansible-playbook -i deploy/ansible/inventory.ini deploy/ansible/playbook.yml  # (re)converge
+ansible-playbook -i deploy/ansible/inventory_local.ini deploy/ansible/playbook.yml  # (re)converge, on the box
+ansible-playbook -i deploy/ansible/inventory.ini deploy/ansible/playbook.yml        # same, over ssh from a workstation
 ansible-playbook deploy/ansible/render_units.yml  # render to /tmp only, no install</code></pre>
 
       <h2 id="box-runner">GitHub Actions self-hosted runner</h2>

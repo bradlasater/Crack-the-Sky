@@ -78,8 +78,17 @@ def brenner_subrahmanyam_seed(market_price: float, S: float, T: float, q: float 
     A Newton starting point, not a quoted vol. The inverter clips it into the
     search bracket.
     """
-    disc_s = float(S) * float(np.exp(-float(q) * float(T)))
-    return float(np.sqrt(2.0 * np.pi / float(T)) * (float(market_price) / max(disc_s, 1e-12)))
+    market_price_ = float(np.asarray(market_price, dtype=float))
+    S_ = float(np.asarray(S, dtype=float))
+    T_ = float(np.asarray(T, dtype=float))
+    q_ = float(np.asarray(q, dtype=float))
+    if not all(np.isfinite(x) for x in (market_price_, S_, T_, q_)):
+        raise ValueError(f"non-finite input: price={market_price!r} S={S_} T={T_} q={q_}")
+    if S_ <= 0 or T_ <= 0:
+        raise ValueError(f"invalid S or T: S={S_}, T={T_}")
+
+    disc_s = S_ * float(np.exp(-q_ * T_))
+    return float(np.sqrt(2.0 * np.pi / T_) * (market_price_ / max(disc_s, 1e-12)))
 
 
 def implied_vol(

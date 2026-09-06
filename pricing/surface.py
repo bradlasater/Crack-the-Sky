@@ -27,6 +27,16 @@ half of the chain and their price is nearly all time value, which is what an
 IV inversion needs; a deep-ITM day-bar close is a stale print on what is
 mostly a bond.
 
+**Near-worthless closes are dropped before fitting.** An OTM close *is* time
+value, and a day bar carries no trade-age signal (the staleness gap of issue
+#44), so the staleness proxy is a price floor: an OTM close at or below
+``MIN_TIME_VALUE_FRAC`` of the forward -- a few ticks at index scale -- inverts
+to an IV dominated by the tick size rather than by the market. On real
+sessions those prints are exactly the stale wing closes that drag an
+unconstrained fit onto its parameter bounds. The floor scales with F, so it
+is deterministic, data-derived, and unit-free; an expiry left with fewer than
+MIN_STRIKES strikes after filtering is skipped, same as a thin chain.
+
 **The fit.** Raw SVI, ``w(k) = a + b(rho(k-m) + sqrt((k-m)^2 + sigma^2))``,
 with ``scipy.optimize.least_squares`` over the five parameters. The domain
 constraint for non-negative total variance, ``a + b*sigma*sqrt(1-rho^2) >= 0``
@@ -34,16 +44,42 @@ constraint for non-negative total variance, ``a + b*sigma*sqrt(1-rho^2) >= 0``
 fitting that minimum ``w0`` in place of ``a`` under the box bound ``w0 >= 0``
 and recovering ``a`` afterwards. The seed is deterministic and data-derived
 -- minimum observed w, ATM k for m, wing slopes for b, rho = -0.5, sigma =
-0.1 -- so refitting the same slice reproduces the same parameters.
+0.1 -- so refitting the same slice reproduces the same parameters. The
+evaluation budget is raised to ``MAX_NFEV`` because real chains exhaust
+scipy's default (500 evals for five parameters) long before the tight
+tolerances are met; observed converged fits need ~1200 (issue #46).
 
-**Arbitrage guards fail loud.** Each fitted slice is checked for butterfly
-arbitrage via Gatheral's ``g(k) >= 0`` on a grid padded past the quoted
-strikes (``vol(K, T)`` answers queries out there, and raw SVI's wings are
-where a bad fit goes arbitrageable first), and each root's set of slices is
-checked for calendar arbitrage -- total variance non-decreasing in T at every
-k. A violation raises :class:`SurfaceArbitrageError`: a smile that prices a
-negative density or negative forward variance is worse than no smile,
-matching marketdata's fail-loud convention.
+**The butterfly guard is enforced inside the fit, not only after it.** The
+unconstrained least-squares fit runs first and is accepted unchanged when it
+is arbitrage-clean. When it violates -- on real chains the violation sits in
+the padded wing past the last quoted strike, where no data constrains the
+curve -- the slice is refit by SLSQP minimising the *same* sum of squared
+residuals subject to ``g(k) >= G_REPAIR_MARGIN`` on the guard grid as a hard
+constraint. Each seed (the unconstrained optimum, then the data-derived
+seed) is first projected onto the feasible region along the segment toward
+the flat slice -- ``b = 0`` has ``g == 1`` everywhere, so a feasible point
+always exists on that segment -- because SLSQP started infeasible slides to
+the degenerate flat slice instead of the good feasible fit next to the data.
+The feasible candidate with the lower cost wins.
+
+**The calendar guard is chained through the build the same way.** Real day
+bars carry small genuine calendar inversions -- the raw ATM curve itself
+crosses on these sessions -- so the build fits slices in expiry order and a
+slice whose unconstrained fit dips below its predecessor's total variance on
+the calendar guard's union grid is refit with ``w(k) >= w_prev(k)`` on that
+grid as a second hard constraint. The union grid is known before any fitting
+(filtering and eligibility are data-determined), so the constraint covers
+exactly the domain :class:`Surface` re-checks afterwards.
+
+**Repairs must still explain the slice.** A constrained refit is accepted
+only while its rms stays within ``REPAIR_MAX_REL_RMS`` of the mean total
+variance; past that the arbitrage is in the data, not in wing noise, and
+repairing would be fabrication. A slice that still violates after the
+constrained refit -- or whose only feasible refits are rejected by that bound
+-- raises :class:`SurfaceArbitrageError` via the unchanged post-fit guards
+(per-slice butterfly in :func:`fit_slice`, cross-slice calendar in
+:class:`Surface`): a genuinely broken smile, not noise. Fail-loud is kept;
+what changed is that noise is repaired, not fatal.
 
 **Evaluation.** :meth:`Surface.vol` interpolates *linearly in total variance*
 between the bracketing expiries -- the arb-preserving choice -- each slice at
@@ -67,7 +103,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from scipy.optimize import least_squares
+from scipy.optimize import Bounds, NonlinearConstraint, least_squares, minimize
 
 from ingest.common import landing, market_gate
 from ingest.common.cli import run_job
@@ -94,12 +130,34 @@ SURFACE_ROOTS = ("SPX", "SPXW")
 # Five SVI parameters want at least five points.
 MIN_STRIKES = 5
 
+# Real chains exhaust scipy's default least_squares budget (500 evals for
+# five parameters) before the tight tolerances are met; converged retries
+# need ~1200 (issue #46). The tolerances stay at 1e-12 -- the flat-slice
+# contract (b driven onto its zero bound) depends on them.
+MAX_NFEV = 5000
+
+# Pre-filter floor: an OTM close at or below this fraction of the forward is
+# within a few ticks of worthless, and its IV inversion is tick-dominated
+# noise (see the module docstring). 3e-5 is ~$0.23 at F ~ 7700.
+MIN_TIME_VALUE_FRAC = 3e-5
+
 # Butterfly guard grid: g(k) is checked this far (in k) past the quoted
 # strikes. Calendar comparison shares the grid resolution.
 G_PAD = 1.0
 G_POINTS = 201
 G_TOL = 1e-8
+# The constrained refit is required to beat zero by this margin so the
+# guard's G_TOL check afterwards passes comfortably.
+G_REPAIR_MARGIN = 1e-6
 CAL_TOL = 1e-10
+
+# A repair is accepted only when it still explains the slice: rms within this
+# multiple of the mean total variance. Past it, the arbitrage is in the data
+# itself, not in wing noise -- the repair would be fabrication, so the guards
+# raise instead. Real-session repairs land under 0.12 (issue #46); a smile
+# whose data is itself arbitrageable (the calendar test's flat 0.30 vs 0.10
+# slices) needs ~1.2 and is rejected.
+REPAIR_MAX_REL_RMS = 0.5
 
 
 class SurfaceError(RuntimeError):
@@ -130,11 +188,23 @@ def _g(k: np.ndarray, a: float, b: float, rho: float, m: float, sigma: float) ->
     return (1.0 - k * dw / (2.0 * w)) ** 2 - (dw * dw / 4.0) * (1.0 / w + 0.25) + d2w / 2.0
 
 
+def _butterfly_grid(k_lo: float, k_hi: float) -> np.ndarray:
+    """The padded k-grid the butterfly guard and the constrained refit share."""
+    return np.linspace(k_lo - G_PAD, k_hi + G_PAD, G_POINTS)
+
+
+def _min_g(grid: np.ndarray, p: np.ndarray) -> float:
+    """Smallest g(k) on the grid for fit parameters (w0, b, rho, m, sigma)."""
+    w0, b, rho, m, sigma = (float(v) for v in p)
+    a = w0 - b * sigma * math.sqrt(1.0 - rho * rho)
+    return float(np.min(_g(grid, a, b, rho, m, sigma)))
+
+
 def _check_butterfly(
     a: float, b: float, rho: float, m: float, sigma: float, k_lo: float, k_hi: float
 ) -> float:
     """Min of g(k) on the padded grid; SurfaceArbitrageError when negative."""
-    grid = np.linspace(k_lo - G_PAD, k_hi + G_PAD, G_POINTS)
+    grid = _butterfly_grid(k_lo, k_hi)
     min_g = float(np.min(_g(grid, a, b, rho, m, sigma)))
     if min_g < -G_TOL:
         raise SurfaceArbitrageError(
@@ -143,6 +213,121 @@ def _check_butterfly(
             f"a={a:.6g} b={b:.6g} rho={rho:.4f} m={m:.4f} sigma={sigma:.4f}"
         )
     return min_g
+
+
+def _svi_w_jac(ks: np.ndarray, p: np.ndarray) -> np.ndarray:
+    """Jacobian of ``w(k; p)`` wrt ``p = (w0, b, rho, m, sigma)``; vectorized.
+
+    ``w0`` stands in for ``a`` (see :func:`fit_slice`), so the derivatives of
+    ``a = w0 - b*sigma*sqrt(1-rho^2)`` fold into the b/rho/sigma columns.
+    """
+    _w0, b, rho, m, sigma = (float(v) for v in p)
+    d = ks - m
+    q = np.sqrt(d * d + sigma * sigma)
+    s = math.sqrt(1.0 - rho * rho)
+    return np.column_stack([
+        np.ones_like(ks),
+        rho * d + q - sigma * s,
+        b * d + b * sigma * rho / s,
+        b * (-rho - d / q),
+        b * sigma / q - b * s,
+    ])
+
+
+def _project_to_feasible(
+    p0: np.ndarray, ws: np.ndarray, grid: np.ndarray,
+    lower: np.ndarray, upper: np.ndarray,
+    w_floor: np.ndarray | None = None, cal_grid: np.ndarray | None = None,
+) -> np.ndarray:
+    """Nearest point on the p0-to-flat segment that clears the guard margins.
+
+    The flat slice (b = 0) has ``g == 1`` everywhere, and at a level above the
+    calendar floor it clears both guards, so some point of the segment always
+    qualifies; the scan keeps the one closest to p0, i.e. the most
+    data-faithful feasible start. SLSQP needs this: started infeasible it
+    slides to the degenerate flat slice rather than the good feasible fit
+    next to the data. Deterministic, like the seed itself.
+    """
+    level = float(np.mean(ws))
+    if w_floor is not None:
+        level = max(level, float(np.max(w_floor)))
+    flat = np.clip(np.array([level, 0.0, 0.0, 0.0, 0.1]), lower, upper)
+
+    def ok(p: np.ndarray) -> bool:
+        if _min_g(grid, p) < G_REPAIR_MARGIN:
+            return False
+        if w_floor is not None:
+            w0, b, rho, m, sigma = (float(v) for v in p)
+            a = w0 - b * sigma * math.sqrt(1.0 - rho * rho)
+            if float(np.min(_svi_w(cal_grid, a, b, rho, m, sigma) - w_floor)) < G_REPAIR_MARGIN:
+                return False
+        return True
+
+    if ok(p0):
+        return p0
+    for t in np.linspace(0.05, 1.0, 20):
+        p = (1.0 - t) * p0 + t * flat
+        if ok(p):
+            return p
+    return flat
+
+
+def _repair_fit(
+    ks: np.ndarray, ws: np.ndarray, residuals: Any, grid: np.ndarray,
+    lower: np.ndarray, upper: np.ndarray, seed: np.ndarray, x0: np.ndarray,
+    w_floor: np.ndarray | None = None, cal_grid: np.ndarray | None = None,
+) -> np.ndarray | None:
+    """Constrained refit: same objective, plus the guards as hard constraints.
+
+    Butterfly: g(k) >= G_REPAIR_MARGIN on this slice's padded guard grid.
+    Calendar (when the build path chains a previous slice): w(k) >= w_prev(k)
+    on the calendar guard's union grid. Runs SLSQP (analytic objective
+    Jacobian, 3-point finite-difference constraint Jacobian) from the
+    feasibility-projected unconstrained optimum and the feasibility-projected
+    data seed, and keeps the feasible candidate with the lower cost. Returns
+    None when neither run reaches feasibility -- :func:`fit_slice` then lets
+    the post-fit guards raise.
+    """
+    def objective(p: np.ndarray) -> float:
+        r = residuals(p)
+        return 0.5 * float(np.dot(r, r))
+
+    def objective_jac(p: np.ndarray) -> np.ndarray:
+        return _svi_w_jac(ks, p).T @ residuals(p)
+
+    def constraint(p: np.ndarray) -> np.ndarray:
+        w0, b, rho, m, sigma = (float(v) for v in p)
+        a = w0 - b * sigma * math.sqrt(1.0 - rho * rho)
+        parts = [_g(grid, a, b, rho, m, sigma)]
+        if w_floor is not None:
+            parts.append(_svi_w(cal_grid, a, b, rho, m, sigma) - w_floor)
+        return np.concatenate(parts)
+
+    def feasible(p: np.ndarray) -> bool:
+        if _min_g(grid, p) < -G_TOL:
+            return False
+        if w_floor is not None:
+            w0, b, rho, m, sigma = (float(v) for v in p)
+            a = w0 - b * sigma * math.sqrt(1.0 - rho * rho)
+            if float(np.min(_svi_w(cal_grid, a, b, rho, m, sigma) - w_floor)) < -CAL_TOL:
+                return False
+        return True
+
+    guard = NonlinearConstraint(constraint, G_REPAIR_MARGIN, np.inf, jac="3-point")
+    candidates: list[tuple[float, np.ndarray]] = []
+    for start in (x0, seed):
+        res = minimize(
+            objective,
+            _project_to_feasible(start, ws, grid, lower, upper, w_floor, cal_grid),
+            method="SLSQP", jac=objective_jac, bounds=Bounds(lower, upper),
+            constraints=[guard], options={"ftol": 1e-12, "maxiter": 1000},
+        )
+        if feasible(res.x):
+            candidates.append((objective(res.x), res.x))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda c: c[0])
+    return candidates[0][1]
 
 
 @dataclass(frozen=True)
@@ -158,13 +343,24 @@ class SliceFit:
     min_g: float
 
 
-def fit_slice(ks: Any, ws: Any) -> SliceFit:
+def fit_slice(
+    ks: Any, ws: Any,
+    floor: Any = None, cal_grid: np.ndarray | None = None,
+) -> SliceFit:
     """Raw-SVI fit of one expiry's total variances; loud on thin input.
 
     ``ks`` is log-moneyness ``ln(K/F)``, ``ws`` the matching total implied
     variances ``iv^2 * T``. Raises :class:`SurfaceError` for fewer than
     MIN_STRIKES points or a solver failure, and :class:`SurfaceArbitrageError`
-    when the best fit itself prices a negative density.
+    when even the arbitrage-constrained refit prices a negative density.
+
+    The build path chains slices in expiry order: ``floor`` is the previously
+    fitted slice (anything with the five SVI attributes -- a :class:`Slice`
+    or :class:`SliceFit`) and ``cal_grid`` the calendar guard's union grid,
+    so a slice whose fit dips below its predecessor's total variance is refit
+    under that constraint too. Standalone callers (no floor) get the
+    butterfly guard only; the calendar backstop lives in :class:`Surface`
+    either way.
     """
     ks = np.asarray(ks, dtype=float)
     ws = np.asarray(ws, dtype=float)
@@ -210,15 +406,49 @@ def fit_slice(ks: Any, ws: Any) -> SliceFit:
         # Tight tolerances: a flat slice must drive b onto its zero bound,
         # not park at the seed because the gradient fell under gtol.
         fit = least_squares(residuals, seed, bounds=(lower, upper),
-                            ftol=1e-12, xtol=1e-12, gtol=1e-12)
+                            ftol=1e-12, xtol=1e-12, gtol=1e-12,
+                            max_nfev=MAX_NFEV)
     except Exception as exc:  # noqa: BLE001 - a solver failure is a fit failure
         raise SurfaceError(f"SVI least_squares raised: {exc}") from exc
     if not fit.success:
         raise SurfaceError(f"SVI fit did not converge: {fit.message}")
 
-    w0, b, rho, m, sigma = (float(v) for v in fit.x)
+    x = fit.x
+    grid = _butterfly_grid(float(ks[0]), float(ks[-1]))
+    w_floor = None
+    if floor is not None and cal_grid is not None:
+        w_floor = _svi_w(cal_grid, floor.a, floor.b, floor.rho, floor.m, floor.sigma)
+
+    def violates(p: np.ndarray) -> bool:
+        if _min_g(grid, p) < -G_TOL:
+            return True
+        if w_floor is not None:
+            w0, b, rho, m, sigma = (float(v) for v in p)
+            a = w0 - b * sigma * math.sqrt(1.0 - rho * rho)
+            if float(np.min(_svi_w(cal_grid, a, b, rho, m, sigma) - w_floor)) < -CAL_TOL:
+                return True
+        return False
+
+    if violates(x):
+        # The unconstrained optimum is arbitrageable -- on real chains this is
+        # wing noise (the violation sits past the last quoted strike, where no
+        # data constrains the curve) or a small calendar crossing the day bars
+        # themselves carry. Refit under the guards as hard constraints rather
+        # than failing the slice outright, and keep the repair only while it
+        # still explains the slice (REPAIR_MAX_REL_RMS): past that, the
+        # arbitrage is genuine and the guards below raise.
+        repaired = _repair_fit(ks, ws, residuals, grid, lower, upper, seed, x,
+                               w_floor, cal_grid)
+        if repaired is not None:
+            r = float(np.sqrt(np.mean(residuals(repaired) ** 2)))
+            if r <= REPAIR_MAX_REL_RMS * float(np.mean(ws)):
+                x = repaired
+
+    w0, b, rho, m, sigma = (float(v) for v in x)
     a = w0 - b * sigma * math.sqrt(1.0 - rho * rho)
-    rms = float(np.sqrt(np.mean(fit.fun ** 2)))
+    rms = float(np.sqrt(np.mean(residuals(x) ** 2)))
+    # The guard still raises after the fit -- the loud backstop for a slice
+    # the constrained refit could not repair either.
     min_g = _check_butterfly(a, b, rho, m, sigma, float(ks[0]), float(ks[-1]))
     return SliceFit(a=a, b=b, rho=rho, m=m, sigma=sigma, rms_error=rms, min_g=min_g)
 
@@ -316,17 +546,15 @@ class Surface:
         return f"Surface({self.underlying} {self.date}, {len(self.slices)} slices)"
 
 
-def _fit_expiry(
-    expiry: str, dte: int, T: float, F: float, r: float,
-    legs: dict[float, dict[str, float]],
-) -> Slice | None:
-    """Fit one expiry's OTM chain; None when too few OTM strikes inverted.
+def _expiry_points(
+    F: float, T: float, r: float, legs: dict[float, dict[str, float]],
+) -> tuple[list[float], list[float]]:
+    """One expiry's filtered OTM (k, w) points, sorted by k.
 
     Calls above F and puts below -- the liquid half of the chain, and the half
-    whose close is time value rather than a discounted intrinsic. Thin
-    expiries are skipped rather than raised on (day bars hold only contracts
-    that traded, so far expiries are legitimately sparse); :func:`fit_slice`
-    is the loud primitive when a fit is attempted on too few points.
+    whose close is time value rather than a discounted intrinsic. OTM closes
+    at or below the MIN_TIME_VALUE_FRAC time-value floor are dropped before
+    inversion (see the module docstring).
     """
     ks: list[float] = []
     ws: list[float] = []
@@ -337,15 +565,28 @@ def _fit_expiry(
             kind = "put"
         else:  # a strike exactly on the forward belongs to neither wing
             continue
-        iv = _invert(leg.get(kind), F, K, T, r, kind)
+        px = leg.get(kind)
+        if px is None or px <= MIN_TIME_VALUE_FRAC * F:
+            continue
+        iv = _invert(px, F, K, T, r, kind)
         if iv is None:
             continue
         ks.append(math.log(K / F))
         ws.append(iv * iv * T)
-    if len(ks) < MIN_STRIKES:
-        return None
+    return ks, ws
 
-    fit = fit_slice(ks, ws)
+
+def _fit_expiry(
+    expiry: str, dte: int, T: float, F: float, r: float,
+    ks: list[float], ws: list[float],
+    floor: Any = None, cal_grid: np.ndarray | None = None,
+) -> Slice:
+    """Fit one expiry's filtered OTM points and assemble its Slice.
+
+    ``floor``/``cal_grid`` chain the calendar constraint from the previously
+    fitted slice; see :func:`fit_slice`.
+    """
+    fit = fit_slice(ks, ws, floor=floor, cal_grid=cal_grid)
     return Slice(
         expiration_date=expiry, dte=dte, t_years=T, forward=F,
         a=fit.a, b=fit.b, rho=fit.rho, m=fit.m, sigma=fit.sigma,
@@ -388,7 +629,13 @@ def build_surfaces(
         forwards = forward_from_parity(chain, _rate_for_expiry, asof_date=d)
         legs = _legs_by_expiry(chain)
 
-        slices: list[Slice] = []
+        # Two passes. The first computes each expiry's filtered OTM points,
+        # which decides eligibility (>= MIN_STRIKES; thin expiries are skipped
+        # -- day bars hold only contracts that traded) and the union k-range
+        # the calendar guard checks. The second fits in expiry order with the
+        # calendar constraint chained off the previous slice on exactly that
+        # grid, so the Surface guard afterwards sees no crossing to raise on.
+        pending = []
         for fwd in forwards:
             expiry = date.fromisoformat(str(fwd["expiration_date"])[:10])
             dte = (expiry - d).days
@@ -396,13 +643,29 @@ def build_surfaces(
             # curve's, for the same reason.
             if dte <= 0:
                 continue
-            sl = _fit_expiry(
-                fwd["expiration_date"], dte, dte / DAYS_PER_YEAR,
-                float(fwd["forward"]), _rate_for_expiry(expiry),
-                legs.get(fwd["expiration_date"], {}),
+            T = dte / DAYS_PER_YEAR
+            F = float(fwd["forward"])
+            r = _rate_for_expiry(expiry)
+            ks, ws = _expiry_points(F, T, r, legs.get(fwd["expiration_date"], {}))
+            if len(ks) < MIN_STRIKES:
+                continue
+            pending.append((fwd["expiration_date"], dte, T, F, r, ks, ws))
+
+        cal_grid = None
+        if pending:
+            cal_grid = np.linspace(
+                min(p[5][0] for p in pending),
+                max(p[5][-1] for p in pending),
+                G_POINTS,
             )
-            if sl is not None:
-                slices.append(sl)
+
+        slices: list[Slice] = []
+        prev: Slice | None = None
+        for expiry, dte, T, F, r, ks, ws in pending:
+            sl = _fit_expiry(expiry, dte, T, F, r, ks, ws,
+                             floor=prev, cal_grid=cal_grid)
+            prev = sl
+            slices.append(sl)
         if slices:
             surfaces[root] = Surface(d, root, slices)
     return surfaces

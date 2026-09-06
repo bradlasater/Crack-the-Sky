@@ -75,11 +75,15 @@
       </p>
       <ul>
         <li>Reprice: <code>market_price</code> vs stored <code>own_price</code> (CRR for American rows, BSM for European).
-          Sigma is inverted with that same engine, so an American row round-trips
+          Sigma is inverted with that same engine, so the residual is solver
+          tolerance, not a market-data check. An American row round-trips
           through the tree; before the American solver existed it was inverted in
           closed form and repriced on the tree, leaving the early-exercise premium
           in the residual. <code>--euro-iv</code> restores that older behaviour for
-          an A/B run.</li>
+          an A/B run. The bands (<code>reprice_abs = 1e-3</code>,
+          <code>reprice_rel = 0</code>, <code>reprice_median_abs = 1e-4</code>)
+          track <code>CHAIN_CRR_STEPS</code> (currently 51): a tree-depth change
+          invalidates them.</li>
         <li>European pairs: Γ_call ≈ Γ_put and vega_call ≈ vega_put at a <em>shared</em> σ (mean of the two inverted IVs), plus PCP on day-close quotes vs <code>S e^{-qT} − K e^{-rT}</code>. PCP is skipped when either leg used a last-trade (possibly a different instant).</li>
         <li>FAIL when median reprice error exceeds its band, or &gt;25% of ATM names fail identities. Too few ATM names (&lt; 20) is also FAIL.</li>
       </ul>
@@ -95,7 +99,8 @@
         Read <code>_meta/drift_check.json</code> <code>failures[]</code> first.
         Re-running <code>repair.sh</code> will not change this. The identity
         bands live on <code>pricing.drift_check.Thresholds</code>
-        (<code>reprice_median_abs = 0.05</code>, <code>fail_frac = 0.25</code>,
+        (<code>reprice_abs = 1e-3</code>, <code>reprice_rel = 0</code>,
+        <code>reprice_median_abs = 1e-4</code>, <code>fail_frac = 0.25</code>,
         <code>min_compare = 20</code>, <code>iv_median_abs = 0.04</code>).
       </p>
       <table>
@@ -108,8 +113,8 @@
             <td>The as-of chain is too thin after skips (stale, expired, uninvertible, SPY ATM cap). Not “vendor drifted.” Check <code>counts.stale</code> / <code>below_intrinsic</code> / <code>n_priced</code>. Empty or missing snapshots also fail-loud before this.</td>
           </tr>
           <tr>
-            <td>median |price − own_price| exceeds 0.05</td>
-            <td>The stored engine cannot reprice the input on the ATM slice. American rows round-trip through CRR; if this appeared only after dropping <code>--euro-iv</code>, the tree and the invert disagree. If it appeared with <code>--euro-iv</code>, closed-form BSM itself is off the traded price — stale print that leaked the age filter, or a rate/T/F bug.</td>
+            <td>median |price − own_price| exceeds 1e-4</td>
+            <td>The stored engine cannot reprice the input on the ATM slice — invert and reprice disagree by more than solver tolerance. American rows round-trip through CRR; if this appeared only after dropping <code>--euro-iv</code>, the tree and the invert disagree. If it appeared with <code>--euro-iv</code>, closed-form BSM itself is off the traded price — stale print that leaked the age filter, or a rate/T/F bug. The band is a property of <code>CHAIN_CRR_STEPS</code>, not of the market.</td>
           </tr>
           <tr>
             <td>N/M ATM names fail identities (&gt; 25%)</td>

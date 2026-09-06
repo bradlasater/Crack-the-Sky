@@ -6,7 +6,10 @@ invert own IV and compute own Greeks from the as-of snapshot
 ATM names (``|K/F − 1| ≤ atm_pct``, default 5%):
 
 * stored engine price reprices the input: ``market_price`` vs ``own_price``
-  (CRR for American rows — an independent check; BSM for European rows)
+  (CRR for American rows — an independent check; BSM for European rows).
+  Sigma is inverted with that same engine, so the residual is solver
+  tolerance, not a market-data check. The bands track ``CHAIN_CRR_STEPS``
+  (issue #43).
 * European put–call pairs: ``Γ_call ≈ Γ_put``, ``vega_call ≈ vega_put``,
   and put–call parity on day-close quotes vs ``S e^{-qT} − K e^{-rT}``
   (PCP is skipped when either leg carries a last-trade price, which may
@@ -120,9 +123,14 @@ class Thresholds:
     theta_abs: float = 150.0
     theta_rel: float = 0.60
     iv_median_abs: float = 0.04
-    reprice_abs: float = 0.05
-    reprice_rel: float = 0.01
-    reprice_median_abs: float = 0.05
+    # Invert-then-reprice on the same engine: residual is solver tolerance.
+    # American residual scales with CHAIN_CRR_STEPS (51); a tree-depth change
+    # invalidates these. Measured 2026-09-01..04 at 51 steps: European median
+    # ~3e-13 / max ~2e-10; American p90 ~2e-6 / max ~1e-5. reprice_rel is 0
+    # so a large premium cannot widen the per-row envelope (issue #43).
+    reprice_abs: float = 1e-3
+    reprice_rel: float = 0.0
+    reprice_median_abs: float = 1e-4
     gamma_pair_abs: float = 0.002
     gamma_pair_rel: float = 0.35
     vega_pair_abs: float = 10.0
@@ -438,8 +446,8 @@ def evaluate_drift(
         and median_reprice > thresholds.reprice_median_abs
     ):
         failures.append(
-            f"median |price − own_price|={median_reprice:.4f} exceeds "
-            f"{thresholds.reprice_median_abs}"
+            f"median |price − own_price|={median_reprice:.3e} exceeds "
+            f"{thresholds.reprice_median_abs:.3e}"
         )
     if frac_identity is not None and frac_identity > thresholds.fail_frac:
         failures.append(

@@ -231,6 +231,20 @@ def test_drift_check_r_is_override_not_the_curve(monkeypatch) -> None:
         assert "Treasury curve" in text, f"{name} must say the canary defaults to the curve"
 
 
+def test_canary_page_documents_reprice_solver_bands() -> None:
+    """Issue #43: the handbook must not keep the old $0.05 nickel."""
+    from pricing.drift_check import DEFAULT_THRESHOLDS
+
+    text = (DOCS_DIR / "canary.html").read_text()
+    assert "reprice_abs = 1e-3" in text
+    assert "reprice_rel = 0</code>" in text
+    assert "reprice_median_abs = 1e-4" in text
+    assert "CHAIN_CRR_STEPS" in text
+    assert DEFAULT_THRESHOLDS.reprice_abs == 1e-3
+    assert DEFAULT_THRESHOLDS.reprice_rel == 0.0
+    assert DEFAULT_THRESHOLDS.reprice_median_abs == 1e-4
+
+
 def test_from_market_docstring_does_not_deny_american_iv() -> None:
     """A stale module docstring must not unteach implied_vol_american."""
     src = (REPO_ROOT / "pricing" / "from_market.py").read_text()

@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pricing.bsm import price, raw_greeks
+from pricing.bsm import greeks, price, raw_greeks
 from pricing.conventions import GreeksConventions
 from pricing.engine import EuropeanBSM
 
@@ -98,11 +98,10 @@ def test_elasticity_does_not_warn_on_a_zero_price() -> None:
 
 
 def test_elasticity_keeps_the_sign_at_a_zero_price() -> None:
-    """A zero-priced put tends to -inf, not +inf."""
-
-    from pricing.bsm import raw_greeks
-
-    # Deep OTM, far from the money: price underflows to 0.
-    g = raw_greeks(100.0, 1.0, 0.01, 0.0, 0.05, "put")
-    if g["price"] == 0.0:
-        assert g["elasticity"] < 0
+    """A zero-priced put tends to -inf, not +inf; a zero-priced call to +inf."""
+    put = greeks(100.0, 1.0, 0.01, 0.0, 0.05, "put", conventions=CONV)
+    call = greeks(1.0, 100.0, 0.01, 0.0, 0.05, "call", conventions=CONV)
+    assert put.price == 0.0
+    assert call.price == 0.0
+    assert put.elasticity == -float("inf")
+    assert call.elasticity == float("inf")

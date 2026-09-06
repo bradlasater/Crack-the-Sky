@@ -272,9 +272,11 @@ def forward_from_parity(
     """Per-expiry forward price recovered from put-call parity.
 
     For each expiration, take the strike minimising ``|C - P|`` among strikes
-    quoting both a call and a put, and return ``F = K + C - P``. This is the
-    standard forward-extraction step and needs only the option chain, which
-    matters because no index endpoint on this tier will return the SPX level.
+    quoting both a call and a put. With no rate this is ``F = K + C - P``
+    (method ``parity-r0``). When ``rate_for_expiry`` is supplied,
+    ``F = K + e^{rT}(C - P)`` with ``T = max((expiry - asof).days, 0) / 365``
+    (method ``parity``). Needs only the option chain, which matters because
+    no index endpoint on this tier will return the SPX level.
 
     Validated against live data on 2026-08-31: SPX expiries resolved to
     7684-7698 across the term structure, versus 7673.8 for the SPY close x10

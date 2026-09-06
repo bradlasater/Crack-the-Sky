@@ -94,6 +94,16 @@ def test_recovers_the_vol_the_chain_was_priced_at() -> None:
     assert row["put_iv"] == pytest.approx(VOL, abs=1e-6)
 
 
+def test_inversion_is_black_with_the_forward_as_spot() -> None:
+    """``implied_vol(price, F, K, T, r, kind, F=F)``; q=0 would not recover."""
+    from pricing.iv import implied_vol
+
+    px = float(price(F, 7700.0, T, R, VOL, "call", q=R))
+    assert ts._invert(px, F, 7700.0, T, R, "call") == pytest.approx(VOL, rel=1e-9)
+    q0 = float(implied_vol(px, F, 7700.0, T, R, "call"))
+    assert q0 != pytest.approx(VOL, rel=1e-6)
+
+
 def test_recovers_the_forward_from_parity() -> None:
     rows = ts.build_rows(_chain_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate)
     assert rows[0]["forward"] == pytest.approx(F, rel=1e-9)
@@ -101,9 +111,12 @@ def test_recovers_the_forward_from_parity() -> None:
 
 
 def test_dte_and_t_years_are_act_365() -> None:
+    assert ts.DAYS_PER_YEAR == 365.0
     row = ts.build_rows(_chain_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate)[0]
     assert row["dte"] == DTE
-    assert row["t_years"] == pytest.approx(DTE / 365.0)
+    assert row["t_years"] == pytest.approx(DTE / 365.0, rel=1e-12)
+    assert row["t_years"] != pytest.approx(DTE / 365.25, rel=1e-9)
+    assert row["t_years"] != pytest.approx(DTE / 252.0, rel=1e-9)
 
 
 @pytest.mark.parametrize("vol", [0.08, 0.18, 0.45, 0.90])
@@ -237,6 +250,37 @@ def test_term_structure_slopes_with_expiry() -> None:
 # ---------------------------------------------------------------------------
 # ATM must be a strike with both legs
 # ---------------------------------------------------------------------------
+
+def test_atm_is_the_paired_strike_nearest_the_forward() -> None:
+    """Parity minimises |C-P|; ATM minimises |K-F|. They are not the same strike."""
+    k_parity, call_p, put_p = 7600.0, 80.0, 20.0
+    F = k_parity + math.exp(R * T) * (call_p - put_p)
+    k_atm = 7700.0
+    vol_c, vol_p = 0.20, 0.30
+    bars = [
+        {"ticker": _sym("SPXW", EXPIRY, "call", k_parity),
+         "close": call_p, "window_end_ns": 1},
+        {"ticker": _sym("SPXW", EXPIRY, "put", k_parity),
+         "close": put_p, "window_end_ns": 1},
+        {"ticker": _sym("SPXW", EXPIRY, "call", k_atm),
+         "close": float(price(F, k_atm, T, R, vol_c, "call", q=R)),
+         "window_end_ns": 1},
+        {"ticker": _sym("SPXW", EXPIRY, "put", k_atm),
+         "close": float(price(F, k_atm, T, R, vol_p, "put", q=R)),
+         "window_end_ns": 1},
+    ]
+    row = ts.build_rows(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate)[0]
+    assert abs(k_atm - F) < abs(k_parity - F)
+    assert row["forward"] == pytest.approx(F, rel=1e-12)
+    assert row["atm_strike"] == k_atm
+    assert row["call_iv"] == pytest.approx(vol_c, rel=1e-9)
+    assert row["put_iv"] == pytest.approx(vol_p, rel=1e-9)
+    # Arithmetic mean, not geometric, not a single-leg pick.
+    assert row["atm_iv"] == pytest.approx(
+        (row["call_iv"] + row["put_iv"]) / 2.0, rel=1e-12
+    )
+    assert row["atm_iv"] != pytest.approx(math.sqrt(vol_c * vol_p), rel=1e-8)
+
 
 def test_atm_skips_a_nearer_one_sided_strike() -> None:
     """Day bars hold only contracts that traded, so the nearest strike is

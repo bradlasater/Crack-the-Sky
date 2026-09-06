@@ -72,6 +72,16 @@ def discounted_bounds(
     return max(disc_k - disc_s, 0.0), disc_k
 
 
+def brenner_subrahmanyam_seed(market_price: float, S: float, T: float, q: float = 0.0) -> float:
+    """ATM seed ``σ ≈ √(2π/T) * price / (S e^{-qT})``.
+
+    A Newton starting point, not a quoted vol. The inverter clips it into the
+    search bracket.
+    """
+    disc_s = float(S) * float(np.exp(-float(q) * float(T)))
+    return float(np.sqrt(2.0 * np.pi / float(T)) * (float(market_price) / max(disc_s, 1e-12)))
+
+
 def implied_vol(
     market_price: ArrayLike,
     S: ArrayLike,
@@ -102,7 +112,9 @@ def implied_vol(
     # Tiny slack for floating point; a price outside bounds is not invertible.
     slack = 1e-10 * max(S_, 1.0)
     if target < lower - slack:
-        raise BelowIntrinsicError(f"price {target} below intrinsic bound {lower} (S={S_} K={K_} T={T_})")
+        raise BelowIntrinsicError(
+            f"price {target} below intrinsic bound {lower} (S={S_} K={K_} T={T_})"
+        )
     if target > upper + slack:
         raise ValueError(f"price {target} above max bound {upper} (S={S_} K={K_} T={T_})")
     if target <= lower + slack:
@@ -112,8 +124,7 @@ def implied_vol(
         return float(price(S_, K_, T_, r_, vol, call_put, q=qv))
 
     # Brenner–Subrahmanyam-style seed, clipped into the search bracket.
-    disc_s = S_ * np.exp(-qv * T_)
-    seed = float(np.sqrt(2.0 * np.pi / T_) * (target / max(disc_s, 1e-12)))
+    seed = brenner_subrahmanyam_seed(target, S_, T_, qv)
     vol = float(np.clip(seed, 1e-3, 5.0))
 
     for _ in range(_NEWTON_ITERS):
@@ -207,8 +218,9 @@ def crr_vol_floor(T: float, r: float, q: float, n_steps: int) -> float:
     bracketing, so the American search starts here instead, with margin.
     """
     dt = float(T) / int(n_steps)
-    return max(_CRR_FLOOR_SAFETY * abs(float(r) - float(q)) * float(np.sqrt(dt)),
-               _CRR_VOL_FLOOR_MIN)
+    return max(
+        _CRR_FLOOR_SAFETY * abs(float(r) - float(q)) * float(np.sqrt(dt)), _CRR_VOL_FLOOR_MIN
+    )
 
 
 def implied_vol_american(
@@ -267,16 +279,16 @@ def implied_vol_american(
     lower, upper = american_bounds(S_, K_, T_, r_, call_put, q=qv)
     slack = 1e-10 * max(S_, 1.0)
     if target < lower - slack:
-        raise BelowIntrinsicError(f"price {target} below intrinsic bound {lower} (S={S_} K={K_} T={T_})")
+        raise BelowIntrinsicError(
+            f"price {target} below intrinsic bound {lower} (S={S_} K={K_} T={T_})"
+        )
     if target > upper + slack:
         raise ValueError(f"price {target} above max bound {upper} (S={S_} K={K_} T={T_})")
 
     cp: CallPut = "call" if bool(np.asarray(_normalize_cp(call_put))) else "put"
 
     def model(vol: float) -> float:
-        return float(
-            crr_price(S_, K_, T_, r_, vol, cp, q=qv, n_steps=int(n_steps), american=True)
-        )
+        return float(crr_price(S_, K_, T_, r_, vol, cp, q=qv, n_steps=int(n_steps), american=True))
 
     def objective(vol: float) -> float:
         return model(vol) - target

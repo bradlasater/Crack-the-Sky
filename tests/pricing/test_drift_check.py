@@ -382,11 +382,36 @@ def test_vendor_present_but_too_few_to_fail_is_skipped() -> None:
 
 def test_default_thresholds_are_the_documented_canary() -> None:
     t = DEFAULT_THRESHOLDS
+    assert t.iv_abs == 0.04
+    assert t.iv_rel == 0.25
+    assert t.delta_abs == 0.08
+    assert t.delta_rel == 0.30
+    assert t.gamma_abs == 0.005
+    assert t.gamma_rel == 0.75
+    assert t.vega_abs == 25.0
+    assert t.vega_rel == 0.50
+    assert t.theta_abs == 150.0
+    assert t.theta_rel == 0.60
     assert t.iv_median_abs == 0.04
+    assert t.reprice_abs == 0.05
+    assert t.reprice_rel == 0.01
+    assert t.reprice_median_abs == 0.05
+    assert t.gamma_pair_abs == 0.002
+    assert t.gamma_pair_rel == 0.35
+    assert t.vega_pair_abs == 10.0
+    assert t.vega_pair_rel == 0.35
+    assert t.pcp_abs == 1.0
+    assert t.pcp_rel == 0.05
     assert t.fail_frac == 0.25
     assert t.min_compare == 20
     assert t.atm_pct == 0.05
-    assert t.reprice_median_abs == 0.05
+    assert drift_mod.DEFAULT_FAIL_FRAC == 0.25
+    assert drift_mod.DEFAULT_MIN_COMPARE == 20
+    assert drift_mod.DEFAULT_ATM_PCT == 0.05
+    assert drift_mod.DEFAULT_SPY_ATM_PCT == 0.05
+    assert drift_mod.DEFAULT_MAX_ROWS == 400
+    assert drift_mod.DEFAULT_CUTOFF_ET == "16:40"
+    assert drift_mod.DEFAULT_R == 0.04
 
 
 def test_oserror_writes_fail_stub_and_exits_1(

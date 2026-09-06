@@ -35,20 +35,39 @@ def _land(tmp_path: Path, *rows: dict) -> None:
 
 def test_percent_is_converted_to_decimal() -> None:
     c = RateCurve.from_row(CURVE_2026_08_28)
-    assert c.at(1.0 / 12) == pytest.approx(0.0384)
-    assert c.at(30.0) == pytest.approx(0.0522)
+    assert c.at(1.0 / 12) == pytest.approx(3.84 / 100.0, rel=1e-12)
+    assert c.at(30.0) == pytest.approx(5.22 / 100.0, rel=1e-12)
+
+
+def test_tenor_year_fractions_are_the_quoted_calendar_fractions() -> None:
+    """1M = 1/12, 3M = 0.25, not 30/365 or 90/365."""
+    assert TENORS == (
+        ("yield_1_month", 1.0 / 12.0),
+        ("yield_3_month", 0.25),
+        ("yield_6_month", 0.5),
+        ("yield_1_year", 1.0),
+        ("yield_2_year", 2.0),
+        ("yield_3_year", 3.0),
+        ("yield_5_year", 5.0),
+        ("yield_7_year", 7.0),
+        ("yield_10_year", 10.0),
+        ("yield_20_year", 20.0),
+        ("yield_30_year", 30.0),
+    )
+    assert dict(TENORS)["yield_1_month"] != pytest.approx(30.0 / 365.0, rel=1e-9)
+    assert dict(TENORS)["yield_3_month"] != pytest.approx(90.0 / 365.0, rel=1e-9)
 
 
 def test_short_end_is_flat_below_the_first_tenor() -> None:
     """A 7 DTE option sits inside the 1M point; do not extrapolate."""
     c = RateCurve.from_row(CURVE_2026_08_28)
-    assert c.at(7 / 365) == pytest.approx(0.0384)
-    assert c.at(1 / 365) == pytest.approx(0.0384)
+    assert c.at(7 / 365) == pytest.approx(0.0384, rel=1e-12)
+    assert c.at(1 / 365) == pytest.approx(0.0384, rel=1e-12)
 
 
 def test_long_end_is_flat_above_the_last_tenor() -> None:
     c = RateCurve.from_row(CURVE_2026_08_28)
-    assert c.at(50.0) == pytest.approx(0.0522)
+    assert c.at(50.0) == pytest.approx(0.0522, rel=1e-12)
 
 
 def test_interpolates_between_quotes_and_stays_monotone() -> None:
@@ -63,6 +82,42 @@ def test_interpolates_between_quotes_and_stays_monotone() -> None:
     assert all(b >= a - 1e-12 for a, b in zip(ys, ys[1:], strict=False))
 
 
+def test_linear_interpolation_matches_the_closed_form() -> None:
+    """y = y0 + (y1 - y0) * (T - x0) / (x1 - x0). Range checks would miss log-linear."""
+    c = RateCurve.from_row(CURVE_2026_08_28)
+    x0, y0 = 1.0 / 12.0, 3.84 / 100.0
+    x1, y1 = 0.25, 3.90 / 100.0
+    T = 45 / 365
+    expected = y0 + (y1 - y0) * (T - x0) / (x1 - x0)
+    assert c.at(T) == pytest.approx(expected, rel=1e-12)
+    log_linear = y0 * (y1 / y0) ** ((T - x0) / (x1 - x0))
+    assert c.at(T) != pytest.approx(log_linear, rel=1e-12)
+
+
+def test_midpoint_is_the_arithmetic_mean_not_the_geometric() -> None:
+    c = RateCurve("d", [(1.0, 0.04), (3.0, 0.09)])
+    assert c.at(2.0) == pytest.approx((0.04 + 0.09) / 2.0, rel=1e-12)
+    assert c.at(2.0) != pytest.approx((0.04 * 0.09) ** 0.5, rel=1e-9)
+
+
+def test_missing_tenor_is_bridged_by_the_same_linear_formula() -> None:
+    """No 6M quote: T=0.5 interpolates 3M → 1Y, not 3M → 6M."""
+    c = RateCurve.from_row(CURVE_2026_08_28)
+    x0, y0 = 0.25, 3.90 / 100.0
+    x1, y1 = 1.0, 4.15 / 100.0
+    T = 0.5
+    expected = y0 + (y1 - y0) * (T - x0) / (x1 - x0)
+    assert c.at(T) == pytest.approx(expected, rel=1e-12)
+
+
+def test_quoted_tenors_return_the_converted_yield() -> None:
+    c = RateCurve.from_row(CURVE_2026_08_28)
+    assert c.at(1.0 / 12.0) == pytest.approx(0.0384, rel=1e-12)
+    assert c.at(0.25) == pytest.approx(0.0390, rel=1e-12)
+    assert c.at(1.0) == pytest.approx(0.0415, rel=1e-12)
+    assert c.at(30.0) == pytest.approx(0.0522, rel=1e-12)
+
+
 def test_missing_tenors_are_skipped_not_zeroed() -> None:
     """The vendor populates 7 of 11 tenors; nulls must not become 0%."""
     c = RateCurve.from_row(CURVE_2026_08_28)
@@ -71,10 +126,11 @@ def test_missing_tenors_are_skipped_not_zeroed() -> None:
     assert len(TENORS) == 11
 
 
-def test_non_positive_maturity_raises() -> None:
+@pytest.mark.parametrize("T", [0.0, -0.01, -1.0])
+def test_non_positive_maturity_raises(T: float) -> None:
     c = RateCurve.from_row(CURVE_2026_08_28)
     with pytest.raises(RateCurveError, match="positive"):
-        c.at(0.0)
+        c.at(T)
 
 
 def test_curve_with_no_populated_tenors_raises() -> None:

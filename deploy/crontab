@@ -129,6 +129,11 @@ LOG=/data/massive/logs/cron.log
 # exactly as invisible as a capture that stops.
 00 12 * * 2-6    cd $REPO && bash scripts/cronjob.sh term_structure $PY -m pricing.term_structure >> $LOG 2>&1
 
+# --- derived: SPY spot (bar close, else shortest-DTE parity proxy) ---------
+# After term_structure (12:00) so the proxy can read that session's SPY
+# forward; before coverage_audit (12:30). Rebuilds with scripts/build_spy_spot.py.
+05 12 * * 2-6    cd $REPO && bash scripts/cronjob.sh spy_spot $PY -m signals.spot >> $LOG 2>&1
+
 # --- did we actually capture everything? -----------------------------------
 # Runs after flatfile_pull (11:05) and reconcile (11:30) have settled T-1.
 # Exits non-zero on any gap, which pings Healthchecks /fail.

@@ -15,7 +15,7 @@ requires-python = ">=3.11"
 dynamic = ["dependencies"]
 
 [tool.setuptools.packages.find]
-include = ["ingest*", "marketdata*", "pricing*"]
+include = ["ingest*", "marketdata*", "pricing*", "signals*"]
 
 [tool.setuptools.dynamic]
 dependencies = { file = ["requirements.txt"] }

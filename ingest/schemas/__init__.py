@@ -305,11 +305,26 @@ def _build_schemas() -> dict[str, Any]:
         pa.field("src", pa.string()),              # 'day_bars'
     ]
 
+    # One row per session: SPY cash level. Prefers underlying_day_bars.close
+    # (src='bars'); otherwise inverts the shortest-DTE SPY parity forward
+    # (src='parity'). resid is proxy-minus-actual on overlap, null elsewhere.
+    spy_spot_fields = [
+        pa.field("date", pa.string()),
+        pa.field("spot", pa.float64()),
+        pa.field("forward", pa.float64()),         # shortest-DTE SPY F
+        pa.field("dte", pa.int64()),
+        pa.field("rate", pa.float64()),            # r used in the proxy
+        pa.field("q", pa.float64()),               # resolve_q of (S_proxy, F)
+        pa.field("src", pa.string()),              # 'bars' | 'parity'
+        pa.field("resid", pa.float64()),           # proxy - actual; null off overlap
+    ]
+
     contracts_schema = pa.schema(contract_fields)
     return {
         "forwards": pa.schema(forward_fields),
         "atm_term_structure": pa.schema(atm_term_structure_fields),
         "vol_surface": pa.schema(vol_surface_fields),
+        "spy_spot": pa.schema(spy_spot_fields),
         "contracts": contracts_schema,
         "contracts_expired": contracts_schema,  # same schema as contracts
         "option_snapshots": pa.schema(snapshot_fields),

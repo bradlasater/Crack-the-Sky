@@ -586,3 +586,59 @@ def test_dotenv_is_patchable_so_tests_cannot_reach_production(tmp_path) -> None:
     assert "HEALTHCHECKS_PING_KEY" not in drift_mod._dotenv()
     url, _ = drift_mod._hc_target(drift_mod._dotenv())
     assert url is None
+
+
+# ---------------------------------------------------------------------------
+# Staleness reporting (issue #44, option 2 folded in)
+# ---------------------------------------------------------------------------
+
+def test_canary_report_carries_staleness_counts(tmp_path: Path) -> None:
+    """Stale-skipped and below-intrinsic rows are explicit report fields."""
+    last = _spxw_last()
+    good = _null_vendor(_spxw_snap(last, vendor_iv=None, vendor_delta=None))
+    stale = _spxw_snap(last)
+    stale["ticker"] = "O:SPXW260918C07705000"
+    stale["details_strike_price"] = 7705.0
+    stale["last_trade_sip_timestamp_ns"] = ASOF_NS - 3 * 3_600_000_000_000  # 3 h old
+    below = _spxw_snap(last)
+    below["ticker"] = "O:SPXW260918P07705000"
+    below["details_contract_type"] = "put"
+    below["details_strike_price"] = 7705.0
+    # European put floor is (K - F) e^{-rT} ≈ 4.99 here; 4.50 is below it.
+    below["last_trade_price"] = 4.50
+    below["day_close"] = 4.50
+    below["last_trade_sip_timestamp_ns"] = ASOF_NS
+    fwd = [forward_row(underlying="I:SPX", expiry=EXPIRY, forward=F_SPX, asof_ns=ASOF_NS)]
+    _write(tmp_path, snap=[good, stale, below], fwd=fwd)
+    report = run_drift(
+        DT,
+        r=R,
+        data_root=tmp_path,
+        asof_ns=ASOF_NS,
+        roots=("SPXW",),
+        crr_steps=21,
+        max_rows=50,
+        uninvertible="skip",
+        thresholds=LOOSE,
+    )
+    assert report.status == "PASS"
+    assert report.counts["stale"] == 1
+    assert report.counts["uninvertible"] == 1
+    assert report.counts["below_intrinsic"] == 1
+    assert report.counts["priced"] == 1
+    assert report.max_trade_age_min == 60.0
+    rendered = drift_mod._render(report)
+    assert "below_intrinsic=1" in rendered
+    assert "stale=1" in rendered
+
+
+def test_cli_max_trade_age_flag(tmp_path: Path) -> None:
+    _null_vendor_warehouse(tmp_path)
+    rc = main([*_CLI, "--data-root", str(tmp_path), "--max-trade-age-min", "30"])
+    assert rc == 0
+    payload = json.loads(
+        landing.meta_path("drift_check.json", data_root=tmp_path).read_text(encoding="utf-8")
+    )
+    assert payload["status"] == "PASS"
+    assert payload["max_trade_age_min"] == 30.0
+    assert payload["counts"]["stale"] == 0

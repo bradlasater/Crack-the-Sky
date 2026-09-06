@@ -7,6 +7,7 @@ and 4,419 O:VIXW on 2026-08-28); keep_ticker() simply discarded them.
 from __future__ import annotations
 
 import datetime as dt
+import math
 
 import pytest
 
@@ -127,3 +128,36 @@ def test_forward_from_parity_recovers_a_vix_curve() -> None:
     assert fwds["2026-09-16"] == pytest.approx(16.58)
     # contango: the curve must come out ordered, not scrambled by expiry sort
     assert fwds["2026-09-02"] < fwds["2026-09-09"] < fwds["2026-09-16"]
+
+
+def test_vix_parity_with_a_rate_is_still_the_future_not_spot() -> None:
+    """Do not discount the per-expiry F toward a spot VIX.
+
+    VIX options are options on the VX future of that expiry. With a rate,
+    F = K + e^{rT}(C - P) recovers that future; F e^{-rT} would be a spot.
+    """
+    from ingest.jobs import forward_from_parity
+
+    F_future, r = 16.28, 0.0384
+    asof, expiry = dt.date(2026, 9, 1), dt.date(2026, 9, 16)
+    T = max((expiry - asof).days, 0) / 365.0
+    K = 16.0
+    spread = math.exp(-r * T) * (F_future - K)
+    call, put = 2.0 + spread / 2.0, 2.0 - spread / 2.0
+    rows = []
+    for kind, px in (("call", call), ("put", put)):
+        rows.append({
+            "details_expiration_date": expiry.isoformat(),
+            "details_strike_price": K,
+            "details_contract_type": kind,
+            "day_close": px,
+            "underlying_ticker": "VIX",
+            "underlying_price": None,
+            "day_last_updated_ns": 1,
+        })
+    got = forward_from_parity(
+        rows, rate_for_expiry=lambda _d: r, asof_date=asof
+    )[0]
+    assert got["forward"] == pytest.approx(F_future, rel=1e-12)
+    assert got["forward"] != pytest.approx(F_future * math.exp(-r * T), rel=1e-9)
+    assert got["method"] == "parity"

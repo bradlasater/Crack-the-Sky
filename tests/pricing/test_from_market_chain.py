@@ -315,8 +315,41 @@ def test_vendor_diffs_populate_when_vendor_cols_exist(tmp_path: Path) -> None:
     assert row["diff_iv"] == pytest.approx(row["own_iv"] - 0.22)
     assert row["diff_delta"] == pytest.approx(row["own_delta"] - 0.60)
     assert row["diff_gamma"] == pytest.approx(row["own_gamma"] - 0.001)
-    assert row["diff_theta"] == pytest.approx(row["own_theta"] - (-1.5) * 365.0)
-    assert row["diff_vega"] == pytest.approx(row["own_vega"] - 2.0 * 100.0)
+    assert row["diff_theta"] == pytest.approx(
+        row["own_theta"] - (-1.5) * 365.0, rel=1e-12
+    )
+    assert row["diff_vega"] == pytest.approx(
+        row["own_vega"] - 2.0 * 100.0, rel=1e-12
+    )
+
+
+def test_moneyness_band_includes_the_ieee754_boundary() -> None:
+    """|K/F − 1| at 5% rounds above 0.05; compare |K − F| vs pct·F."""
+    from pricing.drift_check import is_atm
+    from pricing.from_market import _beyond_moneyness
+
+    assert abs(105.0 / 100.0 - 1.0) > 0.05
+    assert _beyond_moneyness(105.0, 100.0, 0.05) is False
+    assert _beyond_moneyness(95.0, 100.0, 0.05) is False
+    assert _beyond_moneyness(105.01, 100.0, 0.05) is True
+    assert _beyond_moneyness(94.99, 100.0, 0.05) is True
+    assert _beyond_moneyness(100.0, 0.0, 0.05) is True
+    # Same edge as the canary ATM band, so a 1.05 F row is not dropped then
+    # excluded from identities.
+    assert is_atm({"F": 100.0, "strike": 105.0}, 0.05) is True
+    assert is_atm({"F": 100.0, "strike": 95.0}, 0.05) is True
+
+
+def test_vendor_unit_constants_match_drift_check() -> None:
+    """theta × 365 (per day → per year), vega × 100 (per 1% → per 1.00)."""
+    from pricing.conventions import CALENDAR_DAYS_PER_YEAR
+    from pricing.drift_check import VENDOR_THETA_TO_YEAR, VENDOR_VEGA_TO_PER_1
+    from pricing.from_market import _VENDOR_THETA_TO_YEAR, _VENDOR_VEGA_TO_PER_1
+
+    assert _VENDOR_THETA_TO_YEAR == VENDOR_THETA_TO_YEAR
+    assert _VENDOR_VEGA_TO_PER_1 == VENDOR_VEGA_TO_PER_1
+    assert _VENDOR_THETA_TO_YEAR == float(CALENDAR_DAYS_PER_YEAR) == 365.0
+    assert _VENDOR_VEGA_TO_PER_1 == 100.0
 
 
 def test_vendor_diffs_null_when_vendor_cols_null(tmp_path: Path) -> None:

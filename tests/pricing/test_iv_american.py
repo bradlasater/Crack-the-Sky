@@ -15,6 +15,7 @@ import pytest
 from pricing.bsm import price as bsm_price
 from pricing.engine import crr_price
 from pricing.iv import (
+    BelowIntrinsicError,
     american_bounds,
     crr_vol_floor,
     implied_vol,
@@ -26,8 +27,9 @@ R = 0.05
 STEPS = 401
 
 
-def _amer(K: float, T: float, sigma: float, cp: str, *, q: float = 0.0,
-          n_steps: int = STEPS) -> float:
+def _amer(
+    K: float, T: float, sigma: float, cp: str, *, q: float = 0.0, n_steps: int = STEPS
+) -> float:
     return crr_price(S0, K, T, R, sigma, cp, q=q, n_steps=n_steps, american=True)
 
 
@@ -35,14 +37,12 @@ def _amer(K: float, T: float, sigma: float, cp: str, *, q: float = 0.0,
 # Round-trip
 # ---------------------------------------------------------------------------
 
-GRID = list(itertools.product([0.85, 0.95, 1.0, 1.05, 1.15], [7, 30, 180],
-                              [0.10, 0.25, 0.60]))
+GRID = list(itertools.product([0.85, 0.95, 1.0, 1.05, 1.15], [7, 30, 180], [0.10, 0.25, 0.60]))
 
 
 @pytest.mark.parametrize("moneyness,dte,sigma", GRID)
 @pytest.mark.parametrize("call_put", ["call", "put"])
-def test_round_trip_recovers_sigma(moneyness: float, dte: int, sigma: float,
-                                   call_put: str) -> None:
+def test_round_trip_recovers_sigma(moneyness: float, dte: int, sigma: float, call_put: str) -> None:
     """Price at sigma, invert, get sigma back -- wherever a price can say so.
 
     Skips the strikes whose price sits on the intrinsic floor: an American
@@ -110,10 +110,12 @@ def test_european_invert_of_an_american_put_overstates_sigma() -> None:
 
 def test_sigma_converges_as_the_tree_refines() -> None:
     K, T, sigma = 100.0, 0.5, 0.30
-    coarse = implied_vol_american(_amer(K, T, sigma, "put", n_steps=401),
-                                  S0, K, T, R, "put", q=0.0, n_steps=401)
-    fine = implied_vol_american(_amer(K, T, sigma, "put", n_steps=801),
-                                S0, K, T, R, "put", q=0.0, n_steps=801)
+    coarse = implied_vol_american(
+        _amer(K, T, sigma, "put", n_steps=401), S0, K, T, R, "put", q=0.0, n_steps=401
+    )
+    fine = implied_vol_american(
+        _amer(K, T, sigma, "put", n_steps=801), S0, K, T, R, "put", q=0.0, n_steps=801
+    )
     assert coarse == pytest.approx(sigma, abs=1e-5)
     assert fine == pytest.approx(sigma, abs=1e-5)
 
@@ -136,7 +138,9 @@ def test_vol_floor_keeps_the_tree_arbitrage_free() -> None:
     """Below |r-q|*sqrt(dt) the CRR tree raises; the search must start above it."""
     T, n = 0.25, 51
     floor = crr_vol_floor(T, R, 0.0, n)
-    assert floor > abs(R - 0.0) * math.sqrt(T / n)
+    boundary = abs(R - 0.0) * math.sqrt(T / n)
+    assert floor == pytest.approx(1.5 * boundary)
+    assert floor > boundary
     # The floor is priceable; meaningfully under it, the tree refuses.
     assert _amer(100.0, T, floor, "put", n_steps=n) >= 0.0
     with pytest.raises(ValueError, match="not arbitrage-free"):
@@ -152,9 +156,9 @@ def test_american_bounds_are_not_the_european_ones() -> None:
     """Undiscounted intrinsic below, and K (not Ke^-rT) above, for a put."""
     K, T = 120.0, 1.0
     lower, upper = american_bounds(S0, K, T, R, "put", q=0.0)
-    assert lower == pytest.approx(K - S0)          # exercise now
-    assert upper == pytest.approx(K)               # undiscounted
-    assert upper > K * math.exp(-R * T)            # strictly above the European cap
+    assert lower == pytest.approx(K - S0)  # exercise now
+    assert upper == pytest.approx(K)  # undiscounted
+    assert upper > K * math.exp(-R * T)  # strictly above the European cap
 
 
 def test_price_at_intrinsic_returns_zero_not_an_error() -> None:
@@ -168,8 +172,8 @@ def test_price_at_intrinsic_returns_zero_not_an_error() -> None:
 @pytest.mark.parametrize(
     "price,call_put,match",
     [
-        (130.0, "put", "above max bound"),      # a put cannot exceed K=120
-        (101.0, "call", "above max bound"),     # a call cannot exceed S
+        (130.0, "put", "above max bound"),  # a put cannot exceed K=120
+        (101.0, "call", "above max bound"),  # a call cannot exceed S
         (-1.0, "put", "is negative"),
         (float("nan"), "put", "non-finite"),
     ],
@@ -181,8 +185,58 @@ def test_fails_loud_never_nan(price: float, call_put: str, match: str) -> None:
 
 def test_rejects_a_price_below_intrinsic() -> None:
     K, T = 130.0, 0.25
-    with pytest.raises(ValueError, match="below intrinsic bound"):
+    with pytest.raises(BelowIntrinsicError, match="below intrinsic bound"):
         implied_vol_american(K - S0 - 1.0, S0, K, T, R, "put", q=0.0, n_steps=STEPS)
+
+
+def test_american_put_accepts_price_above_discounted_strike() -> None:
+    """A price in (Ke^{-rT}, K] is above the European cap but at or under K."""
+    K, T = 120.0, 1.0
+    disc_k = K * math.exp(-R * T)
+    px = 0.5 * (disc_k + K)
+    assert disc_k < px < K
+    try:
+        implied_vol_american(px, S0, K, T, R, "put", q=0.0, n_steps=51)
+    except ValueError as exc:
+        assert "above max bound" not in str(exc)
+
+
+def test_american_call_accepts_price_above_discounted_spot() -> None:
+    """A price in (Se^{-qT}, S] is above the European cap but at or under S."""
+    K, T, q = 80.0, 1.0, 0.20
+    disc_s = S0 * math.exp(-q * T)
+    px = 0.5 * (disc_s + S0)
+    assert disc_s < px < S0
+    try:
+        implied_vol_american(px, S0, K, T, 0.01, "call", q=q, n_steps=51)
+    except ValueError as exc:
+        assert "above max bound" not in str(exc)
+
+
+def test_american_call_dividend_floor_is_undiscounted_intrinsic() -> None:
+    """High q: S-K beats the European floor, so a price in between is below intrinsic."""
+    S, K, T, r, q = 100.0, 80.0, 1.0, 0.01, 0.20
+    euro = max(S * math.exp(-q * T) - K * math.exp(-r * T), 0.0)
+    assert euro < 10.0 < (S - K)
+    with pytest.raises(BelowIntrinsicError, match="below intrinsic"):
+        implied_vol_american(10.0, S, K, T, r, "call", q=q, n_steps=51)
+
+
+def test_american_put_floor_includes_european_bound() -> None:
+    """r=0, q>0: Ke^{-rT} - Se^{-qT} beats K-S."""
+    S, K, T, r, q = 100.0, 120.0, 1.0, 0.0, 0.05
+    euro = max(K * math.exp(-r * T) - S * math.exp(-q * T), 0.0)
+    assert (K - S) < 22.0 < euro
+    with pytest.raises(BelowIntrinsicError, match="below intrinsic"):
+        implied_vol_american(22.0, S, K, T, r, "put", q=q, n_steps=51)
+
+
+def test_round_trip_american_via_forward() -> None:
+    K, T, sigma, q = 100.0, 0.5, 0.28, 0.03
+    F = S0 * math.exp((R - q) * T)
+    px = _amer(K, T, sigma, "put", q=q, n_steps=51)
+    got = implied_vol_american(px, S0, K, T, R, "put", F=F, n_steps=51)
+    assert got == pytest.approx(sigma, abs=1e-5)
 
 
 @pytest.mark.parametrize("bad", [0, 1])

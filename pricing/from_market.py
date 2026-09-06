@@ -498,6 +498,18 @@ def match_forward(
         ) from None
 
 
+def _beyond_moneyness(strike: float, forward: float, pct: float) -> bool:
+    """True when ``|K/F − 1| > pct``, compared in strike units.
+
+    ``abs(K/F - 1) > pct`` drops the documented 5% edge in IEEE-754
+    (``105/100 - 1`` rounds above 0.05). Same form as
+    :func:`pricing.drift_check.is_atm`.
+    """
+    if forward <= 0:
+        return True
+    return abs(strike - forward) > pct * forward
+
+
 def _chain_engine(
     contract: Contract,
     forward: Forward,
@@ -507,10 +519,10 @@ def _chain_engine(
 ) -> Engine:
     if contract.exercise_style != "american":
         return EuropeanBSM()
-    if spy_american_moneyness is not None:
-        ref = float(forward.forward)
-        if abs(contract.strike / ref - 1.0) > spy_american_moneyness:
-            return EuropeanBSM()
+    if spy_american_moneyness is not None and _beyond_moneyness(
+        float(contract.strike), float(forward.forward), spy_american_moneyness
+    ):
+        return EuropeanBSM()
     return AmericanCRR(n_steps=crr_steps)
 
 
@@ -663,11 +675,11 @@ def greeks_asof(
             n_skipped += 1
             continue
 
-        if moneyness is not None:
-            ref = float(fwd.forward)
-            if ref <= 0 or abs(qte.contract.strike / ref - 1.0) > moneyness:
-                n_otm += 1
-                continue
+        if moneyness is not None and _beyond_moneyness(
+            float(qte.contract.strike), float(fwd.forward), moneyness
+        ):
+            n_otm += 1
+            continue
 
         try:
             eng = _chain_engine(

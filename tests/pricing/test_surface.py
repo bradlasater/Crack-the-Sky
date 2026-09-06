@@ -505,3 +505,15 @@ def test_load_surface_reads_what_write_rows_landed(tmp_path) -> None:
         sf.load_surface(settings, DAY, "SPX")
     with pytest.raises(sf.SurfaceError, match="no vol_surface partition"):
         sf.load_surface(settings, date(2020, 1, 2), "SPXW")
+
+
+def test_load_surface_refuses_a_mismatched_row_date(tmp_path) -> None:
+    """A dt= partition whose rows are dated some other session must not answer as T."""
+    from ingest.common.config import Settings
+
+    surfaces = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate)
+    settings = Settings(massive_api_key="k", data_root=tmp_path, log_root=tmp_path / "logs")
+    rows = [dict(r, date="2020-01-02") for r in sf.rows_from_surfaces(surfaces)]
+    sf.write_rows(settings, DAY, rows)
+    with pytest.raises(sf.SurfaceError, match="have date="):
+        sf.load_surface(settings, DAY, "SPXW")

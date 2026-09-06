@@ -839,6 +839,16 @@ def load_surface(settings: Settings, d: date, underlying: str) -> Surface:
     filtered = [r for r in rows if r.get("underlying") == underlying]
     if not filtered:
         raise SurfaceError(f"no {DATASET} rows for {underlying} on {d}")
+    # Filter is by root only; from_rows then accepts any single date. A
+    # misplaced partition whose rows are all dated some other session would
+    # otherwise reconstruct and answer as that other session.
+    row_dates = {str(r["date"])[:10] for r in filtered}
+    want = d.isoformat()
+    if row_dates != {want}:
+        raise SurfaceError(
+            f"{DATASET} rows for {underlying} in dt={want} have "
+            f"date={sorted(row_dates)}"
+        )
     return Surface.from_rows(filtered)
 
 

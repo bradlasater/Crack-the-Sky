@@ -15,6 +15,7 @@ from pricing.bsm import price as bsm_price
 from pricing.engine import crr_price
 from pricing.from_market import (
     CHAIN_SCHEMA,
+    ChainCounts,
     ChainError,
     greeks_asof,
     main,
@@ -689,3 +690,145 @@ def test_max_rows_caps_crr_then_falls_back_to_european(tmp_path: Path) -> None:
     engines = [row["greeks_engine"] for row in table.to_pylist()]
     assert engines.count("american_crr") == 1
     assert engines.count("european_bsm") == 1
+
+
+# ---------------------------------------------------------------------------
+# Stale last prints (issue #44): age-filter on the trade's own stamp
+# ---------------------------------------------------------------------------
+
+HOUR_NS = 3_600_000_000_000
+
+
+def _stale_spxw_snap(last: float, *, age_ns: int) -> dict:
+    rec = _spxw_snap(last)
+    rec["ticker"] = "O:SPXW260918C07705000"
+    rec["details_strike_price"] = 7705.0
+    rec["last_trade_sip_timestamp_ns"] = ASOF_NS - age_ns
+    return rec
+
+
+def test_stale_last_trade_is_skipped_and_counted(tmp_path: Path) -> None:
+    last = _spxw_last()
+    fresh = _spxw_snap(last)
+    fresh["last_trade_sip_timestamp_ns"] = ASOF_NS - 60_000_000_000  # 1 min old
+    stale = _stale_spxw_snap(last, age_ns=3 * HOUR_NS)
+    _write(
+        tmp_path,
+        snap=[fresh, stale],
+        fwd=[forward_row(underlying="I:SPX", expiry=EXPIRY, forward=F_SPX, asof_ns=ASOF_NS)],
+    )
+    counts = ChainCounts()
+    # uninvertible="raise" is the default: staleness is a skip, not an error.
+    table = greeks_asof(
+        DT, ASOF_NS, r=R, data_root=tmp_path, roots=("SPXW",), crr_steps=21,
+        counts=counts,
+    )
+    assert table.num_rows == 1
+    assert counts.n_stale == 1
+    assert counts.n_priced == 1
+    assert counts.n_uninvertible == 0
+
+
+def test_fresh_trade_with_stamp_prices_unchanged(tmp_path: Path) -> None:
+    last = _spxw_last()
+    rec = _spxw_snap(last)
+    rec["last_trade_sip_timestamp_ns"] = ASOF_NS - 5 * 60_000_000_000
+    _write(
+        tmp_path,
+        snap=[rec],
+        fwd=[forward_row(underlying="I:SPX", expiry=EXPIRY, forward=F_SPX, asof_ns=ASOF_NS)],
+    )
+    counts = ChainCounts()
+    row = greeks_asof(
+        DT, ASOF_NS, r=R, data_root=tmp_path, roots=("SPXW",), crr_steps=21,
+        counts=counts,
+    ).to_pylist()[0]
+    assert row["own_iv"] == pytest.approx(SIGMA, rel=1e-6)
+    assert row["price_source"] == "last"
+    assert counts.n_stale == 0
+
+
+def test_day_close_priced_rows_are_not_age_filtered(tmp_path: Path) -> None:
+    """Only rows whose market_price comes from ``last`` are age-filtered."""
+    last = _spxw_last()
+    rec = _spxw_snap(last)
+    rec["last_trade_price"] = None
+    rec["last_trade_sip_timestamp_ns"] = ASOF_NS - 5 * 24 * HOUR_NS
+    _write(
+        tmp_path,
+        snap=[rec],
+        fwd=[forward_row(underlying="I:SPX", expiry=EXPIRY, forward=F_SPX, asof_ns=ASOF_NS)],
+    )
+    counts = ChainCounts()
+    row = greeks_asof(
+        DT, ASOF_NS, r=R, data_root=tmp_path, roots=("SPXW",), crr_steps=21,
+        counts=counts,
+    ).to_pylist()[0]
+    assert row["price_source"] == "close"
+    assert counts.n_stale == 0
+    assert counts.n_priced == 1
+
+
+def test_max_trade_age_none_disables_the_filter(tmp_path: Path) -> None:
+    last = _spxw_last()
+    stale = _stale_spxw_snap(last, age_ns=30 * 24 * HOUR_NS)
+    _write(
+        tmp_path,
+        snap=[stale],
+        fwd=[forward_row(underlying="I:SPX", expiry=EXPIRY, forward=F_SPX, asof_ns=ASOF_NS)],
+    )
+    counts = ChainCounts()
+    table = greeks_asof(
+        DT, ASOF_NS, r=R, data_root=tmp_path, roots=("SPXW",), crr_steps=21,
+        max_trade_age_ns=None, counts=counts,
+    )
+    assert table.num_rows == 1
+    assert counts.n_stale == 0
+
+
+def test_non_positive_max_trade_age_is_a_config_error(tmp_path: Path) -> None:
+    last = _spxw_last()
+    _write(
+        tmp_path,
+        snap=[_spxw_snap(last)],
+        fwd=[forward_row(underlying="I:SPX", expiry=EXPIRY, forward=F_SPX, asof_ns=ASOF_NS)],
+    )
+    with pytest.raises(ChainError, match="max_trade_age_ns"):
+        greeks_asof(
+            DT, ASOF_NS, r=R, data_root=tmp_path, roots=("SPXW",),
+            max_trade_age_ns=0,
+        )
+
+
+def test_below_intrinsic_rejects_are_counted_inside_uninvertible(tmp_path: Path) -> None:
+    """The stale-print tail the age filter misses is still visible on its own."""
+    good = _spy_snap(_spy_last_american(n_steps=21))
+    good["last_trade_sip_timestamp_ns"] = ASOF_NS
+    put = snapshot_row(
+        "O:SPY260918P00540000",
+        strike=540.0,
+        expiry=EXPIRY,
+        underlying="SPY",
+        cp="put",
+        vendor_iv=0.25,
+        vendor_delta=-0.6,
+    )
+    put["underlying_price"] = S_SPY
+    put["last_trade_price"] = 39.0  # below the American floor K - S = 40
+    put["day_close"] = 39.0
+    put["last_trade_sip_timestamp_ns"] = ASOF_NS
+    _write(
+        tmp_path,
+        snap=[good, put],
+        fwd=[forward_row(underlying="SPY", expiry=EXPIRY, forward=_spy_forward(), asof_ns=ASOF_NS)],
+        underlying="SPY",
+    )
+    counts = ChainCounts()
+    table = greeks_asof(
+        DT, ASOF_NS, r=R, data_root=tmp_path, roots=("SPY",), crr_steps=21,
+        uninvertible="skip", counts=counts,
+    )
+    assert table.num_rows == 1
+    assert counts.n_uninvertible == 1
+    assert counts.n_below_intrinsic == 1
+    assert counts.n_stale == 0

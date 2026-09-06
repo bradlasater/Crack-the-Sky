@@ -26,7 +26,14 @@ class Contract:
 
 @dataclass(frozen=True, slots=True)
 class Quote:
-    """A snapshot-derived quote. Vendor IV/greeks are diagnostics only."""
+    """A snapshot-derived quote. Vendor IV/greeks are diagnostics only.
+
+    ``asof_ns`` is the snapshot clock (underlying stamp first) — the right
+    clock for spot and rates. It says nothing about the age of ``last``:
+    ``last_trade_asof_ns`` is the trade's own SIP stamp, and consumers that
+    invert ``last`` should age-filter on it (see
+    :func:`pricing.from_market.greeks_asof`).
+    """
 
     contract: Contract
     last: float | None
@@ -34,6 +41,7 @@ class Quote:
     underlying_price: float | None
     asof_ns: int | None
     open_interest: int | None
+    last_trade_asof_ns: int | None = None
     vendor_implied_volatility: float | None = None
     vendor_delta: float | None = None
     vendor_gamma: float | None = None
@@ -42,7 +50,11 @@ class Quote:
 
     @property
     def market_price(self) -> float | None:
-        """Last trade if present, else the session close. Not vendor IV."""
+        """Last trade if present, else the session close. Not vendor IV.
+
+        When this returns ``last``, ``last_trade_asof_ns`` is how old that
+        print is; nothing in ``asof_ns`` bounds its staleness.
+        """
         if self.last is not None:
             return self.last
         return self.day_close
@@ -106,6 +118,7 @@ def quotes_from_snapshot_rows(rows: Any) -> list[Quote]:
                 underlying_price=_opt_float(rec.get("underlying_price")),
                 asof_ns=_opt_int(asof),
                 open_interest=_opt_int(rec.get("open_interest")),
+                last_trade_asof_ns=_opt_int(rec.get("last_trade_sip_timestamp_ns")),
                 vendor_implied_volatility=_opt_float(rec.get("implied_volatility")),
                 vendor_delta=_opt_float(rec.get("greeks_delta")),
                 vendor_gamma=_opt_float(rec.get("greeks_gamma")),

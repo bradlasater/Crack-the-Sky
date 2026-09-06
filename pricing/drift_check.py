@@ -22,6 +22,12 @@ Vendor drift FAILs only if there are at least ``min_compare`` ATM names with
 vendor IV. Null vendor IV is **not** a FAIL: the report logs
 ``vendor_compare_skipped`` and the job still PASSes when identities hold.
 
+Stale last prints (trade stamp older than ``--max-trade-age-min`` at the
+as-of) are skipped before inversion and reported as ``stale`` in the report
+counts; below-intrinsic rejects are reported as ``below_intrinsic`` inside
+the ``uninvertible`` tally, so a jump in either is visible in the daily log
+line without digging (issue #44).
+
 Still fail-loud for: no snapshots, schema errors, foreign roots, empty
 allowlisted root, too few ATM names to test identities.
 
@@ -68,6 +74,7 @@ from pricing.bsm import greeks as bsm_greeks
 from pricing.conventions import CALENDAR_DAYS_PER_YEAR
 from pricing.from_market import (
     CHAIN_CRR_STEPS,
+    DEFAULT_MAX_TRADE_AGE_MIN,
     ChainCounts,
     ChainError,
     greeks_asof,
@@ -152,6 +159,7 @@ class DriftReport:
     units: dict[str, Any] = field(default_factory=dict)
     spy_atm_pct: float | None = None
     max_rows: int | None = None
+    max_trade_age_min: float | None = None
     generated_at: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -324,6 +332,7 @@ def evaluate_drift(
     r: float | None,
     spy_atm_pct: float | None = None,
     max_rows: int | None = None,
+    max_trade_age_min: float | None = None,
 ) -> DriftReport:
     """ATM identity checks (pass/fail) plus optional vendor diagnostics."""
     rows = table.to_pylist()
@@ -477,6 +486,8 @@ def evaluate_drift(
         "expired": counts.n_expired if counts else None,
         "no_price": counts.n_no_price if counts else None,
         "uninvertible": counts.n_uninvertible if counts else None,
+        "below_intrinsic": counts.n_below_intrinsic if counts else None,
+        "stale": counts.n_stale if counts else None,
         "otm": counts.n_otm if counts else None,
         "atm_compared": len(atm),
         "atm_pairs": n_euro_pairs,
@@ -519,6 +530,7 @@ def evaluate_drift(
         },
         spy_atm_pct=spy_atm_pct,
         max_rows=max_rows,
+        max_trade_age_min=max_trade_age_min,
         generated_at=datetime.now(ET).isoformat(timespec="seconds"),
     )
 
@@ -558,6 +570,8 @@ def _render(report: DriftReport) -> str:
         f"expired={report.counts.get('expired')}  "
         f"no_price={report.counts.get('no_price')}  "
         f"uninvertible={report.counts.get('uninvertible')}  "
+        f"below_intrinsic={report.counts.get('below_intrinsic')}  "
+        f"stale={report.counts.get('stale')}  "
         f"otm={report.counts.get('otm')}",
         f"      beyond_by_identity={report.beyond_by_identity}",
         f"      beyond_by_greek={report.beyond_by_greek}",
@@ -656,6 +670,7 @@ def run_drift(
     spy_atm_pct: float | None = DEFAULT_SPY_ATM_PCT,
     atm_pct: float = DEFAULT_ATM_PCT,
     max_rows: int | None = DEFAULT_MAX_ROWS,
+    max_trade_age_min: float | None = DEFAULT_MAX_TRADE_AGE_MIN,
     uninvertible: str = "skip",
     thresholds: Thresholds | None = None,
     european_iv: bool = False,
@@ -666,6 +681,11 @@ def run_drift(
         thr = Thresholds(**{**asdict(thr), "atm_pct": atm_pct})
     if asof_ns is None:
         asof_ns = cutoff_asof_ns(dt, cutoff_et)
+    max_trade_age_ns = (
+        None
+        if max_trade_age_min is None or max_trade_age_min <= 0
+        else int(max_trade_age_min * 60 * 1e9)
+    )
     counts = ChainCounts()
     table = greeks_asof(
         dt,
@@ -678,6 +698,7 @@ def run_drift(
         moneyness=atm_pct,
         uninvertible=uninvertible,  # type: ignore[arg-type]
         max_rows=max_rows,
+        max_trade_age_ns=max_trade_age_ns,
         counts=counts,
         european_iv=european_iv,
     )
@@ -691,6 +712,7 @@ def run_drift(
         r=r,
         spy_atm_pct=spy_atm_pct,
         max_rows=max_rows,
+        max_trade_age_min=max_trade_age_min,
     )
 
 
@@ -767,6 +789,16 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=DEFAULT_MAX_ROWS,
         help=f"cap American CRR rows (default {DEFAULT_MAX_ROWS}; not a global row cap)",
+    )
+    parser.add_argument(
+        "--max-trade-age-min",
+        type=float,
+        default=DEFAULT_MAX_TRADE_AGE_MIN,
+        help=(
+            "skip last-priced rows whose trade is older than this many minutes "
+            f"at the as-of (default {DEFAULT_MAX_TRADE_AGE_MIN:g}; 0 disables). "
+            "Stale prints are skipped, not repriced off day_close."
+        ),
     )
     parser.add_argument(
         "--min-compare",
@@ -850,6 +882,7 @@ def main(argv: list[str] | None = None) -> int:
             spy_atm_pct=args.spy_atm_pct,
             atm_pct=args.atm_pct,
             max_rows=args.max_rows,
+            max_trade_age_min=args.max_trade_age_min,
         )
         report = run_drift(
             dt,
@@ -862,6 +895,7 @@ def main(argv: list[str] | None = None) -> int:
             spy_atm_pct=args.spy_atm_pct,
             atm_pct=args.atm_pct,
             max_rows=args.max_rows,
+            max_trade_age_min=args.max_trade_age_min,
             uninvertible=args.uninvertible,
             european_iv=args.euro_iv,
             thresholds=Thresholds(

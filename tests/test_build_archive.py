@@ -19,7 +19,7 @@ from pricing.surface import SurfaceArbitrageError
 
 ROOT = Path(__file__).resolve().parents[1]
 SESSIONS = ["2026-08-26", "2026-08-27", "2026-08-28"]
-CALENDAR = {d: True for d in SESSIONS}
+CALENDAR = dict.fromkeys(SESSIONS, True)
 
 
 def _load(name: str):

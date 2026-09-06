@@ -15,6 +15,8 @@ of them fail, so cron, Healthchecks.io and the box CI workflow all surface it:
   * flat files -- all three datasets present in the manifest with rows kept.
   * ``contracts`` -- universe present, and per-underlying counts sane.
   * ``option_trades`` / bars -- partitions non-empty.
+  * ``vol_surface`` -- T-1 SVI fit landed for every scheduled root
+    (derived; a silent skip is as invisible as a capture hole).
   * websocket capture -- raw files present and ``ws_gap`` events counted.
   * disk runway -- how many days of snapshot growth the volume still holds.
   * per-underlying ticker coverage -- so an SPX-shaped hole cannot again look
@@ -39,6 +41,10 @@ from ingest.common.cli import run_job
 from ingest.common.config import Settings
 from ingest.common.logging_utils import JsonlLogger
 from ingest.jobs import OPTION_ROOTS, ticker_root, underlying_root
+
+# Same tuple as pricing.surface.SURFACE_ROOTS. Duplicated so this module
+# does not import pricing; test_coverage_audit pins the two equal.
+SURFACE_ROOTS = ("SPX", "SPXW")
 
 JOB = "coverage_audit"
 COVERAGE_NAME = "coverage.json"
@@ -306,6 +312,50 @@ def check_partitions(settings: Settings, d: date) -> list[Check]:
             checks.append(Check(f"partition[{dataset}]", PASS,
                                 f"{rows:,} rows", {"rows": rows}))
     return checks
+
+
+def _partition_underlyings(settings: Settings, dataset: str, d: date) -> set[str] | None:
+    """Distinct ``underlying`` values in a clean partition; None if unreadable."""
+    try:
+        import pyarrow.parquet as pq
+    except ImportError:  # pragma: no cover
+        return set()
+    part = _clean_root(settings, dataset) / f"dt={d.isoformat()}"
+    found: set[str] = set()
+    for path in part.glob("*.parquet"):
+        try:
+            values = pq.read_table(path, columns=["underlying"]).column("underlying").to_pylist()
+        except Exception:  # noqa: BLE001 - a corrupt file is a finding, not a crash
+            return None
+        found.update(str(v) for v in values if v is not None)
+    return found
+
+
+def check_vol_surface(settings: Settings, d: date) -> list[Check]:
+    """Yesterday's fitted smile landed -- a silent skip is as invisible as a capture hole.
+
+    Derived, so a missed day is rebuilt with ``scripts/build_surface.py``
+    rather than lost. It is still a FAIL when the partition is missing or
+    when a scheduled root is absent: ``build_surfaces`` omits a root with
+    no chain, so a nonempty SPXW-only partition would pass a row-count
+    check while ``load_surface`` fails for SPX.
+    """
+    rows = _partition_rows(settings, "vol_surface", d)
+    if rows < 0:
+        return [Check("vol_surface", FAIL, "unreadable parquet in partition", {})]
+    if rows == 0:
+        return [Check("vol_surface", FAIL, "partition missing or empty", {"rows": 0})]
+    roots = _partition_underlyings(settings, "vol_surface", d)
+    if roots is None:
+        return [Check("vol_surface", FAIL, "unreadable parquet in partition", {})]
+    missing = [r for r in SURFACE_ROOTS if r not in roots]
+    if missing:
+        return [Check(
+            "vol_surface", FAIL,
+            f"missing roots {missing}",
+            {"rows": rows, "roots": sorted(roots), "missing": missing},
+        )]
+    return [Check("vol_surface", PASS, f"{rows:,} slices", {"rows": rows})]
 
 
 def check_underlying_coverage(settings: Settings, d: date) -> list[Check]:
@@ -584,6 +634,7 @@ def run_checks(settings: Settings, d: date, logger: JsonlLogger) -> list[Check]:
     checks += check_snapshots(settings, d)
     checks += check_flatfiles(settings, d)
     checks += check_partitions(settings, d)
+    checks += check_vol_surface(settings, d)
     checks += check_underlying_coverage(settings, d)
     checks += check_underlying_window(settings, d)
     checks += check_websocket(settings, d, logger)

@@ -217,6 +217,20 @@ def test_surface_roots_on_pricing_page() -> None:
     assert "implied_vol_american" in text
 
 
+def test_surface_is_scheduled_after_the_atm_curve() -> None:
+    """The smile is a derived reduction of the same T-1 day bars as the ATM curve."""
+    units = {u["job"]: u for u in _schedule_units()}
+    assert units["surface"]["unit"] == "massive-surface"
+    assert units["surface"]["command"] == ["-m", "pricing.surface"]
+    assert units["surface"]["cron"] == ["15 12 * * 2-6"]
+    ingest = (DOCS_DIR / "ingest.html").read_text()
+    pricing = (DOCS_DIR / "pricing.html").read_text()
+    assert "12:15" in ingest and "surface" in ingest
+    assert "12:15" in pricing
+    assert "load_surface" in pricing
+    assert "Deliberately unscheduled" not in pricing
+
+
 def test_drift_check_r_is_override_not_the_curve(monkeypatch) -> None:
     """DRIFT_CHECK_R is optional; unset means the Treasury curve, not 0.04."""
     from pricing.drift_check import DEFAULT_R, default_r

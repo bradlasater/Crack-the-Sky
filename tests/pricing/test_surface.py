@@ -444,3 +444,76 @@ def test_rows_match_the_landed_schema() -> None:
     rows = sf.rows_from_surfaces(surfaces)
     fields = {f.name for f in schemas.SCHEMAS[sf.DATASET]}
     assert set(rows[0]) == fields, "extra keys are dropped silently on write"
+
+
+# ---------------------------------------------------------------------------
+# Read-back: landed parameters must reconstruct the same Surface
+# ---------------------------------------------------------------------------
+
+
+def test_from_rows_round_trips_a_fitted_surface() -> None:
+    surf = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate)["SPXW"]
+    loaded = sf.Surface.from_rows(sf.rows_from_surfaces({"SPXW": surf}))
+    assert loaded.date == surf.date
+    assert loaded.underlying == "SPXW"
+    assert loaded.slices == surf.slices
+    assert loaded.vol(7700.0, T_NEAR) == pytest.approx(surf.vol(7700.0, T_NEAR))
+
+
+def test_from_rows_still_calendar_checks() -> None:
+    """A tampered parquet must not evaluate as a smile."""
+    near = {
+        "date": DAY.isoformat(), "underlying": "SPXW",
+        "expiration_date": NEAR.isoformat(), "dte": (NEAR - DAY).days,
+        "t_years": T_NEAR, "forward": F,
+        "svi_a": 0.04, "svi_b": 0.01, "svi_rho": 0.0, "svi_m": 0.0, "svi_sigma": 0.1,
+        "k_min": -0.05, "k_max": 0.05, "n_strikes": 21,
+        "rms_error": 0.0, "min_g": 0.5, "rate": R, "src": "day_bars",
+    }
+    far = dict(near, expiration_date=FAR.isoformat(),
+               dte=(FAR - DAY).days, t_years=T_FAR, svi_a=0.001)
+    with pytest.raises(sf.SurfaceArbitrageError, match="calendar"):
+        sf.Surface.from_rows([near, far])
+
+
+def test_from_rows_refuses_mixed_roots_or_dates() -> None:
+    surf = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate)["SPXW"]
+    rows = sf.rows_from_surfaces({"SPXW": surf})
+    mixed = [dict(rows[0], underlying="SPX")]
+    with pytest.raises(sf.SurfaceError, match="one \\(date, underlying\\)"):
+        sf.Surface.from_rows(rows + mixed)
+    with pytest.raises(sf.SurfaceError, match="one \\(date, underlying\\)"):
+        sf.Surface.from_rows([dict(rows[0], date="2020-01-02")] + rows)
+
+
+def test_from_rows_refuses_an_american_root() -> None:
+    surf = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate)["SPXW"]
+    rows = [dict(sf.rows_from_surfaces({"SPXW": surf})[0], underlying="SPY")]
+    with pytest.raises(sf.SurfaceError, match="European index roots"):
+        sf.Surface.from_rows(rows)
+
+
+def test_load_surface_reads_what_write_rows_landed(tmp_path) -> None:
+    from ingest.common.config import Settings
+
+    surfaces = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate)
+    settings = Settings(massive_api_key="k", data_root=tmp_path, log_root=tmp_path / "logs")
+    sf.write_rows(settings, DAY, sf.rows_from_surfaces(surfaces))
+    loaded = sf.load_surface(settings, DAY, "SPXW")
+    assert loaded.slices == surfaces["SPXW"].slices
+    with pytest.raises(sf.SurfaceError, match="no vol_surface rows for SPX"):
+        sf.load_surface(settings, DAY, "SPX")
+    with pytest.raises(sf.SurfaceError, match="no vol_surface partition"):
+        sf.load_surface(settings, date(2020, 1, 2), "SPXW")
+
+
+def test_load_surface_refuses_a_mismatched_row_date(tmp_path) -> None:
+    """A dt= partition whose rows are dated some other session must not answer as T."""
+    from ingest.common.config import Settings
+
+    surfaces = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate)
+    settings = Settings(massive_api_key="k", data_root=tmp_path, log_root=tmp_path / "logs")
+    rows = [dict(r, date="2020-01-02") for r in sf.rows_from_surfaces(surfaces)]
+    sf.write_rows(settings, DAY, rows)
+    with pytest.raises(sf.SurfaceError, match="have date="):
+        sf.load_surface(settings, DAY, "SPXW")

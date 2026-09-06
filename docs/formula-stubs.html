@@ -44,6 +44,7 @@
             <li><a href="formula-stubs.html#formula-parity-f">Parity forward</a></li>
             <li><a href="formula-stubs.html#formula-year-fraction">Year fraction</a></li>
             <li><a href="formula-stubs.html#formula-vendor-units">Vendor unit align</a></li>
+            <li><a href="formula-stubs.html#formula-svi">Raw SVI</a></li>
           </ol>
         </li>
         <li><a href="knobs.html">Documented knobs</a></li>
@@ -66,19 +67,22 @@
         <strong>BSM price / d1 / d2</strong> — <code>pricing.bsm</code>. Continuous r, q; or F via <code>F = S e^{(r−q)T}</code>.
       </div>
       <div class="stub" id="formula-iv">
-        <strong>IV invert</strong> — <code>pricing.iv.implied_vol</code>. Newton, then Brent. Bounds: discounted intrinsic. Never NaN.
+        <strong>IV invert</strong> — <code>pricing.iv.implied_vol</code> (European: Newton, then Brent, closed-form vega). <code>pricing.iv.implied_vol_american</code> (Brent on the CRR tree; returns <code>0.0</code> at intrinsic). Never NaN.
       </div>
       <div class="stub" id="formula-crr">
         <strong>CRR tree</strong> — <code>pricing.engine.crr_price</code>. American early exercise; risk-neutral p outside [0,1] is an error, not clipped.
       </div>
       <div class="stub" id="formula-parity-f">
-        <strong>Parity forward</strong> — <code>ingest.jobs.forward_from_parity</code>. Undiscounted approximation <code>F = K + C − P</code> at the strike minimising |C−P|. Exact parity is <code>F = K + e<sup>rT</sup>(C − P)</code>; the job uses the approximation.
+        <strong>Parity forward</strong> — <code>ingest.jobs.forward_from_parity</code>. At the strike minimising |C−P|: <code>F = K + e<sup>rT</sup>(C − P)</code> with a curve (<code>parity</code>), else <code>F = K + C − P</code> (<code>parity-r0</code>). For VIX this is the VX future of that expiry.
       </div>
       <div class="stub" id="formula-year-fraction">
         <strong>Year fraction</strong> — <code>pricing.from_market.year_fraction</code>. ACT/365 to settlement instant.
       </div>
       <div class="stub" id="formula-vendor-units">
         <strong>Vendor unit align</strong> — theta × 365 (day → year), vega × 100 (1% → 1.00). Same in <code>from_market</code> diffs and <code>drift_check</code>.
+      </div>
+      <div class="stub" id="formula-svi">
+        <strong>Raw SVI</strong> — <code>pricing.surface</code>. Gatheral <code>w(k) = a + b(ρ(k−m) + √((k−m)² + σ²))</code>, fit in <code>w0</code> so <code>w ≥ 0</code> is a box bound. Butterfly <code>g(k) ≥ 0</code> and calendar (total variance non-decreasing in T) repaired inside the fit; <code>Surface.vol(K, T)</code> interpolates linearly in total variance.
       </div>
 
       <footer>

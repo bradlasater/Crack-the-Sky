@@ -61,7 +61,9 @@
 
       <h2 id="whm-cli">CLI usage</h2>
       <p>
-        <code>python -m pricing.from_market --date YYYY-MM-DD --asof-ns N --r 0.04</code>
+        <code>python -m pricing.from_market --date YYYY-MM-DD [--asof-ns N] [--r 0.04]</code>
+        — <code>--r</code> is optional; without it the landed Treasury curve
+        interpolates per contract.
       </p>
 
       <h2 id="whm-asof-load">As-of load</h2>
@@ -106,10 +108,10 @@
         <li>Computes <strong>own</strong> Greeks. SPX/SPXW → European BSM; SPY → American CRR (default 51 tree steps on the chain).</li>
         <li><code>--spy-atm-pct</code> CRR-prices only ATM SPY and European-prices the rest. <code>--max-rows</code> caps American CRR rows only so an SPX-first concat cannot starve SPY.</li>
         <li>Vendor <code>greeks_*</code> / <code>implied_volatility</code> copied as diagnostics with signed diffs (own − vendor). Theta × 365 and vega × 100 for unit alignment. Never inputs.</li>
-        <li>T is ACT/365 from as-of to the settlement <em>instant</em> (not UTC midnight of the expiry date).</li>
+        <li>T is ACT/365 from as-of to the settlement <em>instant</em> (not UTC midnight of the expiry date): SPY/SPXW 16:00 ET, SPX monthlies and VIX/VIXW 09:30 ET.</li>
         <li><code>--r</code> pins a scalar rate; default is the landed Treasury curve via <code>rate_for</code>, interpolated to each maturity.</li>
         <li>SPX has no snapshot spot: parity forward → Black-76 via synthetic <code>S = F e^{-rT}</code>.</li>
-        <li>Exit nonzero on foreign roots, mixed underlyings, required-nulls, empty allowlisted root, schema drift, or (unless <code>--skip-uninvertible</code>) a price outside bounds.</li>
+        <li>Exit nonzero on foreign roots, mixed underlyings, required-nulls, empty allowlisted root, schema drift, or (unless <code>--skip-uninvertible</code>) a price outside bounds. <code>--euro-iv</code> pins every invert back to closed-form BSM for an A/B against the American solver.</li>
       </ul>
 
       <footer>

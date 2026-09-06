@@ -89,8 +89,12 @@
       <h2 id="canary-alert-path">Alert path</h2>
       <p>
         Cron bounds: <code>--spy-atm-pct 0.05</code>, <code>--max-rows 400</code>
-        (CRR rows only). <code>--r</code> from <code>DRIFT_CHECK_R</code>
-        (default 0.04). Report: <code>_meta/drift_check.json</code> + JSONL under
+        (CRR rows only), <code>--max-trade-age-min 60</code> (stale last prints
+        counted, not priced). <code>--r</code> from <code>DRIFT_CHECK_R</code>
+        when set; otherwise the landed Treasury curve interpolated per
+        contract. <code>0.04</code> survives only as the fallback on a box
+        where <code>rates_sync</code> has never run. Report:
+        <code>_meta/drift_check.json</code> + JSONL under
         <code>logs/drift_check/</code>. Exit 1 pings Healthchecks
         <code>massive-drift-check</code> <code>/fail</code>; optional
         <code>DRIFT_ALERT_WEBHOOK</code> (Slack-wrapped if the URL is hooks.slack.com).

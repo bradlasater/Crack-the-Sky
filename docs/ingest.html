@@ -53,7 +53,9 @@
 
       <p>
         Three pipes into one disk tree. Everything live is 15-minute delayed.
-        Cron is the scheduler; every line goes through
+        The schedule lives in <code>deploy/schedule.json</code> and is rendered
+        into systemd user timers; the crontab stays installed through the
+        cutover. Every line goes through
         <code>scripts/cronjob.sh</code>, which takes the job's
         <code>flock</code> and — when a previous run still holds it — logs a
         <code>job_skipped</code> event instead of dropping the run in silence.
@@ -88,7 +90,7 @@
           <text x="120" y="234" text-anchor="middle" fill="#c47d7d" font-family="IBM Plex Mono, monospace" font-size="11">S3 flat files</text>
           <text x="120" y="252" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="11">files.massive.com / flatfiles</text>
           <rect x="20" y="318" width="200" height="64" fill="#161b20" stroke="#2a3238"/>
-          <text x="120" y="344" text-anchor="middle" fill="#e8e4d9" font-family="IBM Plex Mono, monospace" font-size="11">cron (flock)</text>
+          <text x="120" y="344" text-anchor="middle" fill="#e8e4d9" font-family="IBM Plex Mono, monospace" font-size="11">timers · flock</text>
           <text x="120" y="362" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="11">TZ=America/New_York</text>
           <rect x="320" y="24" width="280" height="272" fill="#161b20" stroke="#2a3238"/>
           <text x="460" y="48" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Mono, monospace" font-size="10" letter-spacing="1.5">INGEST JOBS</text>
@@ -151,7 +153,7 @@
             <td class="job">contracts_sync<br><span class="tag rest">rest</span></td>
             <td class="when">08:00 and 16:30</td>
             <td>Mon–Fri</td>
-            <td>Option contract universe for SPY and SPX (SPXW listed under SPX). Raw JSONL + clean <code>contracts</code> parquet.</td>
+            <td>Option contract universe for SPY, SPX (SPXW listed under SPX), and VIX (VIXW listed under VIX). Raw JSONL + clean <code>contracts</code> parquet.</td>
           </tr>
           <tr>
             <td class="job">dividends_sync<br><span class="tag rest">rest</span></td>
@@ -169,7 +171,7 @@
             <td class="job">snapshot_sweep<br><span class="tag rest">rest</span></td>
             <td class="when">every 1 min, 09:30–16:30 · 09:05 pre-open</td>
             <td>Mon–Fri</td>
-            <td>Full-chain snapshots for SPY and I:SPX, concurrent. Clean <code>option_snapshots</code> (IV/greeks/OI populated on this tier) and <code>clean/forwards</code> (parity). Raw JSONL off unless <code>--raw</code>.</td>
+            <td>Full-chain snapshots for SPY, I:SPX, and VIX, concurrent. Clean <code>option_snapshots</code> (IV/greeks/OI populated on this tier) and <code>clean/forwards</code> (parity, discounted when the Treasury curve is present). Raw JSONL off unless <code>--raw</code>.</td>
           </tr>
           <tr>
             <td class="job">trades_watchlist<br><span class="tag rest">rest</span></td>
@@ -199,13 +201,19 @@
             <td class="job">grouped_daily<br><span class="tag rest">rest</span></td>
             <td class="when">08:10 · default date = T-1</td>
             <td>Tue–Sat</td>
-            <td>Whole-market grouped daily; keeps SPY by default. Clean <code>underlying_day_bars</code> <span class="badge writeonly">write-only</span>.</td>
+            <td>Whole-market grouped daily; keeps SPY plus VIX ETF proxies (VIXY/UVXY/VXX). Clean <code>underlying_day_bars</code> <span class="badge writeonly">write-only</span>.</td>
+          </tr>
+          <tr>
+            <td class="job">backfill_underlying</td>
+            <td class="when">02:30</td>
+            <td>Daily</td>
+            <td>Oldest-first walk of the rolling ~2-year equity-aggregate window (<code>underlying_bars</code> + <code>grouped_daily</code> in-process). 403 at the old edge is expected; a real failure is not. <code>scripts/backfill_underlying.py --max-sessions 40 --sleep 6</code>.</td>
           </tr>
           <tr>
             <td class="job">flatfile_pull<br><span class="tag s3">s3</span></td>
             <td class="when">11:05 · default date = T-1</td>
             <td>Tue–Sat</td>
-            <td>OPRA trades / minute aggs / day aggs csv.gz, filtered to roots SPY / SPX / SPXW (not SPYL…). Manifest <code>_meta/flatfile_manifest.json</code>.</td>
+            <td>OPRA trades / minute aggs / day aggs csv.gz, filtered to roots SPY / SPX / SPXW / VIX / VIXW (not SPYL… / VIXY…). Manifest <code>_meta/flatfile_manifest.json</code>.</td>
           </tr>
           <tr>
             <td class="job">reconcile<br><span class="tag s3">s3</span></td>
@@ -270,7 +278,7 @@
         </tbody>
       </table>
 
-      <p>On-demand: <code>python -m ingest.entitlements</code>, <code>scripts/backfill.sh</code>, <code>scripts/repair.sh</code>, <code>python -m pricing.from_market</code>.</p>
+      <p>On-demand: <code>python -m ingest.entitlements</code>, <code>scripts/backfill.sh</code>, <code>scripts/repair.sh</code>, <code>python -m pricing.from_market</code>, <code>python -m pricing.surface</code> (deliberately unscheduled; archive rebuild via <code>scripts/build_surface.py</code>).</p>
 
       <h3 id="ingest-cron">NY cron</h3>
       <p>
@@ -308,8 +316,10 @@
 
       <h3 id="ingest-session">Weekday session, Eastern time</h3>
       <p>
-        Cash hours 09:30–16:00 ET. Websocket capture 09:25–16:35 ET (20 minutes
-        past the cash close). Bars are wall-clock occupancy, not CPU.
+        Cash hours 09:30–16:00 ET. Websocket capture 09:25–16:35 ET — the
+        35-minute buffer is derived (options trade to 16:15 + 15-minute feed
+        delay + 1-minute bar + 4-minute delivery margin), not picked. Bars are
+        wall-clock occupancy, not CPU.
       </p>
       <div class="timeline-wrap">
         <div class="day-label">Mon–Fri &nbsp; 07:00 — 17:00 ET</div>
@@ -370,7 +380,7 @@
       </p>
       <dl class="notes">
         <dt>Entitled</dt>
-        <dd>Contracts (incl. expired), full-chain snapshots with greeks/IV/OI, option trades, option aggs, T-1 equity minutes, grouped daily, dividends/splits, market status, delayed options WS, <code>trades_v1</code> / <code>minute_aggs_v1</code> / <code>day_aggs_v1</code>.</dd>
+        <dd>Contracts (incl. expired), full-chain snapshots with greeks/IV/OI (SPY, I:SPX, VIX), option trades, option aggs, T-1 equity minutes, grouped daily, dividends/splits, market status, delayed options WS, Treasury yields / inflation (<code>/fed/v1</code>), <code>trades_v1</code> / <code>minute_aggs_v1</code> / <code>day_aggs_v1</code>.</dd>
         <dt>Not entitled</dt>
         <dd>Option NBBO (REST and <code>quotes_v1</code>), I:SPX / I:VIX (and other I:* index levels), equity trades/quotes, <code>us_stocks_sip</code>, same-day equity aggs, <code>/v1/indicators/*</code>.</dd>
       </dl>

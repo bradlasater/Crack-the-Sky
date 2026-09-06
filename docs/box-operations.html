@@ -143,11 +143,13 @@ loginctl enable-linger brad-lasater          # survives logout/reboot</code></pr
       single-owner repo with 2FA; the keys are read-only and no brokerage access is reachable.</p>
 
       <h2 id="box-healthchecks">Healthchecks.io</h2>
-      <p><span class="tag ok">active</span> Nineteen scheduled jobs report here, mapped to
-      eighteen checks: the expired-contracts and EOD-snapshot passes share their parent job's
-      check (19 jobs → 17 scheduled checks, named <code>massive-&lt;job&gt;</code>), and the extra
-      liveness check <code>massive-ws-minute-bars-alive</code> is pinged by the running capture
-      rather than scheduled. Jobs ping via the ping key in <code>.env</code>; schedules and grace
+      <p><span class="tag ok">active</span> Twenty user-timer units, eighteen unique jobs.
+      The expired-contracts and EOD-snapshot passes share their parent job's lock and
+      Healthchecks check; <code>prune</code> is deliberately unmonitored. That leaves
+      seventeen scheduled checks named <code>massive-&lt;job&gt;</code>, plus the extra
+      liveness check <code>massive-ws-minute-bars-alive</code> pinged by the running
+      capture rather than scheduled — eighteen checks in all. Jobs ping via the ping
+      key in <code>.env</code>; schedules and grace
       periods come from <code>deploy/schedule.json</code> via
       <code>scripts/setup_healthchecks.py</code> (without that step, auto-created checks get a
       default daily schedule and false-alarm over weekends on the weekday-only jobs). A

@@ -110,7 +110,7 @@
           <text x="331" y="82" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Mono, monospace" font-size="10" letter-spacing="1.5">CAPTURE</text>
           <rect x="246" y="96" width="170" height="128" fill="#161b20" stroke="#2a3238"/>
           <text x="331" y="128" text-anchor="middle" fill="#e8e4d9" font-family="IBM Plex Mono, monospace" font-size="12">ingest/ jobs</text>
-          <text x="331" y="150" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="11">cron · flock · ET</text>
+          <text x="331" y="150" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="11">timers · flock · ET</text>
           <text x="331" y="170" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="11">15-min delayed</text>
           <text x="331" y="196" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="10">snapshots are irreplaceable;</text>
           <text x="331" y="210" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="10">flat file always wins</text>
@@ -130,7 +130,7 @@
           <text x="806" y="100" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="11">typed as-of reads · fail-loud</text>
           <rect x="706" y="156" width="200" height="76" fill="#161b20" stroke="#2a3238"/>
           <text x="806" y="184" text-anchor="middle" fill="#e8e4d9" font-family="IBM Plex Mono, monospace" font-size="12">pricing/</text>
-          <text x="806" y="204" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="11">own IV · BSM / American CRR</text>
+          <text x="806" y="204" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="11">own IV · BSM / CRR · SVI</text>
 
           <!-- watchdog -->
           <text x="1065" y="38" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Mono, monospace" font-size="10" letter-spacing="1.5">WATCHDOG</text>
@@ -139,7 +139,7 @@
           <text x="1065" y="100" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="11">17:00 ET · ATM identities</text>
           <rect x="966" y="156" width="198" height="76" fill="#161b20" stroke="#2a3238"/>
           <text x="1065" y="184" text-anchor="middle" fill="#e8e4d9" font-family="IBM Plex Mono, monospace" font-size="12">Healthchecks</text>
-          <text x="1065" y="204" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="11">one check per cron job · /fail</text>
+          <text x="1065" y="204" text-anchor="middle" fill="#9a9386" font-family="IBM Plex Sans, sans-serif" font-size="11">one check per scheduled job · /fail</text>
 
           <!-- arrows -->
           <line x1="186" y1="52" x2="246" y2="120" stroke="#6a6458" stroke-width="1.2" marker-end="url(#arrow)"/>
@@ -172,7 +172,7 @@
         </div>
         <div class="step">
           <div class="n">3 own IV</div>
-          <p>European BSM invert of last/close. Never NaN; never vendor σ</p>
+          <p>Own invert of last/close — European BSM or American CRR. Never NaN; never vendor σ</p>
         </div>
         <div class="step">
           <div class="n">4 own Greeks</div>
@@ -197,15 +197,15 @@
         </a>
         <a class="card" href="ingest.html">
           <div class="card-title">Ingest</div>
-          <p>Sources, vendor constraints, every job, the NY crontab, session timeline, entitlements.</p>
+          <p>Sources, vendor constraints, every job, the NY schedule (timers + crontab fallback), session timeline, entitlements.</p>
         </a>
         <a class="card" href="marketdata.html">
           <div class="card-title">marketdata</div>
-          <p>Typed parquet reads, OPRA allowlist, as-of semantics, fail-loud validate.</p>
+          <p>Typed parquet reads, OPRA allowlist (SPY/SPX/SPXW/VIX/VIXW), as-of semantics, fail-loud validate.</p>
         </a>
         <a class="card" href="pricing.html">
           <div class="card-title">pricing</div>
-          <p>Engines (European BSM / American CRR), IV invert, greek conventions catalog.</p>
+          <p>Engines (European BSM / American CRR), both IV inverters, ATM curve, raw-SVI surface.</p>
         </a>
         <a class="card" href="warehouse-math.html">
           <div class="card-title">Warehouse → math</div>
@@ -221,7 +221,7 @@
         </a>
         <a class="card" href="not-built.html">
           <div class="card-title">Not built</div>
-          <p>Surfaces, rates warehouse, ClickHouse — deliberately absent, not half-landed.</p>
+          <p>ClickHouse, VVIX, trading-day theta, SPY/VIX smiles — deliberately absent. SVI surface and the rates warehouse have shipped.</p>
         </a>
         <a class="card" href="formula-stubs.html">
           <div class="card-title">Formula stubs</div>

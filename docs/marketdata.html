@@ -69,18 +69,21 @@
       <dl class="notes">
         <dt id="md-opra-allowlist">OPRA allowlist</dt>
         <dd>
-          Allowlist is exactly <code>SPY</code>, <code>SPX</code>, <code>SPXW</code>.
-          The parser alternation is longest-first (<code>SPXW</code> before
-          <code>SPX</code>) so <code>O:SPXW…</code> is not captured as
-          <code>SPX</code>. A prefix match on <code>O:SPY</code> would admit
-          SPYL/SPYS/SPYG; <code>parse_opra</code> does not.
+          Allowlist is exactly <code>SPY</code>, <code>SPX</code>, <code>SPXW</code>,
+          <code>VIX</code>, <code>VIXW</code>. The parser alternation is longest-first
+          (<code>SPXW</code> before <code>SPX</code>, <code>VIXW</code> before
+          <code>VIX</code>) so <code>O:SPXW…</code> is not captured as
+          <code>SPX</code> and <code>O:VIXW…</code> is not <code>VIX</code>. A
+          prefix match on <code>O:SPY</code> would admit SPYL/SPYS/SPYG, and
+          <code>O:VIX</code> would admit VIXY; <code>parse_opra</code> does not.
           Raises <code>OPRAParseError</code> — never a partial.
         </dd>
         <dt id="md-contract">Contract</dt>
         <dd>
           Exercise style and multiplier live on the dataclass: SPY American,
-          SPX/SPXW European, multiplier 100. Settlement instants:
-          SPY/SPXW 16:00 ET, SPX monthlies 09:30 ET (AM-settled).
+          SPX/SPXW/VIX/VIXW European, multiplier 100. Settlement instants:
+          SPY/SPXW 16:00 ET (PM-settled); SPX monthlies and both VIX series
+          09:30 ET (AM-settled to the Wednesday SOQ).
         </dd>
         <dt id="md-quote">Quote</dt>
         <dd>
@@ -97,6 +100,9 @@
           <code>read_partition</code> refuses those datasets (double-count).
           <code>read_asof</code> takes the last file per underlying at or before
           <code>asof_ns</code> (filename epoch-ms). Absence is an error.
+          <code>option_trades</code> is multi-source: a partition can hold
+          overlapping REST and flat-file rows, so readers must pass
+          <code>src</code>.
         </dd>
         <dt id="md-fail-loud">Fail-loud</dt>
         <dd>

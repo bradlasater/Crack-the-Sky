@@ -60,8 +60,9 @@
       <h2 id="repo-toplevel">Top level</h2>
       <p>
         Three Python packages plus tests and ops scripts. Jobs are
-        <code>python -m ingest.jobs.&lt;name&gt;</code> from a venv, not an
-        installed distribution.
+        <code>python -m ingest.jobs.&lt;name&gt;</code> from the venv
+        (<code>pip install -e .</code> so imports do not depend on cwd). No
+        console-script entry points.
       </p>
       <table>
         <thead>
@@ -94,7 +95,7 @@
           </tr>
           <tr>
             <td class="job">scripts/</td>
-            <td>bootstrap, backfill, repair, prune_raw, Healthchecks setup, <code>build_term_structure.py</code> (rebuilds the ATM curve over the archive), <code>build_surface.py</code> (same for the SVI surface). Not a package.</td>
+            <td>bootstrap, backfill, backfill_underlying, repair, prune_raw, Healthchecks setup, <code>build_term_structure.py</code> (rebuilds the ATM curve over the archive), <code>build_surface.py</code> (same for the SVI surface). Not a package.</td>
           </tr>
         </tbody>
       </table>

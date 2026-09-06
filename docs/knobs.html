@@ -75,6 +75,7 @@
           <tr><td class="job">WS_DELAYED_URL</td><td>Default <code>wss://delayed.massive.com/options</code>.</td></tr>
           <tr><td class="job">MASSIVE_S3_ACCESS_KEY_ID<br>MASSIVE_S3_SECRET_ACCESS_KEY</td><td>Flat-file access keys (placeholders exit 3 on pull).</td></tr>
           <tr><td class="job">MASSIVE_S3_ENDPOINT<br>MASSIVE_S3_BUCKET</td><td>Flat-file endpoint and bucket (defaults <code>https://files.massive.com</code> / <code>flatfiles</code>).</td></tr>
+          <tr><td class="job">IBKR_FLEX_TOKEN<br>IBKR_FLEX_QUERY_ID<br>IBKR_ACCOUNT_ID</td><td>Read-only Flex Web Service (no gateway). Commented in <code>.env.example</code>; required only for <code>ibkr_executions</code>. Token expires ~yearly.</td></tr>
         </tbody>
       </table>
 
@@ -98,7 +99,7 @@
           <tr><td class="job">HEALTHCHECKS_PING_KEY</td><td>Per-job checks. Without it, a dead job is silent.</td></tr>
           <tr><td class="job">HEALTHCHECKS_API_KEY</td><td>Management key used only by <code>scripts/setup_healthchecks.py</code> to create/update the checks. Not read at run time, and not the ping key.</td></tr>
           <tr><td class="job">HEALTHCHECKS_BASE</td><td>Ping root (hosted <code>https://hc-ping.com</code>; self-host <code>https://&lt;host&gt;/ping</code>).</td></tr>
-          <tr><td class="job">DRIFT_CHECK_R</td><td>Scalar r for the 17:00 canary (default 0.04).</td></tr>
+          <tr><td class="job">DRIFT_CHECK_R</td><td>Optional scalar r override for the 17:00 canary. Unset → landed Treasury curve per contract. <code>0.04</code> is only the fallback when <code>rates_sync</code> has never run.</td></tr>
           <tr><td class="job">DRIFT_ALERT_WEBHOOK</td><td>Optional FAIL POST. Healthchecks + exit 1 remain the alert.</td></tr>
         </tbody>
       </table>
@@ -121,7 +122,10 @@
         job draws at low priority and stops at this floor, which is where
         &ldquo;everything else yields API budget to it&rdquo; is actually
         enforced),
+        <code>MASSIVE_PRIORITY_CLAIM_S</code> (1.0 — a waiting NORMAL caller
+        stamps this so LOW callers stand aside),
         <code>TRADES_CONCURRENCY</code> (8),
+        <code>TRADES_BACKOFF_MAX</code> (4 — adaptive poll slots; set 1 to disable),
         <code>RETAIN_DAYS</code> (90),
         <code>QUARANTINE_RETAIN_DAYS</code> (30 — superseded re-filter output
         under <code>_quarantine/</code>, pruned on the monthly run),

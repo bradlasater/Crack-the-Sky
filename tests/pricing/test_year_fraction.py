@@ -6,13 +6,15 @@ T = (settlement_instant - asof) / (365 * 86400 seconds). Changing 365 to
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from marketdata.opra import parse_opra
+from pricing.calendar import CalendarRangeError, SessionCalendar
 from pricing.from_market import expiry_instant, year_fraction
+from tests.conftest import load_fixture
 
 ET = ZoneInfo("America/New_York")
 SECONDS_PER_DAY = 86400.0
@@ -83,3 +85,111 @@ def test_intraday_zero_dte_matches_the_remaining_seconds() -> None:
     got = year_fraction(c, int(asof.timestamp() * 1e9))
     expected = (6.0 * 3600.0) / (DAYS_PER_YEAR * SECONDS_PER_DAY)
     assert got == pytest.approx(expected, rel=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Half days
+#
+# A half day closes at 13:00 ET and opens at the usual 09:30, so it can only
+# reach a PM settlement. The box's window carries exactly two -- Black Friday
+# 2026-11-27 and Christmas Eve 2026-12-24 -- and both are real SPY/SPXW expiry
+# dates. Both fall in EST, so 13:00 ET is 18:00 UTC and 16:00 ET is 21:00 UTC.
+# ---------------------------------------------------------------------------
+
+BLACK_FRIDAY = "261127"
+CHRISTMAS_EVE = "261224"
+EARLY_CLOSE_UTC = datetime(2026, 11, 27, 18, 0, tzinfo=UTC)
+FULL_CLOSE_UTC = datetime(2026, 11, 27, 21, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("root", ["SPY", "SPXW"])
+def test_pm_expiry_on_a_half_day_settles_at_the_early_close(
+    root: str, session_calendar: SessionCalendar
+) -> None:
+    c = parse_opra(f"O:{root}{BLACK_FRIDAY}C00700000")
+    assert expiry_instant(c, session_calendar) == EARLY_CLOSE_UTC
+    xmas = parse_opra(f"O:{root}{CHRISTMAS_EVE}C00700000")
+    assert expiry_instant(xmas, session_calendar) == datetime(
+        2026, 12, 24, 18, 0, tzinfo=UTC
+    )
+
+
+def test_without_a_calendar_a_half_day_keeps_the_full_session_close(
+    session_calendar: SessionCalendar,
+) -> None:
+    """The defect this fix exists for: three hours of T that were never traded."""
+    c = parse_opra(f"O:SPY{BLACK_FRIDAY}C00700000")
+    assert expiry_instant(c) == FULL_CLOSE_UTC
+    assert expiry_instant(c) - expiry_instant(c, session_calendar) == timedelta(hours=3)
+
+
+@pytest.mark.parametrize("root", ["SPX", "VIX", "VIXW"])
+def test_am_expiry_on_a_half_day_keeps_the_normal_open(
+    root: str, session_calendar: SessionCalendar
+) -> None:
+    """An early close moves the close, not the open, so AM settlement stands."""
+    c = parse_opra(f"O:{root}{BLACK_FRIDAY}C00700000")
+    assert expiry_instant(c, session_calendar) == datetime(
+        2026, 11, 27, 14, 30, tzinfo=UTC
+    )
+    assert expiry_instant(c, session_calendar) == expiry_instant(c)
+
+
+@pytest.mark.parametrize(
+    "ticker",
+    ["O:SPY260918C00770000", "O:SPXW260918C07700000", "O:SPX260918C07700000"],
+)
+def test_a_full_session_is_unaffected_by_the_calendar(
+    ticker: str, session_calendar: SessionCalendar
+) -> None:
+    c = parse_opra(ticker)
+    assert expiry_instant(c, session_calendar) == expiry_instant(c)
+
+
+def test_a_pm_expiry_past_the_holiday_window_raises(
+    session_calendar: SessionCalendar,
+) -> None:
+    """Half days past the window are unrecorded, and 16:00 there would be a guess."""
+    c = parse_opra("O:SPY270917C00700000")  # 2027-09-17, past 2027-07-05
+    with pytest.raises(CalendarRangeError, match="outside the holiday window"):
+        expiry_instant(c, session_calendar)
+
+
+def test_an_am_expiry_past_the_holiday_window_does_not_consult_the_calendar(
+    session_calendar: SessionCalendar,
+) -> None:
+    """AM settlement cannot move, so the unanswerable question is never asked."""
+    c = parse_opra("O:SPX270917C07700000")
+    assert expiry_instant(c, session_calendar) == datetime(
+        2027, 9, 17, 13, 30, tzinfo=UTC
+    )  # 09:30 EDT
+
+
+def test_year_fraction_expires_a_pm_contract_at_the_early_close(
+    session_calendar: SessionCalendar,
+) -> None:
+    """14:00 ET on a half day is after settlement, not two hours before it."""
+    c = parse_opra(f"O:SPY{BLACK_FRIDAY}C00700000")
+    asof_ns = int(datetime(2026, 11, 27, 14, 0, tzinfo=ET).timestamp() * 1e9)
+    with pytest.raises(ValueError, match="non-positive T"):
+        year_fraction(c, asof_ns, calendar=session_calendar)
+    # Without the calendar the same contract still prices as live -- the bug.
+    assert year_fraction(c, asof_ns) == pytest.approx(
+        (2.0 * 3600.0) / (DAYS_PER_YEAR * SECONDS_PER_DAY), rel=1e-12
+    )
+
+
+def test_the_early_close_constant_matches_the_vendors_own_close_field(
+    session_calendar: SessionCalendar,
+) -> None:
+    """13:00 ET is hardcoded because load_early_closes drops the time; the
+    vendor still publishes it, so pin the two together."""
+    records = load_fixture("holidays_upcoming_2026.json")
+    closes = {
+        r["date"]: r["close"] for r in records if r.get("status") == "early-close"
+    }
+    assert closes, "fixture carries no early-close record to check against"
+    for day, close in closes.items():
+        vendor = datetime.fromisoformat(close.replace("Z", "+00:00"))
+        c = parse_opra(f"O:SPY{day[2:].replace('-', '')}C00700000")
+        assert expiry_instant(c, session_calendar) == vendor

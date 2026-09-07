@@ -60,6 +60,13 @@ from ingest.common.market_gate import (
 
 RAW_HOLIDAYS_DATASET = "holidays"
 
+# The NYSE half-day close, ET. This is the convention rather than a per-record
+# time: ``load_early_closes`` keeps only the dates, discarding the vendor's own
+# ``close`` field, and every early-close record the box has ever carried closes
+# at 13:00. An early close moves the *close* only -- the 09:30 open is
+# unchanged -- which is why it can reach a PM settlement and never an AM one.
+EARLY_CLOSE_ET: tuple[int, int] = (13, 0)
+
 
 class CalendarError(Exception):
     """Base for session-calendar failures."""

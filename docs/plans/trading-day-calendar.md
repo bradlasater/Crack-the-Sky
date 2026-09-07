@@ -6,11 +6,12 @@ forecast (item 4) and the event replay (item 7) bake ACT/365 in deeper.
 
 Status: **steps 1-2 landed, step 3 half-landed; the rest needs the owner
 decisions below.**
-`pricing/calendar.py` and `pricing/daycount.py` ship with 33 tests between
+`pricing/calendar.py` and `pricing/daycount.py` ship with 42 tests between
 them, and no number has moved yet. Building step 1 turned up three further
 findings (3-5) that change what steps 3 and 4 can do: step 3 is smaller than
 this plan first assumed, step 4 is larger, and neither can cover the whole
-book with today's sources.
+book with today's sources. Measuring step 3 added finding 8, which is a
+blocker on the default flip rather than on the hybrid.
 
 ---
 
@@ -157,6 +158,25 @@ also means the backtester cannot reproduce the inputs a decision was made on.
 Logged in `IMPROVEMENTS.md`; **the pin should land before the step-3 rebuild,
 not after**, or the measurement is not worth taking.
 
+### Finding 8 — a session count can legitimately be zero
+
+Two `atm_term_structure` rows convert to **zero sessions**: 2025-01-08 →
+2025-01-09 on SPXW and SPY, a one-day span whose only day is the National Day
+of Mourning for President Carter. They are not a freak. Any span whose every
+day is a closure counts zero, and a full-day closure inside a one-day span
+produces one every time it happens.
+
+Under ACT/365 that span is `1/365` and nothing notices; under `bus/252` it is
+`0`, and σ√T, every greek, and the ΔIV measure below all divide by it. So a
+stamped `bus/252` row with `t_years = 0` is a division by zero waiting in
+every downstream formula, and today's reasonable-looking `1/365` is exactly
+what hides it.
+
+This needs a policy before the default flips — floor T at some fraction of a
+session, drop the row, or let it raise. It belongs with decision 2 (how to
+treat the current session), which is the same question about a partial session
+asked at the other end.
+
 ---
 
 ## Decisions needed before coding
@@ -282,8 +302,16 @@ could not say which it got is the silent mixing this plan is trying to avoid.
 `hybrid_for(data_root)` builds it from the box's calendar files. Nothing is
 switched over: `DEFAULT_DAYCOUNT` is still ACT/365.
 
+The fallback is deliberately narrow: it covers the horizon and dates before
+attested history, and re-raises a `CalendarRangeError` from the gap between
+attested history and the forward window. That gap means a sync job is behind,
+not that the book is long-dated, and it lands on the short end where a
+one-session error in T is largest — so it must not be answered with a
+plausible ACT/365 number.
+
 Blocked on decision 5: the schema stamp and the default flip, because finding
-6 makes those inseparable from a full rebuild and a production cutover.
+6 makes those inseparable from a full rebuild and a production cutover, and on
+finding 8, which needs a zero-session policy before any row is stamped.
 
 The original plan for the rest:
 Switch `term_structure` and `surface` to the new convention, stamp the
@@ -296,9 +324,16 @@ dominate: 5 DTE spanning a weekend is `3/252 = 0.0119` vs `5/365 = 0.0137`,
 **−13.1% on T**. Quantify the real distribution across the archive before
 merging, not after.
 
-**Measured**, over all 97,743 `atm_term_structure` (date, expiry) pairs the
-hybrid converts — 3,724 more stay on ACT/365. ΔIV is the shift implied by
-holding the observed price fixed, where an ATM option gives σ ∝ 1/√T:
+**Measured** across the archive. Of 101,467 `atm_term_structure` rows the
+hybrid converts **97,745** to sessions and leaves **3,722** on ACT/365 — the
+same 3,722 past-horizon rows as finding 4, since on the box's own calendar
+nothing else falls back.
+
+The table below covers 97,743 of those — it drops the two zero-session rows
+of finding 8, where ΔIV divides by zero.
+
+ΔIV is the shift implied by holding the observed price fixed, where an ATM
+option gives σ ∝ 1/√T:
 
 | DTE | pairs | ΔT median | ΔT p5 | ΔT p95 | ΔIV median | ΔIV p5 | ΔIV p95 |
 |---|---|---|---|---|---|---|---|
@@ -319,6 +354,7 @@ violent (±17-31%), which is worth knowing before anything trades that tenor.
 Note the surface's own distribution is *not* measurable this way — finding 7
 means a refit differs from the landed archive by optimiser noise regardless of
 convention, so the thread pin has to land first.
+
 
 Measured against the box on 2026-09-06, from `pricing.calendar` itself
 (as-of Sunday 2026-09-06, so the Labor Day week is in every window):

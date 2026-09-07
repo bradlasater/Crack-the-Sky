@@ -32,9 +32,10 @@ adopting a session count here would not change it.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Protocol, runtime_checkable
 
+from ingest.common.market_gate import is_weekday
 from pricing.calendar import CalendarRangeError, SessionCalendar, load_session_calendar
 from pricing.conventions import CALENDAR_DAYS_PER_YEAR, TRADING_DAYS_PER_YEAR
 
@@ -116,16 +117,48 @@ class HybridSessions:
     why rows stamp :meth:`name_for` rather than the convention's own ``name`` --
     an unstamped row would make the two indistinguishable, which is the silent
     archive mixing this whole change is trying to avoid.
+
+    The fallback covers the horizon only. :class:`CalendarRangeError` also
+    means a weekday stranded *between* attested history and the forward
+    window, which is not a shape of the book but a sync job that has stopped
+    running -- and it strikes the short end, where a one-session error in T is
+    largest. Swallowing that would downgrade the 5-45 DTE book to ACT/365 and
+    call it a normal day, so an interior gap is re-raised: the one refusal
+    ``SessionCalendar`` makes that nothing here should be able to paper over.
     """
 
     sessions: TradingSessions
     fallback: CalendarDays = ACT_365
     name: str = "hybrid"
 
+    def _spans_stale_gap(self, start: date, end: date) -> bool:
+        """True when ``(start, end]`` contains a weekday no source reaches.
+
+        The hole runs from the day after attested history to the day before
+        the forward window opens, and only a *weekday* in it counts: the
+        steady-state hole is exactly the Saturday between the Saturday and
+        Sunday jobs, which needs no coverage and must not strand the LEAPS
+        tail that happens to span it. A weekday in there is the stale-job
+        signal, and it is the reason this is a scan and not a bounds test.
+        """
+        calendar = self.sessions.calendar
+        if not calendar.sessions:
+            return False
+        # sessions_between consults the half-open (start, end].
+        day = max(start + timedelta(days=1), max(calendar.sessions) + timedelta(days=1))
+        through = min(end, calendar.forward_from - timedelta(days=1))
+        while day <= through:
+            if is_weekday(day):
+                return True
+            day += timedelta(days=1)
+        return False
+
     def _resolve(self, start: date, end: date) -> tuple[float, str]:
         try:
             return self.sessions.year_fraction(start, end), self.sessions.name
         except CalendarRangeError:
+            if self._spans_stale_gap(start, end):
+                raise
             return self.fallback.year_fraction(start, end), self.fallback.name
 
     def year_fraction(self, start: date, end: date) -> float:

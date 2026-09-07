@@ -21,6 +21,8 @@ from pricing.daycount import (
     ACT_365,
     DEFAULT_DAYCOUNT,
     CalendarDays,
+    DayCount,
+    HybridSessions,
     TradingSessions,
     discount_year_fraction,
 )
@@ -187,3 +189,114 @@ def test_a_passed_convention_does_not_move_money_time(
     assert seen, "rate_fn was never called"
     assert all(t == pytest.approx(DTE / 365.0, rel=1e-12) for t in seen)
     assert all(t != pytest.approx(SESSIONS / 252.0, rel=1e-6) for t in seen)
+
+
+# ---------------------------------------------------------------------------
+# The hybrid: sessions where the calendar can vouch, ACT/365 beyond
+# ---------------------------------------------------------------------------
+
+
+def test_hybrid_uses_sessions_inside_the_horizon(
+    session_calendar: SessionCalendar,
+) -> None:
+    h = HybridSessions(TradingSessions(session_calendar))
+    assert h.year_fraction(DAY, EXPIRY) == pytest.approx(SESSIONS / 252.0, rel=1e-12)
+    assert h.name_for(DAY, EXPIRY) == "bus/252"
+
+
+def test_hybrid_falls_back_beyond_the_horizon(
+    session_calendar: SessionCalendar,
+) -> None:
+    """A LEAPS expiry keeps the convention it already had rather than being
+    refused -- and says so, so the two kinds of row stay distinguishable."""
+    leaps = date(2031, 12, 19)
+    h = HybridSessions(TradingSessions(session_calendar))
+    assert h.year_fraction(DAY, leaps) == pytest.approx(
+        ACT_365.year_fraction(DAY, leaps), rel=1e-12)
+    assert h.name_for(DAY, leaps) == "act/365"
+
+
+def test_hybrid_falls_back_before_attested_history(
+    session_calendar: SessionCalendar,
+) -> None:
+    old = date(2019, 3, 14)
+    h = HybridSessions(TradingSessions(session_calendar))
+    assert h.year_fraction(old, date(2019, 4, 18)) == pytest.approx(35 / 365.0, rel=1e-12)
+    assert h.name_for(old, date(2019, 4, 18)) == "act/365"
+
+
+@pytest.fixture
+def stale_calendar(session_calendar: SessionCalendar) -> SessionCalendar:
+    """``history_audit`` a week behind, so weekdays are stranded in the gap.
+
+    Attested history stops 2026-08-27 while the holiday window still opens
+    2026-09-06, leaving 2026-08-28 through 2026-09-04 -- six weekdays -- that
+    no source reaches. Mirrors ``test_weekday_in_the_gap_raises``.
+    """
+    return SessionCalendar(
+        sessions={d: v for d, v in session_calendar.sessions.items()
+                  if d < date(2026, 8, 28)},
+        holidays=session_calendar.holidays,
+        early_closes=session_calendar.early_closes,
+        forward_from=session_calendar.forward_from,
+        forward_through=session_calendar.forward_through,
+    )
+
+
+def test_hybrid_re_raises_a_stale_calendar_gap(stale_calendar: SessionCalendar) -> None:
+    """A stale sync job is not a shape of the book, and must not be answered.
+
+    This is the case the fallback must not swallow: the span is short-dated,
+    well inside the horizon, and ACT/365 would come back looking like every
+    other row. Refusing is the whole point of ``SessionCalendar`` raising.
+    """
+    h = HybridSessions(TradingSessions(stale_calendar))
+    with pytest.raises(CalendarRangeError, match="not covered"):
+        h.year_fraction(date(2026, 8, 27), date(2026, 9, 18))
+    with pytest.raises(CalendarRangeError, match="not covered"):
+        h.name_for(date(2026, 8, 27), date(2026, 9, 18))
+
+
+def test_hybrid_still_refuses_a_leaps_span_across_a_stale_gap(
+    stale_calendar: SessionCalendar,
+) -> None:
+    """Past the horizon *and* across a stale gap: the gap wins.
+
+    Falling back here would return a plausible ACT/365 number and lose the
+    only signal that a job stopped running, so the operational failure is
+    reported ahead of the convention question.
+    """
+    h = HybridSessions(TradingSessions(stale_calendar))
+    with pytest.raises(CalendarRangeError):
+        h.year_fraction(date(2026, 8, 27), date(2031, 12, 19))
+
+
+def test_hybrid_falls_back_across_the_healthy_weekend_gap(
+    session_calendar: SessionCalendar,
+) -> None:
+    """The steady-state gap is one Saturday, and must not look stale.
+
+    ``history_audit`` verifies through Friday and ``holidays_sync`` opens its
+    window on Sunday, so 2026-09-05 is uncovered on a perfectly healthy box --
+    it just needs no coverage. A LEAPS span crossing it still falls back on
+    the horizon, which is the only reason it was refused.
+    """
+    assert date(2026, 9, 5).weekday() == 5
+    h = HybridSessions(TradingSessions(session_calendar))
+    leaps = date(2031, 12, 19)
+    assert h.name_for(date(2026, 9, 4), leaps) == "act/365"
+    assert h.year_fraction(date(2026, 9, 4), leaps) == pytest.approx(
+        ACT_365.year_fraction(date(2026, 9, 4), leaps), rel=1e-12)
+
+
+def test_simple_conventions_report_their_own_name() -> None:
+    """``name_for`` is what a row stamps; for a convention that never falls
+    back it is just ``name``, on every pair."""
+    assert ACT_365.name_for(DAY, EXPIRY) == ACT_365.name == "act/365"
+    assert ACT_365.name_for(date(1999, 1, 1), date(2099, 1, 1)) == "act/365"
+
+
+def test_hybrid_satisfies_the_protocol(session_calendar: SessionCalendar) -> None:
+    for conv in (ACT_365, TradingSessions(session_calendar),
+                 HybridSessions(TradingSessions(session_calendar))):
+        assert isinstance(conv, DayCount)

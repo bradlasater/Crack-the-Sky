@@ -1,0 +1,189 @@
+"""Day-count conventions, and the vol-time / money-time split they encode.
+
+Nothing here changes a number yet: ACT/365 is still the default everywhere,
+and the pins below are what will make flipping it a deliberate act rather than
+a silent one. The load-bearing tests are the two at the bottom -- a passed
+convention must move vol time and must *not* move the rate tenor.
+"""
+
+from __future__ import annotations
+
+import math
+from datetime import date
+
+import pytest
+
+from pricing import surface as sf
+from pricing import term_structure as ts
+from pricing.bsm import price
+from pricing.calendar import CalendarRangeError, SessionCalendar
+from pricing.daycount import (
+    ACT_365,
+    DEFAULT_DAYCOUNT,
+    CalendarDays,
+    TradingSessions,
+    discount_year_fraction,
+)
+from tests.conftest import load_fixture
+
+DAY = date(2026, 8, 28)
+EXPIRY = date(2026, 9, 25)
+DTE = (EXPIRY - DAY).days  # 28 calendar days
+SESSIONS = 19  # sessions in (DAY, EXPIRY] -- Labor Day and four weekends out
+R = 0.04
+F = 7700.0
+VOL = 0.18
+
+
+@pytest.fixture
+def session_calendar() -> SessionCalendar:
+    """The box's own calendar files, as of 2026-09-06."""
+    holidays = load_fixture("holidays_upcoming_2026.json")
+    closed = {date.fromisoformat(r["date"]) for r in holidays if r["status"] == "closed"}
+    early = {date.fromisoformat(r["date"]) for r in holidays if r["status"] != "closed"}
+    return SessionCalendar(
+        sessions={date.fromisoformat(k): v
+                  for k, v in load_fixture("trading_days.json").items()},
+        holidays=frozenset(closed),
+        early_closes=frozenset(early),
+        forward_from=date(2026, 9, 6),
+        forward_through=max(closed | early),
+    )
+
+
+def _sym(root: str, expiry: date, kind: str, strike: float) -> str:
+    return (f"O:{root}{expiry:%y%m%d}{'C' if kind == 'call' else 'P'}"
+            f"{int(round(strike * 1000)):08d}")
+
+
+def _chain_bars() -> list[dict]:
+    """Day bars for a mildly skewed chain in the forward measure.
+
+    Wide enough to clear the surface fit's MIN_STRIKES, and skewed so the SVI
+    solve is not degenerate. Priced at ACT/365 throughout -- what the fits
+    recover from it is beside the point here; only the T they stamp is.
+    """
+    t = DTE / 365.0
+    bars = []
+    for k in (float(x) for x in range(7300, 8101, 25)):
+        vol = VOL - 0.15 * math.log(k / F)
+        for kind in ("call", "put"):
+            bars.append({"ticker": _sym("SPXW", EXPIRY, kind, k),
+                         "close": float(price(F, k, t, R, vol, kind, q=R)),
+                         "window_end_ns": 1})
+    return bars
+
+
+# ---------------------------------------------------------------------------
+# The conventions themselves
+# ---------------------------------------------------------------------------
+
+
+def test_calendar_days_is_exactly_act_365() -> None:
+    got = ACT_365.year_fraction(DAY, EXPIRY)
+    assert got == pytest.approx(DTE / 365.0, rel=1e-12)
+    assert got != pytest.approx(DTE / 365.25, rel=1e-9)
+    assert got != pytest.approx(DTE / 252.0, rel=1e-9)
+    assert ACT_365.name == "act/365"
+
+
+def test_default_is_still_act_365() -> None:
+    """The pin that makes step 3 a decision. Changing the default moves every
+    T on the day-bar path at once, so it should fail a test on the way."""
+    assert DEFAULT_DAYCOUNT is ACT_365
+    assert isinstance(DEFAULT_DAYCOUNT, CalendarDays)
+    assert DEFAULT_DAYCOUNT.days_per_year == 365.0
+
+
+def test_trading_sessions_counts_sessions_over_252(
+    session_calendar: SessionCalendar,
+) -> None:
+    bus = TradingSessions(session_calendar)
+    assert session_calendar.sessions_between(DAY, EXPIRY) == SESSIONS
+    assert bus.year_fraction(DAY, EXPIRY) == pytest.approx(SESSIONS / 252.0, rel=1e-12)
+    assert bus.name == "bus/252"
+
+
+def test_trading_sessions_refuses_past_the_horizon(
+    session_calendar: SessionCalendar,
+) -> None:
+    """Every LEAPS expiry lands here, which is why adopting this convention is
+    a decision about the long end of the book and not only about T."""
+    with pytest.raises(CalendarRangeError):
+        TradingSessions(session_calendar).year_fraction(DAY, date(2031, 12, 19))
+
+
+# ---------------------------------------------------------------------------
+# Money time
+# ---------------------------------------------------------------------------
+
+
+def test_discount_year_fraction_is_act_365() -> None:
+    assert discount_year_fraction(DAY, EXPIRY) == pytest.approx(DTE / 365.0, rel=1e-12)
+
+
+def test_discount_year_fraction_clamps_at_zero() -> None:
+    """A past or same-day expiry resolves the front of the curve rather than
+    reflecting off it into a negative tenor."""
+    assert discount_year_fraction(DAY, DAY) == 0.0
+    assert discount_year_fraction(EXPIRY, DAY) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# The seam, on the day-bar path
+# ---------------------------------------------------------------------------
+
+
+def _rate_probe():
+    """A flat rate_fn that records every tenor it is asked for."""
+    seen: list[float] = []
+
+    def rate_fn(_as_of, T):  # noqa: ANN001
+        seen.append(T)
+        return R
+
+    return rate_fn, seen
+
+
+def test_default_build_is_unchanged_act_365() -> None:
+    row = ts.build_rows(_chain_bars(), DAY, roots=("SPXW",),
+                        rate_fn=lambda _a, _t: R)[0]
+    assert row["t_years"] == pytest.approx(DTE / 365.0, rel=1e-12)
+
+
+@pytest.mark.parametrize("builder", ["term_structure", "surface"])
+def test_a_passed_convention_moves_vol_time(
+    session_calendar: SessionCalendar, builder: str
+) -> None:
+    bus = TradingSessions(session_calendar)
+    if builder == "term_structure":
+        t_years = ts.build_rows(_chain_bars(), DAY, roots=("SPXW",),
+                                rate_fn=lambda _a, _t: R, daycount=bus)[0]["t_years"]
+    else:
+        surfaces = sf.build_surfaces(_chain_bars(), DAY, roots=("SPXW",),
+                                     rate_fn=lambda _a, _t: R, daycount=bus)
+        t_years = surfaces["SPXW"].slices[0].t_years
+    assert t_years == pytest.approx(SESSIONS / 252.0, rel=1e-12)
+    assert t_years != pytest.approx(DTE / 365.0, rel=1e-6)
+
+
+@pytest.mark.parametrize("builder", ["term_structure", "surface"])
+def test_a_passed_convention_does_not_move_money_time(
+    session_calendar: SessionCalendar, builder: str
+) -> None:
+    """The one that matters. Interest accrues on weekends, so the rate tenor
+    stays ACT/365 however vol time is counted -- converting it would both
+    shorten the discount factor and read the wrong point off the Treasury
+    curve, and neither error shows up in the output.
+    """
+    bus = TradingSessions(session_calendar)
+    rate_fn, seen = _rate_probe()
+    if builder == "term_structure":
+        ts.build_rows(_chain_bars(), DAY, roots=("SPXW",),
+                      rate_fn=rate_fn, daycount=bus)
+    else:
+        sf.build_surfaces(_chain_bars(), DAY, roots=("SPXW",),
+                          rate_fn=rate_fn, daycount=bus)
+    assert seen, "rate_fn was never called"
+    assert all(t == pytest.approx(DTE / 365.0, rel=1e-12) for t in seen)
+    assert all(t != pytest.approx(SESSIONS / 252.0, rel=1e-6) for t in seen)

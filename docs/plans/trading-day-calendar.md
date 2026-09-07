@@ -4,11 +4,12 @@ Build plan for `PLAN.md` Week 1 item 2. Written 2026-09-06 against `main` at
 `8c4a422`. Scope: make time-to-expiry trading-day aware, before the HAR-RV
 forecast (item 4) and the event replay (item 7) bake ACT/365 in deeper.
 
-Status: **step 1 landed; steps 2-5 need the owner decisions below.**
-`pricing/calendar.py` ships with 22 tests, and building it turned up three
-more findings (3-5) that change what steps 3 and 4 can actually do. Step 3 is
-smaller than this plan first assumed; step 4 is larger; and neither can cover
-the whole book with today's sources.
+Status: **steps 1-2 landed; steps 3-5 need the owner decisions below.**
+`pricing/calendar.py` and `pricing/daycount.py` ship with 33 tests between
+them, and no number has moved yet. Building step 1 turned up three further
+findings (3-5) that change what steps 3 and 4 can do: step 3 is smaller than
+this plan first assumed, step 4 is larger, and neither can cover the whole
+book with today's sources.
 
 ---
 
@@ -197,11 +198,28 @@ the box's own `_meta` files committed as fixtures — so the 1048-day agreement
 pin and the real Labor Day / Thanksgiving / early-close cases run offline in
 GitHub CI, not only on the box.
 
-**Step 2 — make the convention explicit.**
-Introduce the day-count convention as a named, passed object rather than a
-module constant, defaulting to ACT/365 so this step is a **pure no-op
-refactor** with the existing tests unchanged as proof. Do not change any
-number yet.
+**Step 2 — make the convention explicit. — DONE.**
+`pricing/daycount.py` defines `DayCount` with two implementations —
+`CalendarDays` (`act/365`, the default) and `TradingSessions` (`bus/252`, on a
+`SessionCalendar`) — plus `discount_year_fraction`, the single spelling of
+money time. `build_rows` and `build_surfaces` (and both `build_for_date`
+wrappers) take `daycount=DEFAULT_DAYCOUNT`; the rate tenor in each now calls
+`discount_year_fraction` so the money-time sites are named rather than
+merely commented. `signals/spot.py`'s dividend discount is labelled the same
+way, since finding 3 flags it as the site most likely to be converted by
+mistake.
+
+Proof it is a no-op: the existing suite is unchanged and green, and rebuilding
+2026-09-04 through both `build_for_date`s reproduces the landed archive
+**bit-identically** — 105/105 `atm_term_structure` rows and 60/60
+`vol_surface` rows matching exactly on `t_years`, `rate`, `forward`,
+`atm_iv` and all five SVI parameters.
+
+The two tests worth keeping in mind for step 3 are
+`test_a_passed_convention_moves_vol_time` and
+`test_a_passed_convention_does_not_move_money_time`: passing `TradingSessions`
+must move `t_years` to sessions/252 and must leave every tenor handed to
+`rate_fn` on ACT/365.
 
 **Step 3 — business-day T on the day-bar path.**
 Switch `term_structure` and `surface` to the new convention, stamp the

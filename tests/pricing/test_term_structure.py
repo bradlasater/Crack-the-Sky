@@ -111,7 +111,9 @@ def test_recovers_the_forward_from_parity() -> None:
 
 
 def test_dte_and_t_years_are_act_365() -> None:
-    assert ts.DAYS_PER_YEAR == 365.0
+    # Was an assertion on a module constant; the default is now the convention
+    # object, and the rows below are what actually proves which one ran.
+    assert ts.DEFAULT_DAYCOUNT.name == "act/365"
     row = ts.build_rows(_chain_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate)[0]
     assert row["dte"] == DTE
     assert row["t_years"] == pytest.approx(DTE / 365.0, rel=1e-12)

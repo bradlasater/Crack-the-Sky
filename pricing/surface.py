@@ -113,8 +113,8 @@ from ingest.common.config import Settings
 from ingest.common.logging_utils import JsonlLogger
 from ingest.common.rates import load_curve, rate_for
 from ingest.jobs import forward_from_parity, parse_underlyings
+from pricing.daycount import DEFAULT_DAYCOUNT, DayCount, discount_year_fraction
 from pricing.term_structure import (
-    DAYS_PER_YEAR,
     _invert,
     _legs_by_expiry,
     bars_to_chain,
@@ -683,12 +683,16 @@ def build_surfaces(
     roots: tuple[str, ...] = SURFACE_ROOTS,
     data_root: Path | str | None = None,
     rate_fn: Any = None,
+    daycount: DayCount = DEFAULT_DAYCOUNT,
 ) -> dict[str, Surface]:
     """One Surface per root for a session; pure, so it is testable.
 
     ``rate_fn(as_of, T) -> float`` is injectable so tests need no rates
     warehouse; it defaults to the landed Treasury curve. Roots outside
     SURFACE_ROOTS are refused rather than fit under the wrong model.
+    ``daycount`` decides vol time only -- the rate tenor is money time and
+    stays ACT/365 whatever is passed. It also sets the T the calendar-arbitrage
+    guard chains on, so every slice in one fit must share it.
     """
     bad = [r for r in roots if r not in SURFACE_ROOTS]
     if bad:
@@ -706,7 +710,7 @@ def build_surfaces(
             continue
 
         def _rate_for_expiry(expiry: date) -> float:
-            return rate_fn(d, max((expiry - d).days, 0) / DAYS_PER_YEAR)
+            return rate_fn(d, discount_year_fraction(d, expiry))
 
         forwards = forward_from_parity(chain, _rate_for_expiry, asof_date=d)
         legs = _legs_by_expiry(chain)
@@ -725,7 +729,7 @@ def build_surfaces(
             # curve's, for the same reason.
             if dte <= 0:
                 continue
-            T = dte / DAYS_PER_YEAR
+            T = daycount.year_fraction(d, expiry)
             F = float(fwd["forward"])
             r = _rate_for_expiry(expiry)
             ks, ws = _expiry_points(F, T, r, legs.get(fwd["expiration_date"], {}))
@@ -784,6 +788,7 @@ def rows_from_surfaces(surfaces: dict[str, Surface]) -> list[dict[str, Any]]:
 
 def build_for_date(
     settings: Settings, d: date, roots: tuple[str, ...] = SURFACE_ROOTS,
+    daycount: DayCount = DEFAULT_DAYCOUNT,
 ) -> dict[str, Surface]:
     """Read the partition and fit one surface per root.
 
@@ -795,6 +800,7 @@ def build_for_date(
     return build_surfaces(
         read_day_bars(settings, d), d, roots, settings.data_root,
         rate_fn=lambda _as_of, T: curve.at(T),
+        daycount=daycount,
     )
 
 

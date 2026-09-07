@@ -82,7 +82,7 @@
           <tr>
             <td>Holiday calendar for T / trading-day theta</td>
             <td><span class="badge shipped">partial</span></td>
-            <td>Day-bar vol time defaults to the hybrid in <code>pricing.daycount</code>: sessions over 252 inside the attested + upcoming calendar, ACT/365 past the horizon, stamped per row on <code>atm_term_structure</code> and <code>vol_surface</code>. 252 in <code>conventions.py</code> still only rescales theta <em>output</em> units. The live path (<code>from_market.year_fraction</code>) is still ACT/365 to the settlement instant — that is step 4, not this row going red again.</td>
+            <td>Day-bar vol time defaults to the hybrid in <code>pricing.daycount</code>: sessions over 252 inside the attested + upcoming calendar, ACT/365 past the horizon, stamped per row on <code>atm_term_structure</code> and <code>vol_surface</code>. <code>TRADING_DAYS_PER_YEAR</code> (252) annualizes that session-based vol time in <code>TradingSessions.year_fraction</code> and still rescales per-trading-day theta output in <code>GreeksConventions</code> — two uses of the same constant, not the same quantity. The live path (<code>from_market.year_fraction</code>) is still ACT/365 to the settlement instant — that is step 4, not this row going red again.</td>
           </tr>
         </tbody>
       </table>

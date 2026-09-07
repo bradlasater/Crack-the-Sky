@@ -337,6 +337,36 @@ def test_hybrid_still_refuses_a_leaps_span_across_a_stale_gap(
         h.year_fraction(date(2026, 8, 27), date(2031, 12, 19))
 
 
+def test_hybrid_re_raises_an_interior_coverage_hole(
+    session_calendar: SessionCalendar,
+) -> None:
+    """A weekday missing inside attested history is not a horizon fallback.
+
+    ``sessions_between`` raises for any uncovered weekday, but the stale-gap
+    scan only looks after ``max(sessions)``. Without this check the hybrid
+    would catch that raise and return ACT/365 -- fail-open on a corrupted
+    calendar, on the 5-45 DTE book. Re-raise instead.
+    """
+    hole = date(2025, 6, 11)
+    assert hole.weekday() == 2
+    assert session_calendar.sessions[hole] is True
+    broken = SessionCalendar(
+        sessions={d: v for d, v in session_calendar.sessions.items()
+                  if d != hole},
+        holidays=session_calendar.holidays,
+        early_closes=session_calendar.early_closes,
+        forward_from=session_calendar.forward_from,
+        forward_through=session_calendar.forward_through,
+    )
+    h = HybridSessions(TradingSessions(broken))
+    with pytest.raises(CalendarRangeError, match="not covered"):
+        h.year_fraction(date(2025, 6, 10), date(2025, 6, 12))
+    with pytest.raises(CalendarRangeError, match="not covered"):
+        h.name_for(date(2025, 6, 10), date(2025, 6, 12))
+    # A span that does not include the hole still resolves.
+    assert h.name_for(date(2025, 6, 12), date(2025, 6, 13)) == "bus/252"
+
+
 def test_hybrid_falls_back_across_the_healthy_weekend_gap(
     session_calendar: SessionCalendar,
 ) -> None:

@@ -129,37 +129,51 @@ class HybridSessions:
     archive mixing this whole change is trying to avoid.
 
     The fallback covers the horizon only. :class:`CalendarRangeError` also
-    means a weekday stranded *between* attested history and the forward
-    window, which is not a shape of the book but a sync job that has stopped
-    running -- and it strikes the short end, where a one-session error in T is
-    largest. Swallowing that would downgrade the 5-45 DTE book to ACT/365 and
-    call it a normal day, so an interior gap is re-raised: the one refusal
-    ``SessionCalendar`` makes that nothing here should be able to paper over.
+    means a weekday the calendar should have answered: a key missing
+    *inside* attested history (corrupted coverage), or a weekday stranded
+    *between* attested history and the forward window (a sync job that has
+    stopped running). Both strike the short end, where a one-session error
+    in T is largest. Swallowing either would downgrade the 5-45 DTE book to
+    ACT/365 and call it a normal day, so those holes are re-raised: the one
+    refusal ``SessionCalendar`` makes that nothing here should be able to
+    paper over.
     """
 
     sessions: TradingSessions
     fallback: CalendarDays = ACT_365
     name: str = "hybrid"
 
-    def _spans_stale_gap(self, start: date, end: date) -> bool:
-        """True when ``(start, end]`` contains a weekday no source reaches.
+    def _spans_coverage_hole(self, start: date, end: date) -> bool:
+        """True when ``(start, end]`` contains a weekday the calendar should have answered.
 
-        The hole runs from the day after attested history to the day before
-        the forward window opens, and only a *weekday* in it counts: the
-        steady-state hole is exactly the Saturday between the Saturday and
-        Sunday jobs, which needs no coverage and must not strand the LEAPS
-        tail that happens to span it. A weekday in there is the stale-job
-        signal, and it is the reason this is a scan and not a bounds test.
+        Two shapes, neither a shape of the book:
+
+        * an interior hole -- a weekday inside attested history missing from
+          the map.
+        * a stale gap -- a weekday after attested history and before the
+          forward window opens.
+
+        Only a *weekday* counts: the healthy Saturday between the Saturday
+        and Sunday jobs needs no coverage and must not strand the LEAPS tail
+        that happens to span it. Before-history and after-horizon misses are
+        the fallback, not this.
         """
         calendar = self.sessions.calendar
         if not calendar.sessions:
             return False
-        # sessions_between consults the half-open (start, end].
-        day = max(start + timedelta(days=1), max(calendar.sessions) + timedelta(days=1))
-        through = min(end, calendar.forward_from - timedelta(days=1))
+        attested_lo = min(calendar.sessions)
+        attested_hi = max(calendar.sessions)
+        # Holes live inside attested history or in the stale gap; past the
+        # horizon is the fallback and is not scanned.
+        hole_through = max(attested_hi, calendar.forward_from - timedelta(days=1))
+        day = start + timedelta(days=1)
+        through = min(end, hole_through)
         while day <= through:
             if is_weekday(day):
-                return True
+                if attested_lo <= day <= attested_hi and day not in calendar.sessions:
+                    return True
+                if attested_hi < day < calendar.forward_from:
+                    return True
             day += timedelta(days=1)
         return False
 
@@ -167,7 +181,7 @@ class HybridSessions:
         try:
             return self.sessions.year_fraction(start, end), self.sessions.name
         except CalendarRangeError:
-            if self._spans_stale_gap(start, end):
+            if self._spans_coverage_hole(start, end):
                 raise
             return self.fallback.year_fraction(start, end), self.fallback.name
 

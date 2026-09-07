@@ -6,6 +6,22 @@ conservative audit pass. Grouped by area, roughly highest-value first.
 
 ## Correctness / silent-failure risks
 
+- `pricing/surface.py` (whole module) — **the landed SVI archive is not
+  reproducible.** Rebuilding one session with identical code and inputs but a
+  different BLAS thread count returns different parameters: measured on
+  2026-09-04, 1 thread vs 8 moved 397 of 720 values, `svi_rho` by up to
+  2.24e-03 relative and `svi_a`/`svi_m` by ~2e-05, while `rms_error` moved by
+  <1e-09 — the optimiser lands elsewhere in a flat basin, so the fit is equally
+  good and the parameters are not the same numbers. `atm_term_structure` is
+  unaffected (scalar Brent inversion, no BLAS). Consequences: a rebuild cannot
+  be diffed against the existing archive to measure a deliberate change (the
+  convention change in `docs/plans/trading-day-calendar.md` hits this
+  directly), and the backtester cannot reproduce the inputs a decision was made
+  on. Fix: pin `OMP_NUM_THREADS`/`OPENBLAS_NUM_THREADS` for the `surface` job
+  and `scripts/build_surface.py` — in the systemd unit or `cronjob.sh`, so the
+  pin is part of the schedule rather than the caller's environment. Record the
+  pinned value with the rows if reproducibility is meant to survive a hardware
+  change.
 - `ingest/common/cli.py:205` — a job whose summary dict contains a reserved key
   (`rows`, `bytes`, `job`, `duration_s`) crashes `job_end` logging *after*
   succeeding, turning a good run into `job_error` + a `/fail` ping. Latent

@@ -4,7 +4,8 @@ Build plan for `PLAN.md` Week 1 item 2. Written 2026-09-06 against `main` at
 `8c4a422`. Scope: make time-to-expiry trading-day aware, before the HAR-RV
 forecast (item 4) and the event replay (item 7) bake ACT/365 in deeper.
 
-Status: **steps 1-2 landed; steps 3-5 need the owner decisions below.**
+Status: **steps 1-2 landed, step 3 half-landed; the rest needs the owner
+decisions below.**
 `pricing/calendar.py` and `pricing/daycount.py` ship with 33 tests between
 them, and no number has moved yet. Building step 1 turned up three further
 findings (3-5) that change what steps 3 and 4 can do: step 3 is smaller than
@@ -93,28 +94,68 @@ because it is a third site the original table missed; it must *not* convert,
 and naming it here is cheaper than someone later converting it by
 pattern-matching on the constant.
 
-### Finding 4 — the forward horizon does not cover the book
+### Finding 4 — the forward horizon does not cover the long tail
 
 `holidays.json` reaches 2027-07-05, roughly ten months out. The landed
 datasets reach much further: on 2026-09-04 the maximum DTE in both
 `atm_term_structure` and `vol_surface` is **1932** (SPX LEAPS, ~5.3 years).
-Rows expiring past the horizon are **14 of 105 (13%)** on the ATM curve and
-**9 of 60 (15%)** on the surface; rows inside the 5-45 DTE book are about
-half of each.
 
-`pricing.calendar` raises past its horizon by design, so step 3 cannot simply
-switch the whole fit to session counts — it would fail on one row in seven.
-That is a new owner decision (6 below), not a bug in either piece.
+Measured across the whole archive rather than one session — the first cut of
+this finding quoted 13%/15% from 2026-09-04 alone, which overstates it badly,
+because a 2023 session's long-dated expiries are attested history by now:
+
+| Dataset | Rows past the horizon | Rows in the 5-45 DTE book past it |
+|---|---|---|
+| `atm_term_structure` | 3,722 / 101,467 (**3.7%**) | **0 / 42,953** |
+| `vol_surface` | 1,587 / 36,201 (**4.4%**) | **0 / 16,797** |
+
+Worst single session: 13.7% and 15.5%, both recent. So the horizon binds only
+on the LEAPS tail, and **never** on the book the strategy trades. That makes
+the hybrid in decision 4 cheap rather than a compromise.
 
 ### Finding 5 — early-close history is recorded nowhere
 
 `trading_days.json` records whether a past date *was* a session, never how
 long it ran, and `holidays.json` only carries early closes inside its
 upcoming window. So the four `early-close` records visible today are the
-only ones the archive has: a half-day weighting (decision 4) is not
+only ones the archive has: a half-day weighting (decision 6) is not
 computable over the backtest period from anything currently on disk.
 `SessionCalendar.is_early_close` raises outside the window rather than
 reporting a past half day as a full one, which keeps the gap visible.
+
+### Finding 6 — the convention stamp forces an atomic rebuild
+
+`marketdata/catalog.validate_arrow_schema` is fail-loud on *both* extra and
+missing columns (`catalog.py:191`). Adding a `daycount` column to
+`atm_term_structure` and `vol_surface` therefore makes all 1,656 existing
+partitions unreadable the moment the schema lands — `load_surface`,
+`coverage_audit`, `drift_check` and the two daily jobs all start raising
+`SchemaError` until every partition has been rewritten.
+
+So step 3 is not "a two-line change plus a stamp". The schema change, the full
+archive rebuild, and the deploy have to land as one operation, and the
+scheduled `term_structure` (Tue-Sat 12:00), `surface` (12:15) and
+`coverage_audit` (12:30) jobs must not fire in between. Options are in decision
+5 below. Making the column nullable and tolerating its absence would dodge this
+— and would also reintroduce exactly the unstamped rows the stamp exists to
+prevent, so it is not really an option.
+
+### Finding 7 — the SVI archive is not reproducible, which breaks the measurement
+
+Rebuilding one session with identical code and inputs but a different BLAS
+thread count returns different parameters. Measured on 2026-09-04, 1 thread
+against 8: **397 of 720 values moved**, `svi_rho` by up to 2.24e-03 relative,
+`svi_a` and `svi_m` by ~2e-05 — while `rms_error` moved by less than 1e-09.
+The optimiser lands elsewhere in a flat basin: the fit is equally good, the
+parameters are not the same numbers. `atm_term_structure` is unaffected, being
+a scalar Brent inversion with no BLAS underneath.
+
+This bites step 3 directly. "Quantify the real distribution across the archive
+before merging" means diffing a rebuild against the existing archive, and that
+diff is dominated by this noise unless the thread count is pinned first. It
+also means the backtester cannot reproduce the inputs a decision was made on.
+Logged in `IMPROVEMENTS.md`; **the pin should land before the step-3 rebuild,
+not after**, or the measurement is not worth taking.
 
 ---
 
@@ -149,7 +190,17 @@ reporting a past half day as a full one, which keeps the gap visible.
    exactly the guessing step 1 refuses to do); or restrict the landed
    datasets to the horizon. Recommendation: **hybrid, stamped per row.**
 
-5. **Half days.**
+5. **Cutover for the schema change** (from finding 6). Options: (a) merge, then
+   rebuild in place and accept a multi-hour window where every reader raises;
+   (b) rebuild into a staging `DATA_ROOT` under the new code, then swap the two
+   `clean/` subtrees and deploy — readers see the old archive until the swap,
+   and the swap is a rename; (c) drop the stamp and lose the ability to tell
+   the conventions apart. Recommendation: **(b)**, run outside the 12:00-12:30
+   job window, with the `prune`/`coverage_audit` timers stopped for the swap.
+   This touches production data on a live box, so it is an owner call, not a
+   code one.
+
+6. **Half days.**
    `holidays.json` carries 4 `early-close` records (13:00 ET) alongside 20
    `closed`. Two consequences: a business-day count may want to weight an
    early close below 1.0, and — separately — `expiry_instant`
@@ -221,7 +272,20 @@ The two tests worth keeping in mind for step 3 are
 must move `t_years` to sessions/252 and must leave every tenor handed to
 `rate_fn` on ACT/365.
 
-**Step 3 — business-day T on the day-bar path.**
+**Step 3 — business-day T on the day-bar path. — HALF LANDED.**
+
+Landed: `HybridSessions` (sessions where the calendar can vouch for the span,
+ACT/365 beyond it, per decision 4) and `DayCount.name_for`, which reports the
+convention that actually produced one row rather than the convention's own
+name — the two differ precisely when the hybrid falls back, and a row that
+could not say which it got is the silent mixing this plan is trying to avoid.
+`hybrid_for(data_root)` builds it from the box's calendar files. Nothing is
+switched over: `DEFAULT_DAYCOUNT` is still ACT/365.
+
+Blocked on decision 5: the schema stamp and the default flip, because finding
+6 makes those inseparable from a full rebuild and a production cutover.
+
+The original plan for the rest:
 Switch `term_structure` and `surface` to the new convention, stamp the
 convention into the landed rows, and rebuild the archive with
 `scripts/build_term_structure.py` / `build_surface.py`. Expect IVs to move:
@@ -231,6 +295,30 @@ swings either way on one session. The short end is worse, where weekends
 dominate: 5 DTE spanning a weekend is `3/252 = 0.0119` vs `5/365 = 0.0137`,
 **−13.1% on T**. Quantify the real distribution across the archive before
 merging, not after.
+
+**Measured**, over all 97,743 `atm_term_structure` (date, expiry) pairs the
+hybrid converts — 3,724 more stay on ACT/365. ΔIV is the shift implied by
+holding the observed price fixed, where an ATM option gives σ ∝ 1/√T:
+
+| DTE | pairs | ΔT median | ΔT p5 | ΔT p95 | ΔIV median | ΔIV p5 | ΔIV p95 |
+|---|---|---|---|---|---|---|---|
+| 0–7 | 10,808 | +3.5% | −42.1% | +44.8% | −1.69% | −16.91% | +31.38% |
+| 8–30 | 27,585 | +0.3% | −13.1% | +12.7% | −0.14% | −5.78% | +7.27% |
+| 31–45 | 10,075 | +0.3% | −7.2% | +6.7% | −0.14% | −3.20% | +3.78% |
+| 46–90 | 9,872 | +0.6% | −5.0% | +3.9% | −0.29% | −1.90% | +2.61% |
+| 91–365 | 31,507 | −0.3% | −2.1% | +1.9% | +0.16% | −0.92% | +1.08% |
+| 366+ | 7,896 | −0.4% | −1.0% | +0.1% | +0.21% | −0.04% | +0.49% |
+
+The medians are ~0 everywhere, which is the reassuring part: 252/365 and
+sessions/calendar-days cancel, so this is not a level shift. The content is in
+the *dispersion*. Inside the 5-45 DTE book, IV moves by 3-7% at the tails
+purely on where the weekends and holidays fall — which is the artifact the
+change exists to remove, now sized rather than asserted. Below 8 DTE it is
+violent (±17-31%), which is worth knowing before anything trades that tenor.
+
+Note the surface's own distribution is *not* measurable this way — finding 7
+means a refit differs from the landed archive by optimiser noise regardless of
+convention, so the thread pin has to land first.
 
 Measured against the box on 2026-09-06, from `pricing.calendar` itself
 (as-of Sunday 2026-09-06, so the Labor Day week is in every window):

@@ -21,6 +21,8 @@ from pricing.daycount import (
     ACT_365,
     DEFAULT_DAYCOUNT,
     CalendarDays,
+    DayCount,
+    HybridSessions,
     TradingSessions,
     discount_year_fraction,
 )
@@ -187,3 +189,50 @@ def test_a_passed_convention_does_not_move_money_time(
     assert seen, "rate_fn was never called"
     assert all(t == pytest.approx(DTE / 365.0, rel=1e-12) for t in seen)
     assert all(t != pytest.approx(SESSIONS / 252.0, rel=1e-6) for t in seen)
+
+
+# ---------------------------------------------------------------------------
+# The hybrid: sessions where the calendar can vouch, ACT/365 beyond
+# ---------------------------------------------------------------------------
+
+
+def test_hybrid_uses_sessions_inside_the_horizon(
+    session_calendar: SessionCalendar,
+) -> None:
+    h = HybridSessions(TradingSessions(session_calendar))
+    assert h.year_fraction(DAY, EXPIRY) == pytest.approx(SESSIONS / 252.0, rel=1e-12)
+    assert h.name_for(DAY, EXPIRY) == "bus/252"
+
+
+def test_hybrid_falls_back_beyond_the_horizon(
+    session_calendar: SessionCalendar,
+) -> None:
+    """A LEAPS expiry keeps the convention it already had rather than being
+    refused -- and says so, so the two kinds of row stay distinguishable."""
+    leaps = date(2031, 12, 19)
+    h = HybridSessions(TradingSessions(session_calendar))
+    assert h.year_fraction(DAY, leaps) == pytest.approx(
+        ACT_365.year_fraction(DAY, leaps), rel=1e-12)
+    assert h.name_for(DAY, leaps) == "act/365"
+
+
+def test_hybrid_falls_back_before_attested_history(
+    session_calendar: SessionCalendar,
+) -> None:
+    old = date(2019, 3, 14)
+    h = HybridSessions(TradingSessions(session_calendar))
+    assert h.year_fraction(old, date(2019, 4, 18)) == pytest.approx(35 / 365.0, rel=1e-12)
+    assert h.name_for(old, date(2019, 4, 18)) == "act/365"
+
+
+def test_simple_conventions_report_their_own_name() -> None:
+    """``name_for`` is what a row stamps; for a convention that never falls
+    back it is just ``name``, on every pair."""
+    assert ACT_365.name_for(DAY, EXPIRY) == ACT_365.name == "act/365"
+    assert ACT_365.name_for(date(1999, 1, 1), date(2099, 1, 1)) == "act/365"
+
+
+def test_hybrid_satisfies_the_protocol(session_calendar: SessionCalendar) -> None:
+    for conv in (ACT_365, TradingSessions(session_calendar),
+                 HybridSessions(TradingSessions(session_calendar))):
+        assert isinstance(conv, DayCount)

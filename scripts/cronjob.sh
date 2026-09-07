@@ -9,10 +9,9 @@
 # diff against the schedule to notice. A job with no headroom left is exactly
 # the thing that should be visible before it becomes a job that stops.
 #
-# `-E 99` separates "could not take the lock" from "the job itself failed",
-# so a skip logs a structured job_skipped event and exits 0 (a skip is not a
-# failure, and must not trip MAILTO), while a real failure keeps its own exit
-# code and reaches Healthchecks as it always did.
+# The lock is taken on fd 9 *before* the command runs, so a skip is "flock
+# refused" rather than a magic exit code. Wrapping with `flock -n -E 99` used
+# to treat a command that exited 99 as job_skipped and swallow it to 0.
 #
 # BLAS threads are pinned because the SVI fit is not reproducible without it.
 # Same code, same inputs, 1 thread against 8, on 2026-09-04: 397 of 720
@@ -45,13 +44,14 @@ JOB="$1"
 shift
 LOCK="/tmp/massive-${JOB}.lock"
 
-flock -n -E 99 "$LOCK" "$@"
-rc=$?
-
-if [ "$rc" -eq 99 ]; then
+# Hold the lock on this shell's fd 9, then run the command in this same
+# process. The command's exit status cannot be confused with "lock not taken".
+exec 9>"$LOCK"
+if ! flock -n 9; then
   printf '{"ts":"%s","event":"job_skipped","job":"%s","reason":"previous run still holds %s"}\n' \
     "$(date -Is)" "$JOB" "$LOCK"
   exit 0
 fi
 
-exit "$rc"
+"$@"
+exit $?

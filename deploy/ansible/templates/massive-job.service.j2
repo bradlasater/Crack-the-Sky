@@ -28,7 +28,7 @@ StartLimitIntervalSec=1800
 Type=oneshot
 WorkingDirectory=%h/crack-the-sky
 EnvironmentFile=-%h/crack-the-sky/.env
-# cronjob.sh is the overlap-safety mechanism: flock -n -E 99 -> job_skipped ->
+# cronjob.sh is the overlap-safety mechanism: lock not taken -> job_skipped ->
 # exit 0, so a timer fire while the crontab run still holds /tmp/massive-<job>.lock
 # is a logged no-op, never a second concurrent run.
 ExecStart=/bin/bash %h/crack-the-sky/scripts/cronjob.sh {{ item.job }} {% if item.command[0] == '-m' or item.command[0].endswith('.py') %}%h/crack-the-sky/venv/bin/python {% endif %}{{ item.command | join(' ') }}

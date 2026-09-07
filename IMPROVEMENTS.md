@@ -50,9 +50,10 @@ conservative audit pass. Grouped by area, roughly highest-value first.
 - `ingest/jobs/grouped_daily.py:76` — an empty `records` on a trading day logs
   `grouped_empty` and exits 0 (green healthcheck). Consider failing when the
   response has results but none of the wanted tickers matched.
-- `scripts/cronjob.sh:29` — exit-code collision: if the wrapped command exits
-  99 it is misreported as `job_skipped` and exits 0. Latent (jobs only exit
-  0/1/2/3 today). Use a rarer code or a lock-taken marker file.
+- `scripts/cronjob.sh` — **fixed**: the lock is taken on fd 9 before the
+  command runs, so a wrapped process that exits 99 is no longer misreported
+  as `job_skipped` and swallowed to 0. A skip is "flock refused", not a
+  magic exit code.
 - `marketdata/opra.py:106` vs `ingest/jobs/__init__.py:85` — two OPRA year-pivot
   decoders disagree on `yy >= 80` (19xx vs 20xx). Unreachable today; hoist one
   shared decoder before the universe widens.

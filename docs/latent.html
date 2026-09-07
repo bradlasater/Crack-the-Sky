@@ -97,7 +97,7 @@
           </tr>
           <tr>
             <td class="job">scripts/cronjob.sh</td>
-            <td>If the wrapped command exits 99 it is misreported as <code>job_skipped</code> and exits 0. Latent (jobs only exit 0/1/2/3 today).</td>
+            <td><strong>fixed</strong>: the lock is taken on fd 9 before the command runs, so an exit 99 from the job is no longer misreported as <code>job_skipped</code>.</td>
           </tr>
           <tr>
             <td class="job">snapshot_sweep</td>

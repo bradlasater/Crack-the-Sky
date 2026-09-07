@@ -196,7 +196,7 @@
       "command": ["bash", "scripts/prune_raw.sh", "--apply"],
       "cron": ["15 03 1 * *"],
       "on_calendar": ["*-*-01 03:15:00"],
-      "healthchecks": null,
+      "healthchecks": {"schedule": "15 3 1 * *", "grace_min": 180, "desc": "Monthly prune of rebuildable raw payloads"},
       "restart": {"sec": 300}
     }
   ],

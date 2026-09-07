@@ -87,8 +87,8 @@
           </tr>
           <tr>
             <td class="job">massive-snapshot-sweep</td>
-            <td>The irreplaceable dataset missed a minute (or a chain 403'd the whole run).</td>
-            <td>That minute is gone. Do not repair. Check the other chains landed; see <a href="latent.html">latent holes</a> for the all-chains-fail retry.</td>
+            <td>The irreplaceable dataset missed a minute (every chain failed, or the job died).</td>
+            <td>That minute is gone. Do not repair. A single chain 403 no longer fails the run; <code>massive-snapshot-sweep-all-chains</code> pages by absence if one chain stays down longer than the grace.</td>
           </tr>
           <tr>
             <td class="job">massive-ws-minute-bars / _alive</td>
@@ -136,8 +136,8 @@
       <h2 id="red-disk">Disk / prune</h2>
       <p>
         Monthly <code>massive-prune</code> runs <code>bash scripts/prune_raw.sh --apply</code>
-        at 03:15 on the 1st. It is <strong>deliberately unmonitored</strong> —
-        no Healthchecks block, so a silent skip is possible. Dry-run first.
+        at 03:15 on the 1st. It pings <code>massive-prune</code> (and the unit has
+        <code>OnFailure=</code> for deaths the script cannot report). Dry-run first.
         Drops raw payloads older than <code>RETAIN_DAYS</code> (90) only when
         the manifest records a replacing flat file with rows kept. Never
         <code>clean/</code>, snapshots, or <code>raw/flatfiles</code> unless

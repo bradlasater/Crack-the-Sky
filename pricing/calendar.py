@@ -180,8 +180,11 @@ def load_session_calendar(
         try:
             sessions[date.fromisoformat(key)] = was_session
         except ValueError:
-            # An unparseable key attests to nothing; dropping it makes the date
-            # uncovered, which raises when asked about rather than guessing.
+            # An unparseable key names no date at all, so it attests to nothing
+            # and cannot be the sole record for a day: dropping it loses no
+            # coverage, and the rest of the file still loads. A *missing*
+            # attested date is the different case, and is left uncovered so
+            # that asking about it raises rather than guessing.
             continue
 
     holidays = load_holidays(data_root)

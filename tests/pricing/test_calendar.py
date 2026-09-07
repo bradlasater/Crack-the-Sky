@@ -244,12 +244,43 @@ def test_newest_raw_partition_wins(data_root: Path) -> None:
 
 
 def test_unparseable_attested_key_is_dropped(data_root: Path) -> None:
-    """A bad key attests to nothing, so it is dropped rather than failing the
-    whole load. The date it meant is then uncovered, which raises when asked
-    about -- the loud outcome, not the weekday rule's guess."""
+    """A bad key names no date, so it attests to nothing and is dropped rather
+    than failing the whole load.
+
+    Dropping it costs no coverage precisely because there is no date it could
+    have been the record for -- every real key still loads, and the calendar
+    answers as it did. The neighbouring test covers the case that *does* lose
+    coverage: a real attested date going missing.
+    """
     meta = data_root / "_meta" / "trading_days.json"
     days = json.loads(meta.read_text(encoding="utf-8"))
     days["2024-13-45"] = True
     meta.write_text(json.dumps(days), encoding="utf-8")
+
     calendar = load_session_calendar(data_root)
+
     assert len(calendar.sessions) == 1048
+    assert all(isinstance(d, date) for d in calendar.sessions)
+    assert calendar.is_session(ATTESTED_THROUGH) is True
+
+
+def test_a_dropped_attested_date_becomes_uncovered(data_root: Path) -> None:
+    """The chain the load path is actually responsible for: a date the file
+    stops attesting to is left uncovered, and asking about it raises.
+
+    ``ATTESTED_THROUGH`` is the case with teeth. It is the Friday before the
+    holiday window opens, so once its record is gone no source reaches it --
+    and the weekday rule would happily call it a session, which is the guess
+    this module exists to refuse.
+    """
+    meta = data_root / "_meta" / "trading_days.json"
+    days = json.loads(meta.read_text(encoding="utf-8"))
+    assert days.pop(ATTESTED_THROUGH.isoformat()) is True
+    meta.write_text(json.dumps(days), encoding="utf-8")
+
+    calendar = load_session_calendar(data_root)
+
+    assert ATTESTED_THROUGH not in calendar.sessions
+    assert ATTESTED_THROUGH.weekday() < 5
+    with pytest.raises(CalendarRangeError, match="not covered"):
+        calendar.is_session(ATTESTED_THROUGH)

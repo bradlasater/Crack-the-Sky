@@ -47,13 +47,13 @@ from ingest.common.config import Settings
 from ingest.common.logging_utils import JsonlLogger
 from ingest.jobs import latest_clean_records, partition_dates, read_partition
 from pricing.bsm import resolve_q
+from pricing.daycount import discount_year_fraction
 
 JOB = "spy_spot"
 DATASET = "spy_spot"
 ROOT = "SPY"
 SRC_BARS = "bars"
 SRC_PARITY = "parity"
-DAYS_PER_YEAR = 365.0
 CALIBRATION_NAME = "spy_spot_calibration.json"
 # Residual as a fraction of the median |daily SPY move|. Above this, a
 # realised-vol estimator that treats the parity-only tail as observed spot
@@ -85,7 +85,9 @@ def pv_dividends(
             continue
         if amount <= 0 or not (session < ex <= expiry):
             continue
-        t = (ex - session).days / DAYS_PER_YEAR
+        # Money time: this discounts a dividend, and cash accrues on
+        # weekends. Never a session count -- see pricing/daycount.py.
+        t = discount_year_fraction(session, ex)
         total += amount * math.exp(-float(r) * t)
     return total
 

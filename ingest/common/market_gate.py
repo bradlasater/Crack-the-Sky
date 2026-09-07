@@ -31,6 +31,14 @@ ET = ZoneInfo(os.environ.get("TZ_NAME", "America/New_York"))
 REGULAR_CLOSE = time(16, 0)
 EARLY_CLOSE = time(13, 0)
 
+# The two calendar files under _meta, and the only two the repo has. They look
+# alike and answer opposite questions: holidays.json is the vendor's *upcoming*
+# window (forward, partial), trading_days.json is history_audit's accumulated
+# record of which past dates the vendor published a flat file for (backward,
+# attested). pricing.calendar is what unions them.
+HOLIDAYS_NAME = "holidays.json"
+CALENDAR_NAME = "trading_days.json"
+
 # Capture has to outlive the close by two independent margins, so the buffer
 # is derived from them rather than picked. A flat "close + 20" looked generous
 # and silently truncated every session:
@@ -78,9 +86,13 @@ def is_weekday(d: date) -> bool:
     return d.weekday() < 5
 
 
-def _holidays_file(data_root: str | os.PathLike[str] | None) -> Path:
+def _meta_file(name: str, data_root: str | os.PathLike[str] | None) -> Path:
     root = Path(data_root) if data_root is not None else _default_data_root()
-    return root / "_meta" / "holidays.json"
+    return root / "_meta" / name
+
+
+def _holidays_file(data_root: str | os.PathLike[str] | None) -> Path:
+    return _meta_file(HOLIDAYS_NAME, data_root)
 
 
 def _load_records(data_root: str | os.PathLike[str] | None = None) -> list[dict]:
@@ -114,6 +126,32 @@ def load_early_closes(data_root: str | os.PathLike[str] | None = None) -> set[da
         if status == "early-close" or rec.get("early_close"):
             out.add(date.fromisoformat(rec["date"]))
     return out
+
+
+def load_calendar(data_root: str | os.PathLike[str] | None = None) -> dict[str, bool]:
+    """Cached ``{date: was_a_session}`` answers from previous history audits.
+
+    Written by ``ingest.jobs.history_audit``; it lives here rather than in the
+    job because ``pricing`` and ``scripts/build_*`` read it too, and importing
+    a job module to reach a file loader inverts the layering.
+    """
+    path = _meta_file(CALENDAR_NAME, data_root)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {k: bool(v) for k, v in data.items()} if isinstance(data, dict) else {}
+
+
+def save_calendar(
+    calendar: dict[str, bool], data_root: str | os.PathLike[str] | None = None
+) -> Path:
+    """Persist the verified trading-day calendar, newest answers included."""
+    path = _meta_file(CALENDAR_NAME, data_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(dict(sorted(calendar.items())), indent=2) + "\n",
+                    encoding="utf-8")
+    return path
 
 
 def is_trading_day(d: date, data_root: str | os.PathLike[str] | None = None) -> bool:

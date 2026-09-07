@@ -55,15 +55,17 @@ from ingest.jobs import (
     parse_option_ticker,
     parse_underlyings,
 )
+from pricing.daycount import DEFAULT_DAYCOUNT, DayCount, discount_year_fraction
 from pricing.iv import implied_vol
 
 JOB = "term_structure"
 DATASET = "atm_term_structure"
 SRC = "day_bars"
 
-# ACT/365, matching pricing/conventions. 252 is a constant elsewhere in the
-# repo, not a calendar, so nothing here is trading-day aware.
-DAYS_PER_YEAR = 365.0
+# No DAYS_PER_YEAR here any more, deliberately: one module-level constant is
+# what let vol time and money time share a denominator without saying so.
+# Money time is ``discount_year_fraction``; vol time is the passed
+# ``daycount``. See pricing/daycount.py.
 
 
 def bars_to_chain(rows: list[dict[str, Any]], root: str) -> list[dict[str, Any]]:
@@ -138,11 +140,14 @@ def build_rows(
     roots: tuple[str, ...] = OPTION_ROOTS,
     data_root: Path | str | None = None,
     rate_fn: Any = None,
+    daycount: DayCount = DEFAULT_DAYCOUNT,
 ) -> list[dict[str, Any]]:
     """ATM term-structure records for one session; pure, so it is testable.
 
     ``rate_fn(as_of, T) -> float`` is injectable so tests need no rates
-    warehouse; it defaults to the landed Treasury curve.
+    warehouse; it defaults to the landed Treasury curve. ``daycount`` decides
+    vol time only -- the rate tenor is money time and stays ACT/365 whatever
+    is passed.
     """
     if rate_fn is None:
         def rate_fn(as_of: date, T: float) -> float:  # noqa: ANN001
@@ -155,7 +160,7 @@ def build_rows(
             continue
 
         def _rate_for_expiry(expiry: date, _root: str = root) -> float:
-            return rate_fn(d, max((expiry - d).days, 0) / DAYS_PER_YEAR)
+            return rate_fn(d, discount_year_fraction(d, expiry))
 
         forwards = forward_from_parity(chain, _rate_for_expiry, asof_date=d)
         legs = _legs_by_expiry(chain)
@@ -168,7 +173,7 @@ def build_rows(
             # term-structure row without an IV is not, so it is skipped.
             if dte <= 0:
                 continue
-            T = dte / DAYS_PER_YEAR
+            T = daycount.year_fraction(d, expiry)
             F = float(fwd["forward"])
             r = _rate_for_expiry(expiry)
 
@@ -250,6 +255,7 @@ def write_rows(settings: Settings, d: date, rows: list[dict[str, Any]]) -> Path:
 
 def build_for_date(
     settings: Settings, d: date, roots: tuple[str, ...] = OPTION_ROOTS,
+    daycount: DayCount = DEFAULT_DAYCOUNT,
 ) -> list[dict[str, Any]]:
     """Read the partition and reduce it to term-structure rows.
 
@@ -265,6 +271,7 @@ def build_for_date(
     return build_rows(
         read_day_bars(settings, d), d, roots, settings.data_root,
         rate_fn=lambda _as_of, T: curve.at(T),
+        daycount=daycount,
     )
 
 

@@ -29,11 +29,14 @@ under ``/ping``, so it must be set to ``https://hc.example.internal/ping``.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
 from collections.abc import Callable, Mapping
 from datetime import date
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -136,6 +139,36 @@ def healthcheck_url(settings: Settings, job_name: str) -> tuple[str | None, bool
     return None, False
 
 
+_SCHEDULE_JSON = Path(__file__).resolve().parents[2] / "deploy" / "schedule.json"
+
+
+@lru_cache(maxsize=1)
+def _extra_checks_by_owner() -> dict[str, tuple[str, ...]]:
+    """job_name -> extra Healthchecks owned by that job (deploy/schedule.json)."""
+    try:
+        data = json.loads(_SCHEDULE_JSON.read_text(encoding="utf-8"))
+        extras = data.get("extra_checks") or {}
+    except (OSError, json.JSONDecodeError, TypeError, AttributeError):
+        return {}
+    owned: dict[str, list[str]] = {}
+    for name, check in extras.items():
+        owner = check.get("owner") if isinstance(check, dict) else None
+        if isinstance(owner, str) and owner:
+            owned.setdefault(owner, []).append(name)
+    return {job: tuple(names) for job, names in owned.items()}
+
+
+def owned_extra_checks(job_name: str) -> tuple[str, ...]:
+    """Extra checks this job must settle on a holiday skip.
+
+    cron fires Mon-Fri regardless of the market calendar. Job-owned extra
+    checks still have weekday schedules, so a SystemExit(0) from
+    ``require_trading_day`` that only settles the primary check would page
+    them on every weekday holiday.
+    """
+    return _extra_checks_by_owner().get(job_name, ())
+
+
 def ping(
     url: str | None,
     suffix: str = "",
@@ -219,6 +252,17 @@ def run_job(job_name: str, main_fn: MainFn, argv: list[str] | None = None) -> No
             if code == 0:
                 ping(ping_url, "", autocreate,
                      body=f"{job_name} exited early (not a trading day, or nothing to do)")
+                # Extra checks are pinged from main_fn, which never runs on
+                # this path. Settle them here so a weekday holiday does not
+                # breach their grace. Do not ping them on a successful run:
+                # snapshot_sweep withholds the all-chains ping when any chain
+                # failed, and that decision lives in main_fn.
+                for extra in owned_extra_checks(job_name):
+                    extra_url, extra_create = healthcheck_url(settings, extra)
+                    ping(
+                        extra_url, "", extra_create,
+                        body=f"{extra} skipped (not a trading day)",
+                    )
             else:
                 ping(ping_url, "/fail", autocreate,
                      body=f"{job_name} exited {code} after {duration_s}s")

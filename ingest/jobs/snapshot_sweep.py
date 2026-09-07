@@ -38,7 +38,7 @@ from itertools import islice
 
 from ingest import schemas
 from ingest.common import landing
-from ingest.common.cli import run_job
+from ingest.common.cli import healthcheck_url, ping, run_job
 from ingest.common.config import Settings
 from ingest.common.http_client import MassiveClient
 from ingest.common.logging_utils import JsonlLogger
@@ -48,6 +48,15 @@ from ingest.jobs import forward_from_parity, parse_underlyings, run_date_from_ar
 JOB = "snapshot_sweep"
 DEFAULT_UNDERLYINGS = ["SPY", "I:SPX", "VIX"]
 SNAPSHOT_PATH = "/v3/snapshot/options"
+
+# Slug for the second check, pinged only when every chain came back clean.
+# The job's own check cannot carry this: a partial failure has to report
+# success (see _main_fn), so a chain that is down on every single run keeps
+# massive-snapshot-sweep green forever. Pinging a separate check only on a
+# fully clean sweep turns Healthchecks' grace period into the alert -- one
+# transient failure is absorbed by the next minute's clean run, and a chain
+# down for longer than the grace stops the pings and pages.
+ALL_CHAINS_JOB = "snapshot_sweep_all_chains"
 
 
 def _sweep_underlying(
@@ -207,6 +216,21 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger, eod: bool, write_raw
         raise failures[0][1]
 
     totals["errors"] = len(failures)
+
+    # Alert on *sustained* partial capture, not on a single bad chain. At a
+    # 1-minute cadence, pinging /fail on any failure would page on every
+    # transient 429; withholding this ping instead lets the check's grace
+    # window decide how long a chain may stay down before it matters.
+    #
+    # Skipped on a dry run, which lands nothing and so cannot attest that the
+    # capture is healthy.
+    if underlyings and not failures and not args.dry_run:
+        url, autocreate = healthcheck_url(settings, ALL_CHAINS_JOB)
+        ping(
+            url, "", autocreate,
+            body=f"{len(underlyings)} chains clean: {totals['rows']} rows",
+        )
+
     return totals
 
 

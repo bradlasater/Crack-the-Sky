@@ -241,7 +241,10 @@ def test_every_scheduled_job_is_monitored() -> None:
 # Checks that are pinged by a running job rather than started by cron. Each
 # needs an owning cron job, or it is exactly the never-pinged check the test
 # above exists to prevent.
-JOB_PINGED_CHECKS = {"ws_minute_bars_alive": "ws_minute_bars"}
+JOB_PINGED_CHECKS = {
+    "ws_minute_bars_alive": "ws_minute_bars",
+    "snapshot_sweep_all_chains": "snapshot_sweep",
+}
 
 
 def test_no_monitoring_for_unscheduled_jobs() -> None:
@@ -267,6 +270,17 @@ def test_liveness_check_slug_matches_what_the_job_pings() -> None:
     mod = _setup_module()
     assert LIVENESS_JOB in mod.JOBS
     assert mod.slug_for(LIVENESS_JOB) == cli.healthcheck_slug(LIVENESS_JOB)
+
+
+def test_all_chains_check_slug_matches_what_the_job_pings() -> None:
+    """Same contract for the sweep's degraded-capture check: a slug the job and
+    the setup script disagree on is a check that silently never gets pinged --
+    and this one alerts by the *absence* of pings, so it would page nightly."""
+    from ingest.jobs.snapshot_sweep import ALL_CHAINS_JOB
+
+    mod = _setup_module()
+    assert ALL_CHAINS_JOB in mod.JOBS
+    assert mod.slug_for(ALL_CHAINS_JOB) == cli.healthcheck_slug(ALL_CHAINS_JOB)
 
 
 def test_eod_dayaggs_is_deliberately_unmonitored() -> None:
@@ -370,6 +384,16 @@ def _suffixes(rec: _Recorder) -> list[str]:
     return out
 
 
+def _slugs(rec: _Recorder) -> list[str]:
+    """massive-* slug of each ping, ignoring /start|/fail and ?create=1."""
+    out = []
+    for url, _ in rec.calls:
+        path = url.split("?", 1)[0]
+        last = path.rsplit("/", 1)[-1]
+        out.append(path.rsplit("/", 2)[-2] if last in ("start", "fail") else last)
+    return out
+
+
 def test_holiday_exit_still_sends_a_terminal_ping(tmp_path, monkeypatch, recorder):
     """A market holiday must not leave the check hung.
 
@@ -387,6 +411,66 @@ def test_holiday_exit_still_sends_a_terminal_ping(tmp_path, monkeypatch, recorde
         cli.run_job("contracts_sync", lambda a, s, log: {"rows": 0}, [])
     assert excinfo.value.code == 0
     assert _suffixes(recorder) == ["/start", ""], "expected start then success"
+
+
+def test_holiday_exit_settles_owned_extra_checks(tmp_path, monkeypatch, recorder):
+    """Job-owned extra checks have weekday schedules too.
+
+    The all-chains ping lives in snapshot_sweep's main_fn, which never runs
+    when the market gate exits. Without a skip ping here, a chain-health
+    check that alerts by absence would page on every weekday holiday.
+    """
+    settings = _settings(tmp_path, healthchecks_ping_key="KEY")
+    monkeypatch.setattr(cli.Settings, "load", classmethod(lambda cls: settings))
+    monkeypatch.setattr(cli.market_gate, "require_trading_day",
+                        lambda *a, **k: sys.exit(0))
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.run_job("snapshot_sweep", lambda a, s, log: {"rows": 0}, [])
+    assert excinfo.value.code == 0
+    assert _slugs(recorder) == [
+        "massive-snapshot-sweep",
+        "massive-snapshot-sweep",
+        "massive-snapshot-sweep-all-chains",
+    ]
+    assert _suffixes(recorder) == ["/start", "", ""]
+    assert b"not a trading day" in recorder.calls[-1][1]
+
+
+def test_success_does_not_auto_ping_owned_extra_checks(tmp_path, monkeypatch, recorder):
+    """A green primary run must not attest extra checks.
+
+    snapshot_sweep withholds the all-chains ping on a partial failure from
+    inside main_fn; run_job must not undo that on the success path.
+    """
+    settings = _settings(tmp_path, healthchecks_ping_key="KEY")
+    monkeypatch.setattr(cli.Settings, "load", classmethod(lambda cls: settings))
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.run_job("snapshot_sweep", lambda a, s, log: {"rows": 7}, [])
+    assert excinfo.value.code == 0
+    assert _slugs(recorder) == ["massive-snapshot-sweep", "massive-snapshot-sweep"]
+
+
+def test_nonzero_systemexit_does_not_settle_owned_extra_checks(
+    tmp_path, monkeypatch, recorder
+):
+    settings = _settings(tmp_path, healthchecks_ping_key="KEY")
+    monkeypatch.setattr(cli.Settings, "load", classmethod(lambda cls: settings))
+
+    def boom(a, s, log):
+        sys.exit(3)
+
+    with pytest.raises(SystemExit):
+        cli.run_job("snapshot_sweep", boom, [])
+    assert _slugs(recorder) == ["massive-snapshot-sweep", "massive-snapshot-sweep"]
+    assert _suffixes(recorder) == ["/start", "/fail"]
+
+
+def test_owned_extra_checks_follow_schedule_owners() -> None:
+    for check, owner in JOB_PINGED_CHECKS.items():
+        assert check in cli.owned_extra_checks(owner)
+    assert cli.owned_extra_checks("contracts_sync") == ()
 
 
 def test_nonzero_systemexit_pings_fail(tmp_path, monkeypatch, recorder):

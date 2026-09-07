@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from ingest.common import cli
 from ingest.common.cli import _is_retryable
 from ingest.common.config import Settings
 from ingest.common.http_client import MassiveHTTPError
@@ -31,11 +32,12 @@ RUN_DATE = "2026-09-04"
 UNDERLYINGS = "SPY,I:SPX,VIX"
 
 
-def _settings(data_root: Path) -> Settings:
+def _settings(data_root: Path, ping_key: str | None = None) -> Settings:
     return Settings(
         massive_api_key="test-key",
         data_root=data_root,
         log_root=data_root / "logs",
+        healthchecks_ping_key=ping_key,
     )
 
 
@@ -201,3 +203,76 @@ def test_no_underlyings_is_not_an_every_chain_failure(
     assert summary["errors"] == 0
     assert summary["rows"] == 0
     assert fetched == []
+
+
+# ---------------------------------------------------------------------------
+# Degraded-capture alerting
+#
+# A partial failure has to report success, so the job's own check stays green
+# even for a chain that is down on every run. The second check closes that:
+# it is pinged only when every chain came back clean, which makes its grace
+# window the thing that decides how long a chain may be down before it pages.
+# Alerting by absence rather than by /fail is deliberate -- at a 1-minute
+# cadence, failing on any bad chain would page on every transient 429.
+# ---------------------------------------------------------------------------
+
+ALL_CHAINS_SLUG = "massive-snapshot-sweep-all-chains"
+
+
+class _PingRecorder:
+    """Captures healthcheck pings instead of hitting the network."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, bytes]] = []
+
+    def __call__(self, url, data=None, timeout=None):
+        self.calls.append((url, data or b""))
+
+    def slugs(self) -> list[str]:
+        return [url.rstrip("/").rsplit("/", 1)[-1].split("?")[0]
+                for url, _ in self.calls]
+
+
+def _run_with_pings(tmp_path: Path, monkeypatch, broken: set[str], **over):
+    rec = _PingRecorder()
+    monkeypatch.setattr(cli.requests, "post", rec)
+    monkeypatch.setattr(job, "MassiveClient", _client_factory(broken))
+    settings = _settings(tmp_path, ping_key="test-ping-key")
+    logger = JsonlLogger(path=None, echo=False)
+    summary = job._main_fn(_args(**over), settings, logger, False, False)
+    return summary, rec
+
+
+def test_a_clean_sweep_pings_the_all_chains_check(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _summary, rec = _run_with_pings(tmp_path, monkeypatch, set())
+    assert rec.slugs() == [ALL_CHAINS_SLUG]
+    assert b"3 chains clean" in rec.calls[0][1]
+
+
+def test_a_partial_failure_withholds_the_all_chains_ping(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The whole point: the run still succeeds, but the check goes unpinged, so
+    a chain that stays down eventually breaches the grace and alerts."""
+    summary, rec = _run_with_pings(tmp_path, monkeypatch, {"VIX"})
+    assert summary["errors"] == 1  # the run itself reports success
+    assert rec.slugs() == []  # and the degraded-capture check hears nothing
+
+
+def test_a_dry_run_does_not_ping_the_all_chains_check(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A dry run lands nothing, so it cannot attest the capture is healthy."""
+    _summary, rec = _run_with_pings(tmp_path, monkeypatch, set(), dry_run=True)
+    assert rec.slugs() == []
+
+
+def test_a_sweep_with_no_underlyings_does_not_ping(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Zero chains is not zero failures -- "all clean" would be a lie that
+    resets the grace window and masks a real outage for its duration."""
+    _summary, rec = _run_with_pings(tmp_path, monkeypatch, set(), underlying=",")
+    assert rec.slugs() == []

@@ -1,0 +1,154 @@
+[
+  {
+    "date": "2026-09-07",
+    "exchange": "NASDAQ",
+    "name": "Labor Day",
+    "status": "closed"
+  },
+  {
+    "date": "2026-09-07",
+    "exchange": "NYSE",
+    "name": "Labor Day",
+    "status": "closed"
+  },
+  {
+    "date": "2026-11-26",
+    "exchange": "NYSE",
+    "name": "Thanksgiving",
+    "status": "closed"
+  },
+  {
+    "date": "2026-11-26",
+    "exchange": "NASDAQ",
+    "name": "Thanksgiving",
+    "status": "closed"
+  },
+  {
+    "date": "2026-11-27",
+    "exchange": "NYSE",
+    "name": "Thanksgiving",
+    "status": "early-close",
+    "open": "2026-11-27T14:30:00.000Z",
+    "close": "2026-11-27T18:00:00.000Z"
+  },
+  {
+    "date": "2026-11-27",
+    "exchange": "NASDAQ",
+    "name": "Thanksgiving",
+    "status": "early-close",
+    "open": "2026-11-27T14:30:00.000Z",
+    "close": "2026-11-27T18:00:00.000Z"
+  },
+  {
+    "date": "2026-12-24",
+    "exchange": "NYSE",
+    "name": "Christmas",
+    "status": "early-close",
+    "open": "2026-12-24T14:30:00.000Z",
+    "close": "2026-12-24T18:00:00.000Z"
+  },
+  {
+    "date": "2026-12-24",
+    "exchange": "NASDAQ",
+    "name": "Christmas",
+    "status": "early-close",
+    "open": "2026-12-24T14:30:00.000Z",
+    "close": "2026-12-24T18:00:00.000Z"
+  },
+  {
+    "date": "2026-12-25",
+    "exchange": "NYSE",
+    "name": "Christmas",
+    "status": "closed"
+  },
+  {
+    "date": "2026-12-25",
+    "exchange": "NASDAQ",
+    "name": "Christmas",
+    "status": "closed"
+  },
+  {
+    "date": "2027-01-01",
+    "exchange": "NYSE",
+    "name": "New Years Day",
+    "status": "closed"
+  },
+  {
+    "date": "2027-01-01",
+    "exchange": "NASDAQ",
+    "name": "New Years Day",
+    "status": "closed"
+  },
+  {
+    "date": "2027-01-18",
+    "exchange": "NASDAQ",
+    "name": "Martin Luther King, Jr. Day",
+    "status": "closed"
+  },
+  {
+    "date": "2027-01-18",
+    "exchange": "NYSE",
+    "name": "Martin Luther King, Jr. Day",
+    "status": "closed"
+  },
+  {
+    "date": "2027-02-15",
+    "exchange": "NASDAQ",
+    "name": "Washington's Birthday",
+    "status": "closed"
+  },
+  {
+    "date": "2027-02-15",
+    "exchange": "NYSE",
+    "name": "Washington's Birthday",
+    "status": "closed"
+  },
+  {
+    "date": "2027-03-26",
+    "exchange": "NYSE",
+    "name": "Good Friday",
+    "status": "closed"
+  },
+  {
+    "date": "2027-03-26",
+    "exchange": "NASDAQ",
+    "name": "Good Friday",
+    "status": "closed"
+  },
+  {
+    "date": "2027-05-31",
+    "exchange": "NASDAQ",
+    "name": "Memorial Day",
+    "status": "closed"
+  },
+  {
+    "date": "2027-05-31",
+    "exchange": "NYSE",
+    "name": "Memorial Day",
+    "status": "closed"
+  },
+  {
+    "date": "2027-06-18",
+    "exchange": "NASDAQ",
+    "name": "Juneteenth",
+    "status": "closed"
+  },
+  {
+    "date": "2027-06-18",
+    "exchange": "NYSE",
+    "name": "Juneteenth",
+    "status": "closed"
+  },
+  {
+    "date": "2027-07-05",
+    "exchange": "NASDAQ",
+    "name": "Independence Day",
+    "status": "closed"
+  },
+  {
+    "date": "2027-07-05",
+    "exchange": "NYSE",
+    "name": "Independence Day",
+    "status": "closed"
+  }
+]

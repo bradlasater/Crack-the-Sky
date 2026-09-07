@@ -81,7 +81,7 @@
           <tr>
             <td>Holiday calendar for T / trading-day theta</td>
             <td><span class="badge missing">not built</span></td>
-            <td>Pricing T is still ACT/365 and 252 is still a constant, not a calendar — nothing here is trading-day aware. A verified <em>historical</em> calendar does now exist as a by-product of <code>history_audit</code> (<code>_meta/trading_days.json</code>, every weekday since 2022-08-31 marked session or holiday against the vendor), so the input for trading-day theta is available even though nothing consumes it. The ingest gate still uses <code>_meta/holidays.json</code>, which only covers upcoming dates.</td>
+            <td>Pricing T is still ACT/365 and 252 is still a constant that only rescales theta <em>output</em> units — no T in any pricing formula is trading-day aware, which is what keeps this row red. The calendar itself is now built: <code>pricing.calendar</code> answers <code>is_session</code> and <code>sessions_between</code> in both directions, unioning <code>history_audit</code>'s attested history (<code>_meta/trading_days.json</code>, 1048 weekdays since 2022-08-31 marked session or holiday against the vendor) with weekday-minus-holidays over the <code>_meta/holidays.json</code> upcoming window, and raising rather than guessing outside both. Nothing consumes it yet; adopting it moves every T and every theta, so it lands as its own change.</td>
           </tr>
         </tbody>
       </table>

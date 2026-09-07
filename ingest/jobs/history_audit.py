@@ -43,9 +43,12 @@ from ingest.common.cli import run_job
 from ingest.common.config import Settings
 from ingest.common.logging_utils import JsonlLogger
 
+# Moved to market_gate so pricing/ can read the calendar without importing a
+# job module; re-exported here for scripts/build_*.py and existing callers.
+from ingest.common.market_gate import CALENDAR_NAME, load_calendar, save_calendar  # noqa: F401
+
 JOB = "history_audit"
 COVERAGE_NAME = "history_coverage.json"
-CALENDAR_NAME = "trading_days.json"
 
 # Clean datasets flatfile_pull is responsible for, keyed by the flat-file
 # dataset that produces them. Every one of these must be present on a session
@@ -96,24 +99,6 @@ def _partition_has_rows(settings: Settings, dataset: str, d: date) -> bool:
         except Exception:  # noqa: BLE001 - an unreadable file is not presence
             continue
     return False
-
-
-def load_calendar(data_root: Path | str | None = None) -> dict[str, bool]:
-    """Cached ``{date: was_a_session}`` answers from previous audits."""
-    path = landing.meta_path(CALENDAR_NAME, data_root=data_root)
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return {k: bool(v) for k, v in data.items()} if isinstance(data, dict) else {}
-
-
-def save_calendar(calendar: dict[str, bool], data_root: Path | str | None = None) -> Path:
-    """Persist the verified trading-day calendar, newest answers included."""
-    path = landing.meta_path(CALENDAR_NAME, data_root=data_root)
-    path.write_text(json.dumps(dict(sorted(calendar.items())), indent=2) + "\n",
-                    encoding="utf-8")
-    return path
 
 
 def candidate_days(start: date, end: date) -> list[date]:

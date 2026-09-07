@@ -66,13 +66,14 @@ def test_unit_schema_and_uniqueness() -> None:
 
 def test_every_job_has_exactly_one_healthcheck_block() -> None:
     """Shared-slug variants (--expired, --eod) ping the parent job's check, so
-    the block lives on exactly one unit per job; bash jobs (prune) are
-    deliberately unmonitored and have none."""
-    for u in UNITS:
-        if u["command"][0] == "bash":
-            assert u["healthchecks"] is None, f"{u['unit']}: shell jobs are unmonitored"
+    the block lives on exactly one unit per job. Every scheduled job is
+    monitored, including the bash prune job."""
     jobs_with_block = [u["job"] for u in UNITS if u["healthchecks"] is not None]
     assert len(jobs_with_block) == len(set(jobs_with_block)), "one healthchecks block per job"
+    assert set(jobs_with_block) == {u["job"] for u in UNITS}, (
+        "scheduled but unmonitored: "
+        + str(sorted({u["job"] for u in UNITS} - set(jobs_with_block)))
+    )
 
 
 def test_extra_checks_are_owned_by_scheduled_jobs() -> None:
@@ -123,6 +124,15 @@ def test_restart_only_where_the_next_tick_is_far_away() -> None:
             assert unit["restart"] is not None, (
                 f"{unit['unit']}: {fires} fires/day, a failure otherwise waits for the next tick"
             )
+
+
+def test_prune_is_monitored_on_its_monthly_schedule() -> None:
+    prune = next(u for u in UNITS if u["job"] == "prune")
+    assert prune["command"][0] == "bash"
+    assert prune["healthchecks"] is not None
+    assert prune["healthchecks"]["schedule"] == "15 3 1 * *"
+    assert prune["cron"] == ["15 03 1 * *"]
+    assert prune["healthchecks"]["grace_min"] == 180
 
 
 # ---------------------------------------------------------------------------

@@ -9,8 +9,9 @@ Wants=network-online.target
 # The job pings Healthchecks /fail itself on any non-zero exit (ingest.common.cli);
 # this hook covers the deaths it cannot report (OOM kill, unit start failure,
 # exhausted restart budget). The instance is the check slug, so the --expired /
-# --eod variants alert on the same check their job pings. Unmonitored jobs
-# (prune) get no hook: the alert unit would autocreate a check nobody wants.
+# --eod variants alert on the same check their job pings. Jobs with no
+# healthchecks block get no hook: the alert unit would autocreate a check
+# nobody wants.
 OnFailure=massive-alert@massive-{{ item.job | replace('_', '-') }}.service
 {% endif -%}
 {% if item.restart -%}

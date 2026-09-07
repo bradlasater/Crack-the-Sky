@@ -64,13 +64,13 @@ conservative audit pass. Grouped by area, roughly highest-value first.
 
 ## Monitoring gaps
 
-- `deploy/schedule.json` (`prune` entry) + `deploy/crontab:148` — the monthly
-  `prune` job is deliberately unmonitored: it has no `healthchecks` block, so
-  no Healthchecks check exists. `tests/test_schedule.py:59` currently requires
-  shell jobs to remain unmonitored, and the Healthchecks parity test excludes
-  them. Add ping support to `prune_raw.sh` or `cronjob.sh`, update those tests,
-  and give the entry a `healthchecks` block; the generated unit will then gain
-  a maintained `OnFailure=` target as well.
+- `deploy/schedule.json` (`prune` entry) — **fixed**: the monthly prune job
+  has a `healthchecks` block (`15 3 1 * *`, 180 min grace). `cronjob.sh`
+  pings `/start` and success/`/fail` for `bash *.sh` commands, so the
+  crontab fallback and the systemd unit share one definition. The generated
+  unit now also gets `OnFailure=massive-alert@massive-prune`. Re-run
+  `scripts/setup_healthchecks.py` on the box so the check is created with
+  the monthly schedule; an auto-created check would default to daily.
 - `pricing/drift_check.py:811` — `date.fromisoformat(args.date)` runs before
   the logger and `/start` ping, so a malformed `--date` dies with a bare
   traceback and no Healthchecks signal. Decide: argparse `type=` validation

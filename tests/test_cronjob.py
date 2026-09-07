@@ -12,6 +12,8 @@ import subprocess
 import uuid
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[1]
 CRONJOB = REPO / "scripts" / "cronjob.sh"
 
@@ -73,3 +75,128 @@ def test_lock_held_logs_skip_and_exits_0() -> None:
     finally:
         holder.kill()
         holder.wait(timeout=5)
+
+
+def _fake_curl(tmp_path: Path) -> tuple[str, Path]:
+    log = tmp_path / "curl.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    curl = bin_dir / "curl"
+    curl.write_text(
+        "#!/bin/bash\n"
+        f"printf '%s\\n' \"$*\" >> '{log}'\n"
+        "exit 0\n"
+    )
+    curl.chmod(0o755)
+    return str(bin_dir), log
+
+
+def _sh(tmp_path: Path, rc: int) -> Path:
+    script = tmp_path / "job.sh"
+    script.write_text(f"#!/bin/bash\nexit {rc}\n")
+    script.chmod(0o755)
+    return script
+
+
+def test_bash_script_job_pings_start_then_success(tmp_path: Path) -> None:
+    job = _job_name()
+    bin_dir, log = _fake_curl(tmp_path)
+    script = _sh(tmp_path, 0)
+    result = _run(
+        job, "bash", str(script),
+        env={
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "HEALTHCHECKS_PING_KEY": "KEY",
+            "HEALTHCHECKS_BASE": "https://hc.example.internal/ping",
+        },
+    )
+    assert result.returncode == 0
+    lines = log.read_text().splitlines()
+    assert len(lines) == 2, lines
+    slug = "massive-" + job.replace("_", "-")
+    assert f"https://hc.example.internal/ping/KEY/{slug}/start?create=1" in lines[0]
+    assert f"https://hc.example.internal/ping/KEY/{slug}?create=1" in lines[1]
+
+
+def test_bash_script_job_pings_fail_on_nonzero(tmp_path: Path) -> None:
+    job = _job_name()
+    bin_dir, log = _fake_curl(tmp_path)
+    script = _sh(tmp_path, 3)
+    result = _run(
+        job, "bash", str(script),
+        env={
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "HEALTHCHECKS_PING_KEY": "KEY",
+            "HEALTHCHECKS_BASE": "https://hc.example.internal/ping",
+        },
+    )
+    assert result.returncode == 3
+    lines = log.read_text().splitlines()
+    assert len(lines) == 2, lines
+    slug = "massive-" + job.replace("_", "-")
+    assert f"/{slug}/start?create=1" in lines[0]
+    assert f"/{slug}/fail?create=1" in lines[1]
+
+
+def test_bash_c_does_not_ping(tmp_path: Path) -> None:
+    """`bash -c` is how tests take the lock, not a scheduled shell job."""
+    job = _job_name()
+    bin_dir, log = _fake_curl(tmp_path)
+    result = _run(
+        job, "bash", "-c", "exit 0",
+        env={
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "HEALTHCHECKS_PING_KEY": "KEY",
+        },
+    )
+    assert result.returncode == 0
+    assert not log.exists()
+
+
+def test_python_job_does_not_get_wrapper_ping(tmp_path: Path) -> None:
+    job = _job_name()
+    bin_dir, log = _fake_curl(tmp_path)
+    result = _run(
+        job, "true",
+        env={
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "HEALTHCHECKS_PING_KEY": "KEY",
+        },
+    )
+    assert result.returncode == 0
+    assert not log.exists()
+
+
+def test_skip_does_not_ping(tmp_path: Path) -> None:
+    job = _job_name()
+    lock = f"/tmp/massive-{job}.lock"
+    bin_dir, log = _fake_curl(tmp_path)
+    script = _sh(tmp_path, 0)
+    holder = subprocess.Popen(
+        ["bash", "-c", f"exec 9>'{lock}'; flock 9; printf 'HELD\\n'; sleep 60"],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "HELD"
+        result = _run(
+            job, "bash", str(script),
+            env={
+                "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                "HEALTHCHECKS_PING_KEY": "KEY",
+            },
+        )
+        assert result.returncode == 0
+        assert '"event":"job_skipped"' in result.stdout
+        assert not log.exists()
+    finally:
+        holder.kill()
+        holder.wait(timeout=5)
+
+
+def test_wrapper_slug_matches_python_healthcheck_slug() -> None:
+    from ingest.common.cli import healthcheck_slug
+
+    assert healthcheck_slug("prune") == "massive-prune"
+    assert healthcheck_slug("snapshot_sweep") == "massive-snapshot-sweep"

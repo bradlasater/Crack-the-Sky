@@ -114,7 +114,7 @@
         <tbody>
           <tr>
             <td class="job">prune</td>
-            <td>Monthly <code>prune_raw.sh --apply</code> is deliberately unmonitored: no <code>healthchecks</code> block, so no check exists. Tests currently require shell jobs to stay that way. A skipped prune will not page. See <a href="red-day.html#red-disk">red day / disk</a>.</td>
+            <td><strong>fixed</strong>: monthly <code>prune_raw.sh --apply</code> has a Healthchecks check. <code>cronjob.sh</code> pings it for <code>bash *.sh</code> jobs; the generated unit has <code>OnFailure=massive-alert@massive-prune</code>. See <a href="red-day.html#red-disk">red day / disk</a>.</td>
           </tr>
           <tr>
             <td class="job">drift_check --date</td>

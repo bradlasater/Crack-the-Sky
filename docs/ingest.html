@@ -270,7 +270,7 @@
             <td class="job">prune_raw.sh --apply</td>
             <td class="when">03:15 on the 1st</td>
             <td>Monthly</td>
-            <td>Drops raw payloads older than <code>RETAIN_DAYS</code> (90) for rebuildable datasets. Never touches <code>clean/</code>, snapshots, flatfiles, or reference. No Healthcheck (bash, not <code>ingest.jobs</code>).</td>
+            <td>Drops raw payloads older than <code>RETAIN_DAYS</code> (90) for rebuildable datasets. Never touches <code>clean/</code>, snapshots, flatfiles, or reference. Pings <code>massive-prune</code> from <code>cronjob.sh</code> (bash, not <code>ingest.jobs</code>).</td>
           </tr>
           <tr>
             <td class="job">rates_sync<br><span class="tag rest">rest</span></td>

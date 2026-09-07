@@ -43,6 +43,68 @@ fi
 JOB="$1"
 shift
 LOCK="/tmp/massive-${JOB}.lock"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Python jobs ping from ingest.common.cli.run_job. Bash jobs (prune) do not,
+# so this wrapper pings for a `bash *.sh` command. `bash -c` is left alone:
+# that is how tests (and ad-hoc one-liners) invoke the lock, not a scheduled
+# job. A skip does not ping -- the holder of the lock owns the in-flight run.
+_is_shell_job=0
+if [ "${1:-}" = "bash" ]; then
+  case "${2:-}" in
+    *.sh) _is_shell_job=1 ;;
+  esac
+fi
+
+_load_hc_env() {
+  # Crontab does not source .env; systemd EnvironmentFile does. Fill only
+  # variables that are unset. Empty-but-set must win so tests cannot leak a
+  # real ping against production.
+  local envf line key val
+  envf="$REPO_ROOT/.env"
+  [ -f "$envf" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      HEALTHCHECKS_PING_KEY=*|HEALTHCHECKS_BASE=*)
+        key="${line%%=*}"
+        if [ "$key" = "HEALTHCHECKS_PING_KEY" ] && [ -n "${HEALTHCHECKS_PING_KEY+x}" ]; then
+          continue
+        fi
+        if [ "$key" = "HEALTHCHECKS_BASE" ] && [ -n "${HEALTHCHECKS_BASE+x}" ]; then
+          continue
+        fi
+        val="${line#*=}"
+        val="${val%$'\r'}"
+        val="${val#\"}"
+        val="${val%\"}"
+        val="${val#\'}"
+        val="${val%\'}"
+        export "$key=$val"
+        ;;
+    esac
+  done < "$envf"
+}
+
+_hc_ping() {
+  # $1 suffix (/start, /fail, or empty)  $2 optional body
+  # Never fails the job: monitoring must not be able to fail the thing it
+  # monitors, matching ingest.common.cli.ping.
+  local suffix="${1:-}"
+  local body="${2:-}"
+  local base slug url
+  [ -z "${HEALTHCHECKS_PING_KEY:-}" ] && return 0
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "warning: healthcheck ping skipped: curl not found" >&2
+    return 0
+  fi
+  base="${HEALTHCHECKS_BASE:-https://hc-ping.com}"
+  base="${base%/}"
+  slug="massive-$(printf '%s' "$JOB" | tr 'A-Z' 'a-z' | tr '_' '-')"
+  url="${base}/${HEALTHCHECKS_PING_KEY}/${slug}${suffix}?create=1"
+  curl -sS -m 5 -o /dev/null --data "$body" "$url" 2>/dev/null || \
+    echo "warning: healthcheck ping failed" >&2
+  return 0
+}
 
 # Hold the lock on this shell's fd 9, then run the command in this same
 # process. The command's exit status cannot be confused with "lock not taken".
@@ -53,5 +115,20 @@ if ! flock -n 9; then
   exit 0
 fi
 
+if [ "$_is_shell_job" -eq 1 ]; then
+  _load_hc_env
+  _hc_ping "/start"
+fi
+
 "$@"
-exit $?
+rc=$?
+
+if [ "$_is_shell_job" -eq 1 ]; then
+  if [ "$rc" -eq 0 ]; then
+    _hc_ping "" "$JOB ok"
+  else
+    _hc_ping "/fail" "$JOB exited $rc"
+  fi
+fi
+
+exit "$rc"

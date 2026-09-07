@@ -77,6 +77,7 @@ def _market_is_open(monkeypatch) -> None:
         ("snapshot_sweep", "massive-snapshot-sweep"),
         ("coverage_audit", "massive-coverage-audit"),
         ("ws_minute_bars", "massive-ws-minute-bars"),
+        ("prune", "massive-prune"),
     ],
 )
 def test_slug_is_per_job_and_hyphenated(job: str, slug: str) -> None:
@@ -212,16 +213,12 @@ def _setup_module():
 
 
 def _scheduled_jobs() -> set[str]:
-    """Jobs actually scheduled in deploy/schedule.json (the timers' source).
-
-    Shell jobs (prune) stay out: they are deliberately unmonitored and listed
-    nowhere in JOBS.
-    """
+    """Jobs actually scheduled in deploy/schedule.json (the timers' source)."""
     import json
     schedule = json.loads(
         (Path(__file__).resolve().parents[1] / "deploy" / "schedule.json").read_text()
     )
-    return {u["job"] for u in schedule["units"] if u["command"][0] != "bash"}
+    return {u["job"] for u in schedule["units"]}
 
 
 def test_setup_script_slugs_match_the_runtime() -> None:

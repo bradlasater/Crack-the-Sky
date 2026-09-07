@@ -75,10 +75,16 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   the logger and `/start` ping, so a malformed `--date` dies with a bare
   traceback and no Healthchecks signal. Decide: argparse `type=` validation
   (exit 2 to cron mail) or logging against a fallback date.
-- `ingest/jobs/snapshot_sweep.py:149` — one failing chain (e.g. VIX 403s) fails
-  the whole run; the in-process retry re-fetches SPY+SPX and lands duplicate
-  per-underlying files. Land per-chain successes and fail only if all chains
-  fail, like `trades_watchlist` does.
+- `ingest/jobs/snapshot_sweep.py` — **fixed**: chains now fail independently.
+  One bad chain is recorded and the rest still land; the run fails only when
+  every chain does. Previously a single failure discarded the chains that had
+  already succeeded *and* had `run_job` retry the whole sweep, re-fetching them
+  into a second parquet for the same minute — duplicate rows in the one dataset
+  that cannot be backfilled. What remains is a monitoring gap rather than a
+  data one: a partial failure returns success, so a chain failing on every run
+  keeps a green Healthchecks check and shows up only as `chain_error` lines in
+  the JSONL and a non-zero `errors` in `job_end`. Alerting on that count is not
+  wired to anything.
 
 ## Performance
 

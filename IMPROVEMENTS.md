@@ -17,11 +17,16 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   be diffed against the existing archive to measure a deliberate change (the
   convention change in `docs/plans/trading-day-calendar.md` hits this
   directly), and the backtester cannot reproduce the inputs a decision was made
-  on. Fix: pin `OMP_NUM_THREADS`/`OPENBLAS_NUM_THREADS` for the `surface` job
-  and `scripts/build_surface.py` — in the systemd unit or `cronjob.sh`, so the
-  pin is part of the schedule rather than the caller's environment. Record the
-  pinned value with the rows if reproducibility is meant to survive a hardware
-  change.
+  on. **Pinned going forward** in `scripts/cronjob.sh` (every scheduled job,
+  so the systemd timers and the crontab fallback share one definition) and in
+  `scripts/build_surface.py`, which is run directly and must set it above the
+  `pricing` import because OpenBLAS reads its thread count once, at load.
+  What remains: every `vol_surface` partition landed before this was built
+  unpinned, so the archive is only reproducible from the rebuild onward —
+  the staging rebuild in `docs/plans/trading-day-calendar.md` decision 5 is
+  what regenerates it under a known thread count. Recording the pinned value
+  with the rows would also be needed for reproducibility to survive a hardware
+  change; not done.
 - `ingest/common/cli.py:205` — a job whose summary dict contains a reserved key
   (`rows`, `bytes`, `job`, `duration_s`) crashes `job_end` logging *after*
   succeeding, turning a good run into `job_error` + a `/fail` ping. Latent

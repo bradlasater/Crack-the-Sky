@@ -113,7 +113,14 @@ from ingest.common.config import Settings
 from ingest.common.logging_utils import JsonlLogger
 from ingest.common.rates import load_curve, rate_for
 from ingest.jobs import forward_from_parity, parse_underlyings
-from pricing.daycount import DEFAULT_DAYCOUNT, DayCount, discount_year_fraction
+from pricing.daycount import (
+    DEFAULT_DAYCOUNT,
+    DayCount,
+    DayCountStampError,
+    discount_year_fraction,
+    hybrid_for,
+    require_daycount_stamps,
+)
 from pricing.term_structure import (
     _invert,
     _legs_by_expiry,
@@ -498,6 +505,7 @@ class Slice:
     rms_error: float
     min_g: float
     rate: float
+    daycount: str
 
     def total_variance(self, k: float) -> float:
         d = k - self.m
@@ -544,12 +552,14 @@ class Surface:
                 )
 
     def vol(self, K: float, T: float) -> float:
-        """Implied vol at strike ``K`` and time ``T`` years (ACT/365).
+        """Implied vol at strike ``K`` and time ``T`` years.
 
-        Linear in total variance between the bracketing expiries, each slice
-        evaluated at its own forward's log-moneyness; the nearest slice is
-        held flat outside the fitted term range. T landing exactly on a fitted
-        expiry returns that slice, bit-for-bit.
+        ``T`` must be in the same vol-time convention as the landed slices
+        (stamped on each row as ``daycount``). Linear in total variance
+        between the bracketing expiries, each slice evaluated at its own
+        forward's log-moneyness; the nearest slice is held flat outside the
+        fitted term range. T landing exactly on a fitted expiry returns that
+        slice, bit-for-bit.
         """
         if K <= 0 or T <= 0:
             raise ValueError(f"K and T must be positive, got K={K} T={T}")
@@ -584,6 +594,10 @@ class Surface:
         """
         if not rows:
             raise SurfaceError("no vol_surface rows")
+        try:
+            require_daycount_stamps(rows, context="vol_surface")
+        except DayCountStampError as exc:
+            raise SurfaceError(str(exc)) from exc
         dates = {str(r["date"])[:10] for r in rows}
         underlyings = {str(r["underlying"]) for r in rows}
         if len(dates) != 1 or len(underlyings) != 1:
@@ -625,6 +639,7 @@ def _slice_from_row(row: dict[str, Any]) -> Slice:
         rms_error=float(row["rms_error"]),
         min_g=float(row["min_g"]),
         rate=float(row["rate"]),
+        daycount=str(row["daycount"]),
     )
 
 
@@ -661,12 +676,15 @@ def _expiry_points(
 def _fit_expiry(
     expiry: str, dte: int, T: float, F: float, r: float,
     ks: list[float], ws: list[float],
+    stamp: str,
     floor: Any = None, cal_grid: np.ndarray | None = None,
 ) -> Slice:
     """Fit one expiry's filtered OTM points and assemble its Slice.
 
     ``floor``/``cal_grid`` chain the calendar constraint from the previously
-    fitted slice; see :func:`fit_slice`.
+    fitted slice; see :func:`fit_slice`. ``stamp`` is ``name_for`` of the
+    convention that produced ``T`` -- stamped at fit time so a later rebuild
+    of the calendar cannot relabel the row.
     """
     fit = fit_slice(ks, ws, floor=floor, cal_grid=cal_grid)
     return Slice(
@@ -674,6 +692,7 @@ def _fit_expiry(
         a=fit.a, b=fit.b, rho=fit.rho, m=fit.m, sigma=fit.sigma,
         k_min=ks[0], k_max=ks[-1], n_strikes=len(ks),
         rms_error=fit.rms_error, min_g=fit.min_g, rate=r,
+        daycount=stamp,
     )
 
 
@@ -740,12 +759,13 @@ def build_surfaces(
             # than a floor, which would invent vol time the calendar denies.
             if T <= 0:
                 continue
+            stamp = daycount.name_for(d, expiry)
             F = float(fwd["forward"])
             r = _rate_for_expiry(expiry)
             ks, ws = _expiry_points(F, T, r, legs.get(fwd["expiration_date"], {}))
             if len(ks) < MIN_STRIKES:
                 continue
-            pending.append((fwd["expiration_date"], dte, T, F, r, ks, ws))
+            pending.append((fwd["expiration_date"], dte, T, F, r, ks, ws, stamp))
 
         cal_grid = None
         if pending:
@@ -757,8 +777,8 @@ def build_surfaces(
 
         slices: list[Slice] = []
         prev: Slice | None = None
-        for expiry, dte, T, F, r, ks, ws in pending:
-            sl = _fit_expiry(expiry, dte, T, F, r, ks, ws,
+        for expiry, dte, T, F, r, ks, ws, stamp in pending:
+            sl = _fit_expiry(expiry, dte, T, F, r, ks, ws, stamp,
                              floor=prev, cal_grid=cal_grid)
             prev = sl
             slices.append(sl)
@@ -778,6 +798,7 @@ def rows_from_surfaces(surfaces: dict[str, Surface]) -> list[dict[str, Any]]:
                 "expiration_date": s.expiration_date,
                 "dte": s.dte,
                 "t_years": s.t_years,
+                "daycount": s.daycount,
                 "forward": s.forward,
                 "svi_a": s.a,
                 "svi_b": s.b,
@@ -798,14 +819,20 @@ def rows_from_surfaces(surfaces: dict[str, Surface]) -> list[dict[str, Any]]:
 
 def build_for_date(
     settings: Settings, d: date, roots: tuple[str, ...] = SURFACE_ROOTS,
-    daycount: DayCount = DEFAULT_DAYCOUNT,
+    daycount: DayCount | None = None,
 ) -> dict[str, Surface]:
     """Read the partition and fit one surface per root.
 
     The curve is loaded once here rather than per expiry, for the same reason
     as in term_structure: ``load_curve`` scans every rates partition and a
     chain has ~100 expiries.
+
+    ``daycount`` defaults to the hybrid bound to this warehouse's calendar,
+    not to a process-global ``DATA_ROOT``, so a staging rebuild cannot silently
+    price off the box calendar.
     """
+    if daycount is None:
+        daycount = hybrid_for(settings.data_root)
     curve = load_curve(d, settings.data_root)
     return build_surfaces(
         read_day_bars(settings, d), d, roots, settings.data_root,

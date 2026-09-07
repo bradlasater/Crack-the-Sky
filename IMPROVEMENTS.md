@@ -27,6 +27,16 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   what regenerates it under a known thread count. Recording the pinned value
   with the rows would also be needed for reproducibility to survive a hardware
   change; not done.
+- `pricing/from_market.py:200` — `expiry_instant` and `year_fraction` accept a
+  session calendar that moves a PM-settled expiry to the 13:00 ET early close,
+  but **no production caller passes one yet**, so the default is still the
+  root's nominal 16:00. On the two half days in the current window — Black
+  Friday 2026-11-27 and Christmas Eve 2026-12-24 — every SPY/SPXW contract
+  expiring that day therefore carries three hours of vol time that was never
+  traded, and prices as live for three hours after it has settled. AM-settled
+  roots are unaffected: an early close moves the close, not the open. Wiring
+  the live path is step 4 of `docs/plans/trading-day-calendar.md`; the first
+  date it actually bites is 2026-11-27.
 - `ingest/common/cli.py:205` — a job whose summary dict contains a reserved key
   (`rows`, `bytes`, `job`, `duration_s`) crashes `job_end` logging *after*
   succeeding, turning a good run into `job_error` + a `/fail` ping. Latent

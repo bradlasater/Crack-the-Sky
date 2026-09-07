@@ -4,8 +4,7 @@ Build plan for `PLAN.md` Week 1 item 2. Written 2026-09-06 against `main` at
 `8c4a422`. Scope: make time-to-expiry trading-day aware, before the HAR-RV
 forecast (item 4) and the event replay (item 7) bake ACT/365 in deeper.
 
-Status: **steps 1-2 landed, step 3 half-landed; the rest needs the owner
-decisions below.**
+Status: **steps 1-2 landed, step 3 half-landed and now unblocked.**
 `pricing/calendar.py` and `pricing/daycount.py` ship with 42 tests between
 them, and no number has moved yet. Building step 1 turned up three further
 findings (3-5) that change what steps 3 and 4 can do: step 3 is smaller than
@@ -13,6 +12,12 @@ this plan first assumed, step 4 is larger, and neither can cover the whole
 book with today's sources. Measuring step 3 added finding 8, since resolved:
 zero-session spans are skipped, on the rule the builders already applied to
 same-day expiries.
+
+Three things have cleared since: the BLAS thread pin (finding 7) makes the
+archive reproducible enough to diff a rebuild against, decision 5 is made
+(staging rebuild, then swap), and the `expiry_instant` half of decision 6 is
+fixed. What step 3 still needs is the build itself, not another decision.
+Decision 2 remains open, and gates step 4 rather than step 3.
 
 ---
 
@@ -239,24 +244,43 @@ blocks the default flip.
    exactly the guessing step 1 refuses to do); or restrict the landed
    datasets to the horizon. Recommendation: **hybrid, stamped per row.**
 
-5. **Cutover for the schema change** (from finding 6). Options: (a) merge, then
-   rebuild in place and accept a multi-hour window where every reader raises;
-   (b) rebuild into a staging `DATA_ROOT` under the new code, then swap the two
+5. **Cutover for the schema change** (from finding 6). **Decided: (b).**
+   Rebuild into a staging `DATA_ROOT` under the new code, then swap the two
    `clean/` subtrees and deploy — readers see the old archive until the swap,
-   and the swap is a rename; (c) drop the stamp and lose the ability to tell
-   the conventions apart. Recommendation: **(b)**, run outside the 12:00-12:30
-   job window, with the `prune`/`coverage_audit` timers stopped for the swap.
-   This touches production data on a live box, so it is an owner call, not a
-   code one.
+   and the swap is a rename. Run outside the 12:00-12:30 job window with the
+   `prune`/`coverage_audit` timers stopped for the swap. The alternatives were
+   (a) merge then rebuild in place, accepting a multi-hour window where every
+   reader raises, and (c) drop the stamp and lose the ability to tell the
+   conventions apart; (a) degrades the box for the duration and (c) is the
+   silent mixing this plan exists to prevent.
 
 6. **Half days.**
    `holidays.json` carries 4 `early-close` records (13:00 ET) alongside 20
-   `closed`. Two consequences: a business-day count may want to weight an
-   early close below 1.0, and — separately — `expiry_instant`
-   (`from_market.py:200`) hardcodes 16:00 ET for PM-settled roots, so it is
-   already slightly wrong on those dates. That is a pre-existing bug this work
-   would surface; worth fixing in the same pass or logging in
-   `IMPROVEMENTS.md`.
+   `closed` — two distinct dates, Black Friday 2026-11-27 and Christmas Eve
+   2026-12-24, each published per exchange. Two separate consequences.
+
+   **The `expiry_instant` bug is fixed.** It hardcoded the root's nominal
+   settlement on every date, so a PM-settled contract expiring on a half day
+   was stamped 16:00 ET against a 13:00 ET close: three hours of vol time that
+   was never traded, and a contract that keeps pricing as live for three hours
+   after it has settled. `expiry_instant` and `year_fraction` now take an
+   optional `SessionCalendar` and move a PM settlement to the early close when
+   it says so. An early close moves the close and not the open, so AM-settled
+   roots (SPX monthlies, both VIX series) are unaffected by construction and
+   never consult the calendar — which also means they never raise outside its
+   window. A PM root outside the window does raise, per finding 5.
+
+   **Still open: the live path does not pass a calendar yet.** The parameter
+   defaults to `None`, which is today's behaviour exactly, so nothing in
+   `from_market`'s callers has changed and the bug stays latent until step 4
+   wires it — deadline 2026-11-27. Turning it on is not free: it would make a
+   PM-settled expiry past the holiday horizon raise where it prices today,
+   which is decision 4's question in a different spelling and wants the same
+   deliberate answer rather than an incidental one.
+
+   **Still open: half-day weighting.** Whether a business-day count should
+   weight an early close below 1.0 is untouched here, and finding 5 means it
+   is not computable over the backtest period from anything on disk.
 
 ---
 

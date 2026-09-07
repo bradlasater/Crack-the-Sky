@@ -18,7 +18,11 @@ Three things here are load-bearing on this data feed:
   09:30 ET for AM-settled SPX monthlies and both VIX series
   (:data:`marketdata.opra.SETTLEMENT_ET`). Using the expiry *date* at UTC
   midnight is 20:00 ET the day before, understating T at every tenor and
-  biasing inverted IV by ~108bp at 7 DTE.
+  biasing inverted IV by ~108bp at 7 DTE. Those times are the full-session
+  ones: on a half day the close is 13:00 ET, so :func:`expiry_instant` and
+  :func:`year_fraction` take an optional session calendar that moves a
+  PM-settled expiry accordingly. They do not load one themselves, so a caller
+  that passes nothing keeps the nominal time on every date.
 * **Every price here is a traded price, never a mid.** Option NBBO is 403 on
   this tier -- both ``/v3/quotes`` and the ``quotes_v1`` flat file -- so
   :attr:`marketdata.types.Quote.market_price` is the last trade, else the
@@ -113,6 +117,7 @@ from marketdata.types import (
 )
 from marketdata.validate import narrow_roots, validate_table
 from pricing.bsm import CallPut, resolve_q
+from pricing.calendar import EARLY_CLOSE_ET, SessionCalendar
 from pricing.conventions import (
     CALENDAR_DAYS_PER_YEAR,
     DEFAULT_CONVENTIONS,
@@ -197,13 +202,36 @@ def engine_for(contract: Contract) -> Engine:
         ) from None
 
 
-def expiry_instant(contract: Contract) -> datetime:
+def expiry_instant(
+    contract: Contract, calendar: SessionCalendar | None = None
+) -> datetime:
     """The moment ``contract`` settles, as an aware UTC datetime.
 
     16:00 ET for SPY and SPXW (PM-settled); 09:30 ET for AM-settled SPX
     monthlies and both VIX series. See :data:`marketdata.opra.SETTLEMENT_ET`.
+
+    Those are the times on a *full* session. On a half day the close moves to
+    13:00 ET while the open stays at 09:30, so a PM-settled contract expiring
+    on one settles three hours earlier than this function assumes without a
+    ``calendar``. Pass a :class:`~pricing.calendar.SessionCalendar` to have
+    that applied.
+
+    Only a settlement later than the early close can be pulled in by one,
+    which is what the time comparison below tests: AM-settled roots are
+    unaffected by definition, so they never consult the calendar and never
+    raise on a date outside its window. For a PM-settled root outside that
+    window the :class:`~pricing.calendar.CalendarRangeError` propagates
+    deliberately -- half days before it are recorded nowhere on disk, and
+    answering 16:00 there would be the guess ``is_early_close`` exists to
+    refuse.
     """
     hour, minute = settlement_time_et(contract.root)
+    if (
+        calendar is not None
+        and (hour, minute) > EARLY_CLOSE_ET
+        and calendar.is_early_close(contract.expiry)
+    ):
+        hour, minute = EARLY_CLOSE_ET
     local = datetime(
         contract.expiry.year, contract.expiry.month, contract.expiry.day,
         hour, minute, tzinfo=ET,
@@ -211,14 +239,27 @@ def expiry_instant(contract: Contract) -> datetime:
     return local.astimezone(UTC)
 
 
-def year_fraction(contract: Contract, asof_ns: int, *, days: int = 365) -> float:
-    """ACT/365 year fraction from the as-of instant to the settlement instant."""
-    expiry_ns = expiry_instant(contract).timestamp() * 1e9
-    t = (expiry_ns - asof_ns) / (days * 86400.0 * 1e9)
+def year_fraction(
+    contract: Contract,
+    asof_ns: int,
+    *,
+    days: int = 365,
+    calendar: SessionCalendar | None = None,
+) -> float:
+    """ACT/365 year fraction from the as-of instant to the settlement instant.
+
+    ``calendar`` is forwarded to :func:`expiry_instant`. Without one, a
+    PM-settled contract expiring on a half day still prices as live for the
+    three hours after it has actually settled, because the non-positive-T
+    guard below is measuring against a settlement instant that has not
+    happened.
+    """
+    settles = expiry_instant(contract, calendar)
+    t = (settles.timestamp() * 1e9 - asof_ns) / (days * 86400.0 * 1e9)
     if t <= 0:
         raise ValueError(
             f"non-positive T: {contract.ticker or contract.root} settles "
-            f"{expiry_instant(contract).isoformat()}, asof_ns={asof_ns}"
+            f"{settles.isoformat()}, asof_ns={asof_ns}"
         )
     return t
 

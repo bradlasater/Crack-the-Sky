@@ -26,7 +26,6 @@ from pricing.daycount import (
     TradingSessions,
     discount_year_fraction,
 )
-from tests.conftest import load_fixture
 
 DAY = date(2026, 8, 28)
 EXPIRY = date(2026, 9, 25)
@@ -37,20 +36,7 @@ F = 7700.0
 VOL = 0.18
 
 
-@pytest.fixture
-def session_calendar() -> SessionCalendar:
-    """The box's own calendar files, as of 2026-09-06."""
-    holidays = load_fixture("holidays_upcoming_2026.json")
-    closed = {date.fromisoformat(r["date"]) for r in holidays if r["status"] == "closed"}
-    early = {date.fromisoformat(r["date"]) for r in holidays if r["status"] != "closed"}
-    return SessionCalendar(
-        sessions={date.fromisoformat(k): v
-                  for k, v in load_fixture("trading_days.json").items()},
-        holidays=frozenset(closed),
-        early_closes=frozenset(early),
-        forward_from=date(2026, 9, 6),
-        forward_through=max(closed | early),
-    )
+# session_calendar lives in tests/pricing/conftest.py.
 
 
 def _sym(root: str, expiry: date, kind: str, strike: float) -> str:

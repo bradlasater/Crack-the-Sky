@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Volatility Trading System Architecture</title>
+  <style>
+    :root {
+      --bg: #0b1220;
+      --panel: #111827;
+      --panel-2: #0f172a;
+      --border: #263247;
+      --text: #e5e7eb;
+      --muted: #94a3b8;
+      --accent: #f59e0b;
+      --accent2: #38bdf8;
+      --accent3: #34d399;
+      --accent4: #f472b6;
+      --accent5: #a78bfa;
+      --danger: #fb7185;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      background: radial-gradient(circle at top left, #111827 0%, var(--bg) 45%, #08101b 100%);
+      color: var(--text);
+      line-height: 1.45;
+    }
+    .wrap {
+      max-width: 1700px;
+      margin: 0 auto;
+      padding: 24px 24px 40px;
+    }
+    .hero {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+    }
+    h1 {
+      margin: 0;
+      font-size: 34px;
+      letter-spacing: 0.02em;
+      font-weight: 700;
+    }
+    .sub {
+      color: var(--muted);
+      max-width: 1100px;
+      margin-top: 8px;
+      font-size: 15px;
+    }
+    .meta {
+      color: var(--muted);
+      font-size: 13px;
+      white-space: nowrap;
+    }
+    .card {
+      background: linear-gradient(180deg, rgba(17,24,39,.92), rgba(15,23,42,.96));
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 18px;
+      box-shadow: 0 10px 30px rgba(0,0,0,.25);
+    }
+    .legend {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px;
+      margin: 14px 0 18px;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.02);
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .swatch {
+      width: 16px;
+      height: 16px;
+      border-radius: 4px;
+      border: 1px solid rgba(255,255,255,.25);
+    }
+    .notes {
+      margin-top: 18px;
+      display: grid;
+      grid-template-columns: 1.15fr .85fr;
+      gap: 18px;
+    }
+    .notes h2, .notes h3 {
+      margin-top: 0;
+      margin-bottom: 10px;
+    }
+    ul {
+      margin: 10px 0 0 0;
+      padding-left: 18px;
+      color: var(--muted);
+    }
+    li { margin: 7px 0; }
+    .footer {
+      margin-top: 18px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .print-note {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 4px;
+    }
+    svg {
+      width: 100%;
+      height: auto;
+      display: block;
+      background: linear-gradient(180deg, rgba(8,12,20,.55), rgba(8,12,20,.15));
+      border-radius: 16px;
+    }
+    @media (max-width: 980px) {
+      .notes { grid-template-columns: 1fr; }
+      h1 { font-size: 28px; }
+    }
+    @media print {
+      body { background: #08101b; }
+      .wrap { max-width: none; padding: 8px; }
+      .card { box-shadow: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="hero">
+      <div>
+        <h1>Volatility Trading System Architecture</h1>
+        <div class="sub">
+          A proper end-to-end architecture for a systematic volatility trading system. This starts from your original data / math / watchdog concept,
+          but expands it into the full production loop: <strong>data → forecasting → strategy → portfolio risk → execution → reconciliation → monitoring → research feedback</strong>.
+        </div>
+      </div>
+      <div class="meta">Dark-mode standalone HTML • self-contained • downloadable</div>
+    </div>
+
+    <div class="legend">
+      <div class="legend-item"><span class="swatch" style="background:#1d2636;border-color:#f59e0b"></span>Market / broker inputs</div>
+      <div class="legend-item"><span class="swatch" style="background:#1d2636;border-color:#38bdf8"></span>Data, storage, and quality control</div>
+      <div class="legend-item"><span class="swatch" style="background:#1d2636;border-color:#34d399"></span>Modeling, pricing, and decision layer</div>
+      <div class="legend-item"><span class="swatch" style="background:#1d2636;border-color:#f472b6"></span>Execution, portfolio state, and control</div>
+      <div class="legend-item"><span class="swatch" style="background:#1d2636;border-color:#a78bfa"></span>Research / replay / governance loop</div>
+    </div>
+
+    <div class="card">
+      <svg viewBox="0 0 1640 1060" xmlns="http://www.w3.org/2000/svg" aria-labelledby="title desc" role="img">
+        <title id="title">System architecture diagram</title>
+        <desc id="desc">A dark mode diagram showing market data ingestion, warehousing, forecasting, strategy, risk, execution, reconciliation, monitoring, and research feedback loops.</desc>
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#74829a"></path>
+          </marker>
+          <marker id="arrowSoft" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"></path>
+          </marker>
+          <style>
+            .group-title { fill: #cbd5e1; font: 600 18px Inter, Arial, sans-serif; letter-spacing: 2px; }
+            .box { fill: #101827; stroke: #2a3448; stroke-width: 1.5; rx: 14; }
+            .box-o { stroke: #f59e0b; }
+            .box-b { stroke: #38bdf8; }
+            .box-g { stroke: #34d399; }
+            .box-p { stroke: #f472b6; }
+            .box-v { stroke: #a78bfa; }
+            .title { fill: #f8fafc; font: 700 16px 'SFMono-Regular', Consolas, Menlo, monospace; }
+            .small { fill: #94a3b8; font: 500 11.5px Inter, Arial, sans-serif; }
+            .body { fill: #cbd5e1; font: 500 13px Inter, Arial, sans-serif; }
+            .body2 { fill: #9fb0c7; font: 500 12px Inter, Arial, sans-serif; }
+            .arrow { stroke: #74829a; stroke-width: 2.2; fill: none; marker-end: url(#arrow); }
+            .arrowSoft { stroke: #64748b; stroke-width: 1.7; fill: none; stroke-dasharray: 6 5; marker-end: url(#arrowSoft); }
+            .label { fill: #9fb0c7; font: 600 11px Inter, Arial, sans-serif; letter-spacing: .7px; }
+            .danger { fill: #fb7185; font: 600 11.5px Inter, Arial, sans-serif; }
+            .ok { fill: #86efac; font: 600 11.5px Inter, Arial, sans-serif; }
+          </style>
+        </defs>
+
+        <!-- group labels -->
+        <text x="44" y="48" class="group-title">INPUTS</text>
+        <text x="372" y="48" class="group-title">DATA FOUNDATION</text>
+        <text x="780" y="48" class="group-title">ANALYTICS / DECISION</text>
+        <text x="1220" y="48" class="group-title">TRADING CONTROL LOOP</text>
+        <text x="42" y="716" class="group-title">RESEARCH / GOVERNANCE LOOP</text>
+
+        <!-- INPUTS -->
+        <rect x="40" y="72" width="240" height="118" class="box box-o"/>
+        <text x="160" y="106" text-anchor="middle" class="title">Live Market Data</text>
+        <text x="160" y="132" text-anchor="middle" class="body">options quotes, trades, NBBO</text>
+        <text x="160" y="152" text-anchor="middle" class="body">underlying, vols, rates, calendars</text>
+        <text x="160" y="172" text-anchor="middle" class="body2">real-time feed for execution &amp; live risk</text>
+
+        <rect x="40" y="214" width="240" height="100" class="box box-o"/>
+        <text x="160" y="248" text-anchor="middle" class="title">Delayed / Research Feeds</text>
+        <text x="160" y="274" text-anchor="middle" class="body">Massive delayed WS / REST</text>
+        <text x="160" y="294" text-anchor="middle" class="body2">development, lagged research, sanity checks</text>
+
+        <rect x="40" y="338" width="240" height="112" class="box box-o"/>
+        <text x="160" y="372" text-anchor="middle" class="title">Broker / Account Inputs</text>
+        <text x="160" y="398" text-anchor="middle" class="body">orders, fills, positions, cash</text>
+        <text x="160" y="418" text-anchor="middle" class="body">margin, commissions, statements</text>
+        <text x="160" y="438" text-anchor="middle" class="body2">IBKR API + Flex / statements</text>
+
+        <!-- DATA FOUNDATION -->
+        <rect x="356" y="82" width="278" height="118" class="box box-b"/>
+        <text x="495" y="116" text-anchor="middle" class="title">Ingestion / Capture</text>
+        <text x="495" y="142" text-anchor="middle" class="body">timers, collectors, source adapters</text>
+        <text x="495" y="162" text-anchor="middle" class="body">typed as-of reads + availability time</text>
+        <text x="495" y="182" text-anchor="middle" class="body2">immutable raw events, source metadata</text>
+
+        <rect x="356" y="226" width="278" height="116" class="box box-b"/>
+        <text x="495" y="260" text-anchor="middle" class="title">Validation / QC Gate</text>
+        <text x="495" y="286" text-anchor="middle" class="body">staleness, crossed markets, bad prints</text>
+        <text x="495" y="306" text-anchor="middle" class="body">chain completeness, timestamp alignment</text>
+        <text x="495" y="326" text-anchor="middle" class="body2">block downstream actions if inputs are dirty</text>
+
+        <rect x="356" y="370" width="278" height="118" class="box box-b"/>
+        <text x="495" y="404" text-anchor="middle" class="title">Warehouse / Event Store</text>
+        <text x="495" y="430" text-anchor="middle" class="body">raw / clean / canonical / decision logs</text>
+        <text x="495" y="450" text-anchor="middle" class="body">parquet or delta tables, dt partitions</text>
+        <text x="495" y="470" text-anchor="middle" class="body2">do not overwrite decision history</text>
+
+        <rect x="356" y="514" width="278" height="118" class="box box-b"/>
+        <text x="495" y="548" text-anchor="middle" class="title">Reference Data</text>
+        <text x="495" y="574" text-anchor="middle" class="body">contracts, multipliers, expiries</text>
+        <text x="495" y="594" text-anchor="middle" class="body">rates, dividends, calendars, holidays</text>
+        <text x="495" y="614" text-anchor="middle" class="body2">instrument master + conventions</text>
+
+        <!-- ANALYTICS / DECISION -->
+        <rect x="756" y="82" width="280" height="118" class="box box-g"/>
+        <text x="896" y="116" text-anchor="middle" class="title">Feature Engineering</text>
+        <text x="896" y="142" text-anchor="middle" class="body">RV, term structure, skew, liquidity</text>
+        <text x="896" y="162" text-anchor="middle" class="body">event flags, regimes, macro context</text>
+        <text x="896" y="182" text-anchor="middle" class="body2">point-in-time feature generation</text>
+
+        <rect x="756" y="226" width="280" height="118" class="box box-g"/>
+        <text x="896" y="260" text-anchor="middle" class="title">Forecasting</text>
+        <text x="896" y="286" text-anchor="middle" class="body">HAR-RV / baseline + uncertainty</text>
+        <text x="896" y="306" text-anchor="middle" class="body">horizon-matched realized vol forecasts</text>
+        <text x="896" y="326" text-anchor="middle" class="body2">forecast distribution, not just point estimate</text>
+
+        <rect x="756" y="370" width="280" height="118" class="box box-g"/>
+        <text x="896" y="404" text-anchor="middle" class="title">Pricing / Surface Analytics</text>
+        <text x="896" y="430" text-anchor="middle" class="body">IV, Greeks, forwards, carry</text>
+        <text x="896" y="450" text-anchor="middle" class="body">BSM / CRR / SVI surface &amp; repricing</text>
+        <text x="896" y="470" text-anchor="middle" class="body2">current market valuation, not the forecast</text>
+
+        <rect x="756" y="514" width="280" height="118" class="box box-g"/>
+        <text x="896" y="548" text-anchor="middle" class="title">Signal / Strategy Engine</text>
+        <text x="896" y="574" text-anchor="middle" class="body">candidate spreads / structures</text>
+        <text x="896" y="594" text-anchor="middle" class="body">entry, exit, hedge, roll, no-trade rules</text>
+        <text x="896" y="614" text-anchor="middle" class="body2">expected edge net of costs and slippage</text>
+
+        <!-- TRADING CONTROL LOOP -->
+        <rect x="1170" y="82" width="310" height="138" class="box box-p"/>
+        <text x="1325" y="116" text-anchor="middle" class="title">Portfolio Construction &amp; Risk Engine</text>
+        <text x="1325" y="142" text-anchor="middle" class="body">size proposals, concentration limits</text>
+        <text x="1325" y="162" text-anchor="middle" class="body">portfolio Greeks, stress / scenario loss</text>
+        <text x="1325" y="182" text-anchor="middle" class="body">drawdown guardrails, margin buffer</text>
+        <text x="1325" y="202" text-anchor="middle" class="body2">approve, resize, or reject each trade</text>
+
+        <rect x="1170" y="252" width="310" height="124" class="box box-p"/>
+        <text x="1325" y="286" text-anchor="middle" class="title">Order Management / Execution</text>
+        <text x="1325" y="312" text-anchor="middle" class="body">limit price policy, multi-leg handling</text>
+        <text x="1325" y="332" text-anchor="middle" class="body">partial fills, cancel/replace, retry logic</text>
+        <text x="1325" y="352" text-anchor="middle" class="body2">current quotes required before sending orders</text>
+
+        <rect x="1170" y="408" width="310" height="132" class="box box-p"/>
+        <text x="1325" y="442" text-anchor="middle" class="title">Portfolio State / Ledger / Reconciliation</text>
+        <text x="1325" y="468" text-anchor="middle" class="body">positions, orders, fills, fees, cash</text>
+        <text x="1325" y="488" text-anchor="middle" class="body">match internal book to broker state</text>
+        <text x="1325" y="508" text-anchor="middle" class="body2">accounting truth and replay truth</text>
+
+        <rect x="1170" y="572" width="310" height="132" class="box box-p"/>
+        <text x="1325" y="606" text-anchor="middle" class="title">Monitoring / Watchdog / Kill Switches</text>
+        <text x="1325" y="632" text-anchor="middle" class="body">data freshness, unknown order states</text>
+        <text x="1325" y="652" text-anchor="middle" class="body">risk breaches, model degradation, alerts</text>
+        <text x="1325" y="672" text-anchor="middle" class="body2">block new risk / cancel orders / controlled flatten</text>
+
+        <!-- RESEARCH / GOVERNANCE LOOP -->
+        <rect x="44" y="748" width="290" height="124" class="box box-v"/>
+        <text x="189" y="782" text-anchor="middle" class="title">Backtesting / Event Replay</text>
+        <text x="189" y="808" text-anchor="middle" class="body">same strategy + same risk logic</text>
+        <text x="189" y="828" text-anchor="middle" class="body">bid/ask, fees, no-fill and partial-fill realism</text>
+        <text x="189" y="848" text-anchor="middle" class="body2">walk-forward only, point-in-time inputs</text>
+
+        <rect x="374" y="748" width="290" height="124" class="box box-v"/>
+        <text x="519" y="782" text-anchor="middle" class="title">Model Evaluation / Attribution</text>
+        <text x="519" y="808" text-anchor="middle" class="body">forecast error, calibration, regime analysis</text>
+        <text x="519" y="828" text-anchor="middle" class="body">P&amp;L decomposition: delta / vega / theta / costs</text>
+        <text x="519" y="848" text-anchor="middle" class="body2">did the model add edge or just risk?</text>
+
+        <rect x="704" y="748" width="290" height="124" class="box box-v"/>
+        <text x="849" y="782" text-anchor="middle" class="title">Research Sandbox</text>
+        <text x="849" y="808" text-anchor="middle" class="body">new features, structures, and filters</text>
+        <text x="849" y="828" text-anchor="middle" class="body">paper trading, simulation, stress replay</text>
+        <text x="849" y="848" text-anchor="middle" class="body2">promotion only after evidence</text>
+
+        <rect x="1034" y="748" width="446" height="124" class="box box-v"/>
+        <text x="1257" y="782" text-anchor="middle" class="title">Governance / Audit / Dashboards</text>
+        <text x="1257" y="808" text-anchor="middle" class="body">decision logs, configs, model versions, approvals, risk snapshots</text>
+        <text x="1257" y="828" text-anchor="middle" class="body">daily dashboards, run reports, exception logs, post-trade reviews</text>
+        <text x="1257" y="848" text-anchor="middle" class="body2">full reproducibility from market input to broker-confirmed outcome</text>
+
+        <!-- arrows inputs to data foundation -->
+        <path d="M 280 131 L 356 141" class="arrow"/>
+        <path d="M 280 264 L 356 264" class="arrow"/>
+        <path d="M 280 394 L 335 394 L 335 428 L 356 428" class="arrow"/>
+
+        <!-- data vertical arrows -->
+        <path d="M 495 200 L 495 226" class="arrow"/>
+        <path d="M 495 342 L 495 370" class="arrow"/>
+        <path d="M 495 488 L 495 514" class="arrow"/>
+
+        <!-- data to analytics -->
+        <path d="M 634 141 L 756 141" class="arrow"/>
+        <path d="M 634 284 L 736 284 L 736 141 L 756 141" class="arrowSoft"/>
+        <path d="M 634 429 L 736 429 L 736 429 L 756 429" class="arrow"/>
+        <path d="M 634 573 L 736 573 L 736 429 L 756 429" class="arrowSoft"/>
+        <path d="M 634 573 L 756 573" class="arrow"/>
+
+        <!-- analytics vertical arrows -->
+        <path d="M 896 200 L 896 226" class="arrow"/>
+        <path d="M 896 344 L 896 370" class="arrow"/>
+        <path d="M 896 488 L 896 514" class="arrow"/>
+
+        <!-- analytics to control loop -->
+        <path d="M 1036 573 L 1170 151" class="arrow"/>
+        <path d="M 1036 429 L 1148 429 L 1148 151 L 1170 151" class="arrowSoft"/>
+        <path d="M 1036 284 L 1126 284 L 1126 151 L 1170 151" class="arrowSoft"/>
+
+        <!-- control loop vertical -->
+        <path d="M 1325 220 L 1325 252" class="arrow"/>
+        <path d="M 1325 376 L 1325 408" class="arrow"/>
+        <path d="M 1325 540 L 1325 572" class="arrow"/>
+
+        <!-- broker feedback -->
+        <path d="M 280 394 L 1160 394" class="arrowSoft"/>
+        <text x="742" y="382" text-anchor="middle" class="label">fills / positions / account state</text>
+
+        <!-- monitoring back to execution/risk -->
+        <path d="M 1170 638 L 1100 638 L 1100 314 L 1170 314" class="arrowSoft"/>
+        <path d="M 1170 666 L 1080 666 L 1080 151 L 1170 151" class="arrowSoft"/>
+        <text x="1070" y="652" text-anchor="end" class="danger">halt, reject, reduce risk</text>
+
+        <!-- research loop connectors -->
+        <path d="M 495 632 L 495 700 L 189 700 L 189 748" class="arrowSoft"/>
+        <path d="M 896 632 L 896 700 L 519 700 L 519 748" class="arrowSoft"/>
+        <path d="M 1325 704 L 1325 726 L 1257 726 L 1257 748" class="arrowSoft"/>
+        <path d="M 189 872 L 189 930 L 849 930 L 849 872" class="arrowSoft"/>
+        <path d="M 519 872 L 519 914 L 1257 914 L 1257 872" class="arrowSoft"/>
+        <path d="M 849 748 L 849 714 L 896 714 L 896 632" class="arrowSoft"/>
+        <path d="M 1257 748 L 1257 722 L 1325 722 L 1325 704" class="arrowSoft"/>
+        <text x="710" y="947" text-anchor="middle" class="label">continuous improvement / promotion after validation</text>
+
+        <!-- bottom operating notes -->
+        <rect x="44" y="924" width="1436" height="94" class="box" style="stroke:#334155;"/>
+        <text x="72" y="955" class="title">Operating principles</text>
+        <text x="72" y="980" class="body">1) Separate delayed research data from current execution data. 2) Forecast future realized volatility; do not confuse it with current implied vol surface fitting.</text>
+        <text x="72" y="1000" class="body">3) Every trade must pass portfolio-level risk checks before execution. 4) Preserve immutable decision logs and reconcile continuously to broker reality.</text>
+      </svg>
+    </div>
+
+    <div class="notes">
+      <div class="card">
+        <h2>What this fixes vs the original sketch</h2>
+        <ul>
+          <li><strong>Adds the missing control loop:</strong> strategy generation, portfolio risk, execution, ledger, reconciliation, and active monitoring.</li>
+          <li><strong>Separates pricing from forecasting:</strong> surface fitting and Greeks are current-market analytics; they are not the same thing as a realized-vol forecast.</li>
+          <li><strong>Separates delayed development feeds from live execution feeds:</strong> useful for research, but not enough for real order placement and intraday risk.</li>
+          <li><strong>Makes state explicit:</strong> internal positions, orders, fills, and decision logs are first-class components, not an afterthought.</li>
+          <li><strong>Closes the feedback loop:</strong> backtests, replay, attribution, dashboards, and governance feed back into production changes.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Suggested next implementation order</h3>
+        <ul>
+          <li>1. Canonical event store + reference data + QC gates.</li>
+          <li>2. Pricing + feature generation + baseline RV forecast.</li>
+          <li>3. One defined-risk strategy engine with explicit exits.</li>
+          <li>4. Portfolio risk engine with hard guardrails and stress tests.</li>
+          <li>5. OMS / execution simulator, then broker adapter.</li>
+          <li>6. Ledger + reconciliation + dashboards + alerts.</li>
+          <li>7. Event replay / backtesting that uses the same production logic.</li>
+        </ul>
+        <div class="print-note">Tip: open this file locally in a browser and print to PDF if you want a static handout.</div>
+      </div>
+    </div>
+
+    <div class="footer">
+      File is self-contained and uses only inline HTML/CSS/SVG so it should render cleanly offline.
+    </div>
+  </div>
+</body>
+</html>

@@ -10,8 +10,9 @@ decisions below.**
 them, and no number has moved yet. Building step 1 turned up three further
 findings (3-5) that change what steps 3 and 4 can do: step 3 is smaller than
 this plan first assumed, step 4 is larger, and neither can cover the whole
-book with today's sources. Measuring step 3 added finding 8, which is a
-blocker on the default flip rather than on the hybrid.
+book with today's sources. Measuring step 3 added finding 8, since resolved:
+zero-session spans are skipped, on the rule the builders already applied to
+same-day expiries.
 
 ---
 
@@ -172,10 +173,38 @@ stamped `bus/252` row with `t_years = 0` is a division by zero waiting in
 every downstream formula, and today's reasonable-looking `1/365` is exactly
 what hides it.
 
-This needs a policy before the default flips — floor T at some fraction of a
-session, drop the row, or let it raise. It belongs with decision 2 (how to
-treat the current session), which is the same question about a partial session
-asked at the other end.
+**Resolved: skip the row, because zero is the correct answer.** The three
+options were to floor `T`, drop the row, or raise. Raising is wrong — a
+`CalendarRangeError` means *unknown*, and here the calendar answered; the
+answer is zero. Flooring is worse: it invents vol time the calendar
+explicitly denies, which is the guessing step 1 exists to refuse. And zero is
+not an error to route around. If the market is shut for every day of the
+span, an option expiring at the end of it has no trading opportunity left, so
+its remaining variance genuinely *is* zero and its value is intrinsic.
+
+That makes this the same case the builders already handle. Both
+`term_structure` and `surface` skip `dte <= 0`, and the comment there already
+states the policy: "T=0 has no vol that reproduces a price... a
+term-structure row without an IV is not [meaningful], so it is skipped."
+`dte <= 0` is simply the ACT/365 spelling of `T <= 0`, and the two stop being
+the same thing once vol time is a session count. Both builders now apply the
+guard in the convention actually in use, one line after `T` is computed.
+
+Two details worth recording:
+
+- Without the guard, `term_structure` lands the row with a null IV rather
+  than failing: every inversion raises, `_invert` swallows each into `None`,
+  and the row arrives stamped `t_years = 0`. Silent, which is the shape this
+  change exists to prevent.
+- `surface` was already safe, but only incidentally — `_expiry_points`
+  returns zero strikes at `T = 0` because every inversion fails, so
+  `MIN_STRIKES` drops the slice. That is a side effect, not a policy, and it
+  would stop protecting anything if `MIN_STRIKES` were ever 0. The guard is
+  stated there too rather than left implied.
+
+This still pairs with decision 2 (how to treat the current session), which
+asks the same partial-session question at the other end — but it no longer
+blocks the default flip.
 
 ---
 
@@ -310,8 +339,8 @@ one-session error in T is largest — so it must not be answered with a
 plausible ACT/365 number.
 
 Blocked on decision 5: the schema stamp and the default flip, because finding
-6 makes those inseparable from a full rebuild and a production cutover, and on
-finding 8, which needs a zero-session policy before any row is stamped.
+6 makes those inseparable from a full rebuild and a production cutover.
+Finding 8 no longer blocks it.
 
 The original plan for the rest:
 Switch `term_structure` and `surface` to the new convention, stamp the

@@ -730,6 +730,16 @@ def build_surfaces(
             if dte <= 0:
                 continue
             T = daycount.year_fraction(d, expiry)
+            # dte > 0 stops implying T > 0 once vol time is a session count:
+            # a span every day of which is a closure counts zero sessions.
+            # 2025-01-09, the day of mourning for President Carter, does it
+            # for the Wednesday-to-Thursday span ending on it. Zero is the
+            # right answer -- there is no trading left before expiry, so
+            # there is no remaining variance -- and it is the same reason the
+            # dte guard above exists, so it gets the same treatment rather
+            # than a floor, which would invent vol time the calendar denies.
+            if T <= 0:
+                continue
             F = float(fwd["forward"])
             r = _rate_for_expiry(expiry)
             ks, ws = _expiry_points(F, T, r, legs.get(fwd["expiration_date"], {}))

@@ -17,6 +17,13 @@ rather than the sum, which is what makes a 1-minute schedule fit. VIX is
 almost free next to the other two. Pagination *within* a chain
 stays sequential because ``next_url`` is a chain.
 
+Being independent, they also fail independently: one chain's error is
+recorded and the rest still land, and the run fails only when *every* chain
+does. Each chain writes its own parquet, so letting a single failure out
+would both discard the chains that already succeeded and have ``run_job``
+retry the whole sweep -- re-fetching them into a second file for the same
+minute.
+
 Raw JSONL is off by default (``--raw`` re-enables it): at a 1-minute cadence
 it is ~6 GB/day of payload whose every schema-projected field is already in
 the parquet.
@@ -140,19 +147,51 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger, eod: bool, write_raw
     underlyings = parse_underlyings(args.underlying, DEFAULT_UNDERLYINGS)
     log_lock = threading.Lock()
     totals = {"rows": 0, "pages": 0, "forwards": 0, "eod": eod}
+    errors: list[dict[str, str]] = []
 
-    def sweep(underlying: str) -> dict[str, int]:
-        return _sweep_underlying(
-            settings, logger, args, underlying, eod, write_raw, log_lock
-        )
+    def sweep(underlying: str) -> dict[str, int] | None:
+        try:
+            return _sweep_underlying(
+                settings, logger, args, underlying, eod, write_raw, log_lock
+            )
+        except Exception as exc:  # noqa: BLE001 - one bad chain must not kill the run
+            with log_lock:
+                errors.append(
+                    {"underlying": underlying, "error": f"{type(exc).__name__}: {exc}"}
+                )
+            return None
 
     with ThreadPoolExecutor(
         max_workers=max(1, len(underlyings)), thread_name_prefix=JOB
     ) as pool:
         for counters in pool.map(sweep, underlyings):
+            if counters is None:
+                continue
             totals["rows"] += counters["rows"]
             totals["pages"] += counters["pages"]
             totals["forwards"] += counters["forwards"]
+
+    for err in errors:
+        logger.log("chain_error", **err)
+
+    # Letting one chain's exception out of this function costs the run twice
+    # over. Each chain writes its own parquet inside _sweep_underlying, so the
+    # chains that finished are already on disk -- and run_job retries the whole
+    # sweep on a transient error, which re-fetches them and lands a *second*
+    # file for the same minute. Duplicate snapshot rows are not repairable
+    # after the fact the way a missed page is, because this dataset cannot be
+    # re-pulled at all.
+    #
+    # Every chain failing is the different case: an outage (lost entitlement,
+    # broken endpoint) that must not report success, and one with nothing
+    # landed for the retry to duplicate.
+    if underlyings and len(errors) == len(underlyings):
+        raise RuntimeError(
+            f"every chain failed ({len(errors)}/{len(underlyings)}); "
+            f"first: {errors[0]['error']}"
+        )
+
+    totals["errors"] = len(errors)
     return totals
 
 

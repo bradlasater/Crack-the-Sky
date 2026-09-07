@@ -96,12 +96,20 @@ def test_shared_bucket_state_is_visible_to_another_instance(tmp_path, monkeypatc
     assert b.acquire() > 0.0
 
 
-def test_shared_bucket_refills_over_time(tmp_path) -> None:
+def test_shared_bucket_refills_over_time(tmp_path, monkeypatch) -> None:
+    """The second draw must wait exactly as long as the refill takes.
+
+    Fake clock: with real time this is a race. The burst is one token, so if
+    more than ``1/rate`` seconds of wall clock pass between the two acquires
+    -- one open/flock/write on a slow CI disk -- the bucket has already
+    refilled and the second draw returns 0.0. Frozen, the wait is arithmetic.
+    """
+    _freeze_time(monkeypatch)
     path = tmp_path / "ratelimit.json"
     bucket = ratelimit.SharedTokenBucket(path, rate=2.0, burst=1.0)
-    bucket.acquire()
-    waited = bucket.acquire()
-    assert 0.0 < waited < 2.0
+    assert bucket.acquire() == 0.0
+    # Empty now; one token at 2/s is half a second.
+    assert bucket.acquire() == pytest.approx(1.0 / 2.0, abs=1e-6)
 
 
 def test_shared_bucket_survives_a_corrupt_state_file(tmp_path) -> None:
@@ -151,17 +159,27 @@ def test_shared_bucket_degrades_instead_of_failing(tmp_path, monkeypatch) -> Non
 # Priority: the irreplaceable dataset goes first
 # ---------------------------------------------------------------------------
 
-def test_low_priority_stops_at_the_reserve(tmp_path) -> None:
-    """A low-priority caller must leave tokens for the snapshot sweep."""
-    # Refill is slow enough to be negligible across the draws below, so the
-    # count is deterministic rather than a race against the clock.
+def test_low_priority_stops_at_the_reserve(tmp_path, monkeypatch) -> None:
+    """A low-priority caller must leave tokens for the snapshot sweep.
+
+    Fake clock. The previous version relied on refill being "negligible"
+    across the draws, which is a 0.5s wall-clock budget spent on six
+    open/flock/write round trips: 0.3ms on an idle box, but enough to refill
+    past the reserve on a loaded runner, and it failed the 3.12 job on #59
+    while the same commit passed on push. Frozen, the deficit is arithmetic
+    and the wait is an exact number rather than merely non-zero.
+    """
+    _freeze_time(monkeypatch)
     bucket = ratelimit.SharedTokenBucket(tmp_path / "rl.json", rate=1.0, burst=10.0)
     reserve = 10.0 * ratelimit.RESERVE_FRACTION  # 3.5
     free = int(10.0 - reserve)                   # 6 immediate draws
     for _ in range(free):
         assert bucket.acquire(priority=ratelimit.LOW) == 0.0
-    # The next one would eat into the reserve, so it has to wait for refill.
-    assert bucket.acquire(priority=ratelimit.LOW) > 0.0
+    # 4.0 tokens left and the 7th draw may not cross 3.5, so it needs 4.5:
+    # a deficit of half a token, which at 1/s is half a second.
+    deficit = (1.0 + reserve) - (10.0 - free)
+    assert bucket.acquire(priority=ratelimit.LOW) == pytest.approx(
+        deficit / 1.0, abs=1e-6)
 
 
 def test_normal_priority_may_drain_the_reserve(tmp_path) -> None:
@@ -187,12 +205,22 @@ def test_sweep_is_not_blocked_by_a_saturating_low_priority_job(tmp_path) -> None
     assert sweep.acquire(priority=ratelimit.NORMAL) == 0.0
 
 
-def test_in_process_bucket_honours_priority_too(tmp_path) -> None:
-    """MASSIVE_RATELIMIT_SHARED=0 must not silently drop the guarantee."""
+def test_in_process_bucket_honours_priority_too(monkeypatch) -> None:
+    """MASSIVE_RATELIMIT_SHARED=0 must not silently drop the guarantee.
+
+    Same reserve arithmetic as the shared case above, and frozen for the same
+    reason -- the in-process draws are far quicker, so the wall-clock budget
+    is wider rather than absent.
+    """
+    _freeze_time(monkeypatch)
+    reserve = 10.0 * ratelimit.RESERVE_FRACTION
+    free = int(10.0 - reserve)
     bucket = TokenBucket(rate=1.0, burst=10.0)
-    for _ in range(int(10.0 - 10.0 * ratelimit.RESERVE_FRACTION)):
+    for _ in range(free):
         assert bucket.acquire(priority=ratelimit.LOW) == 0.0
-    assert bucket.acquire(priority=ratelimit.LOW) > 0.0
+    deficit = (1.0 + reserve) - (10.0 - free)
+    assert bucket.acquire(priority=ratelimit.LOW) == pytest.approx(
+        deficit / 1.0, abs=1e-6)
 
 
 # ---------------------------------------------------------------------------

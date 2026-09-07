@@ -494,6 +494,46 @@ def test_success_pings_start_then_success(tmp_path, monkeypatch, recorder):
     assert _suffixes(recorder) == ["/start", ""]
 
 
+def test_reserved_summary_keys_do_not_crash_job_end(tmp_path, monkeypatch, recorder):
+    """A good run must not become job_error because its summary reused a kwarg.
+
+    ``logger.log("job_end", job=..., rows=..., bytes=..., duration_s=...,
+    **extras)`` raises TypeError if extras also contains those names. The
+    BaseException handler then logs job_error and pings /fail.
+    """
+    import json
+
+    settings = _settings(tmp_path, healthchecks_ping_key="KEY")
+    monkeypatch.setattr(cli.Settings, "load", classmethod(lambda cls: settings))
+
+    def main_fn(a, s, log):
+        return {
+            "rows": 7,
+            "bytes": 12,
+            "job": "spoofed",
+            "duration_s": 999,
+            "files": 3,
+        }
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.run_job("contracts_sync", main_fn, [])
+    assert excinfo.value.code == 0
+    assert _suffixes(recorder) == ["/start", ""]
+
+    log_files = list((tmp_path / "logs" / "contracts_sync").rglob("*.log"))
+    assert len(log_files) == 1
+    events = [json.loads(line) for line in log_files[0].read_text().splitlines() if line]
+    names = [e["event"] for e in events]
+    assert "job_error" not in names
+    assert names[-1] == "job_end"
+    end = events[-1]
+    assert end["job"] == "contracts_sync"
+    assert end["rows"] == 7
+    assert end["bytes"] == 12
+    assert end["files"] == 3
+    assert end["duration_s"] != 999
+
+
 def test_exception_pings_start_then_fail(tmp_path, monkeypatch, recorder):
     settings = _settings(tmp_path, healthchecks_ping_key="KEY")
     monkeypatch.setattr(cli.Settings, "load", classmethod(lambda cls: settings))

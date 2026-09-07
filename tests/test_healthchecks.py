@@ -241,7 +241,10 @@ def test_every_scheduled_job_is_monitored() -> None:
 # Checks that are pinged by a running job rather than started by cron. Each
 # needs an owning cron job, or it is exactly the never-pinged check the test
 # above exists to prevent.
-JOB_PINGED_CHECKS = {"ws_minute_bars_alive": "ws_minute_bars"}
+JOB_PINGED_CHECKS = {
+    "ws_minute_bars_alive": "ws_minute_bars",
+    "snapshot_sweep_all_chains": "snapshot_sweep",
+}
 
 
 def test_no_monitoring_for_unscheduled_jobs() -> None:
@@ -267,6 +270,17 @@ def test_liveness_check_slug_matches_what_the_job_pings() -> None:
     mod = _setup_module()
     assert LIVENESS_JOB in mod.JOBS
     assert mod.slug_for(LIVENESS_JOB) == cli.healthcheck_slug(LIVENESS_JOB)
+
+
+def test_all_chains_check_slug_matches_what_the_job_pings() -> None:
+    """Same contract for the sweep's degraded-capture check: a slug the job and
+    the setup script disagree on is a check that silently never gets pinged --
+    and this one alerts by the *absence* of pings, so it would page nightly."""
+    from ingest.jobs.snapshot_sweep import ALL_CHAINS_JOB
+
+    mod = _setup_module()
+    assert ALL_CHAINS_JOB in mod.JOBS
+    assert mod.slug_for(ALL_CHAINS_JOB) == cli.healthcheck_slug(ALL_CHAINS_JOB)
 
 
 def test_eod_dayaggs_is_deliberately_unmonitored() -> None:

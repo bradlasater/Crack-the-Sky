@@ -80,11 +80,15 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   every chain does. Previously a single failure discarded the chains that had
   already succeeded *and* had `run_job` retry the whole sweep, re-fetching them
   into a second parquet for the same minute — duplicate rows in the one dataset
-  that cannot be backfilled. What remains is a monitoring gap rather than a
-  data one: a partial failure returns success, so a chain failing on every run
-  keeps a green Healthchecks check and shows up only as `chain_error` lines in
-  the JSONL and a non-zero `errors` in `job_end`. Alerting on that count is not
-  wired to anything.
+  that cannot be backfilled. The monitoring half is closed too: because a
+  partial failure has to report success, the job's own check would stay green
+  for a chain that is down on every run, so a second check
+  (`snapshot_sweep_all_chains`) is pinged *only* when every chain came back
+  clean. Its grace window is the alert — one transient failure is absorbed by
+  the next minute's clean sweep, and a chain down longer than the grace stops
+  the pings and pages. Alerting by absence rather than by `/fail` is
+  deliberate: at a 1-minute cadence, failing on any bad chain would page on
+  every transient 429.
 
 ## Performance
 

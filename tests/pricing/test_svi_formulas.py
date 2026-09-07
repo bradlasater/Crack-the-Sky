@@ -86,6 +86,7 @@ def _slice(
         rms_error=0.0,
         min_g=1.0,
         rate=0.04,
+        daycount="act/365",
     )
 
 

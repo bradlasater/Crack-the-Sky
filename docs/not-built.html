@@ -81,8 +81,8 @@
           </tr>
           <tr>
             <td>Holiday calendar for T / trading-day theta</td>
-            <td><span class="badge missing">not built</span></td>
-            <td>Pricing T is still ACT/365 and 252 is still a constant that only rescales theta <em>output</em> units — no T in any pricing formula is trading-day aware, which is what keeps this row red. The calendar itself is now built: <code>pricing.calendar</code> answers <code>is_session</code> and <code>sessions_between</code> in both directions, unioning <code>history_audit</code>'s attested history (<code>_meta/trading_days.json</code>, 1048 weekdays since 2022-08-31 marked session or holiday against the vendor) with weekday-minus-holidays over the <code>_meta/holidays.json</code> upcoming window, and raising rather than guessing outside both. Nothing consumes it yet; adopting it moves every T and every theta, so it lands as its own change.</td>
+            <td><span class="badge shipped">partial</span></td>
+            <td>Day-bar vol time defaults to the hybrid in <code>pricing.daycount</code>: sessions over 252 inside the attested + upcoming calendar, ACT/365 past the horizon, stamped per row on <code>atm_term_structure</code> and <code>vol_surface</code>. 252 in <code>conventions.py</code> still only rescales theta <em>output</em> units. The live path (<code>from_market.year_fraction</code>) is still ACT/365 to the settlement instant — that is step 4, not this row going red again.</td>
           </tr>
         </tbody>
       </table>

@@ -55,7 +55,7 @@ from ingest.jobs import (
     parse_option_ticker,
     parse_underlyings,
 )
-from pricing.daycount import DEFAULT_DAYCOUNT, DayCount, discount_year_fraction
+from pricing.daycount import DEFAULT_DAYCOUNT, DayCount, discount_year_fraction, hybrid_for
 from pricing.iv import implied_vol
 
 JOB = "term_structure"
@@ -184,6 +184,7 @@ def build_rows(
             # than a floor, which would invent vol time the calendar denies.
             if T <= 0:
                 continue
+            stamp = daycount.name_for(d, expiry)
             F = float(fwd["forward"])
             r = _rate_for_expiry(expiry)
 
@@ -212,6 +213,7 @@ def build_rows(
                 "expiration_date": fwd["expiration_date"],
                 "dte": dte,
                 "t_years": T,
+                "daycount": stamp,
                 "forward": F,
                 "atm_strike": K,
                 "call_price": call_px,
@@ -265,7 +267,7 @@ def write_rows(settings: Settings, d: date, rows: list[dict[str, Any]]) -> Path:
 
 def build_for_date(
     settings: Settings, d: date, roots: tuple[str, ...] = OPTION_ROOTS,
-    daycount: DayCount = DEFAULT_DAYCOUNT,
+    daycount: DayCount | None = None,
 ) -> list[dict[str, Any]]:
     """Read the partition and reduce it to term-structure rows.
 
@@ -276,7 +278,13 @@ def build_for_date(
     session. It is a function of the as-of date alone, so hoisting it changes
     no result -- it took a backfill of the full history from ~63 minutes to
     a few.
+
+    ``daycount`` defaults to the hybrid bound to this warehouse's calendar,
+    not to a process-global ``DATA_ROOT``, so a staging rebuild cannot silently
+    price off the box calendar.
     """
+    if daycount is None:
+        daycount = hybrid_for(settings.data_root)
     curve = load_curve(d, settings.data_root)
     return build_rows(
         read_day_bars(settings, d), d, roots, settings.data_root,

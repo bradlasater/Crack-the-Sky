@@ -41,6 +41,7 @@ def _term(**over: object) -> dict:
         "expiration_date": EXPIRY.isoformat(),
         "dte": DTE,
         "t_years": T,
+        "daycount": "act/365",
         "forward": F,
         "rate": R,
     }
@@ -88,6 +89,25 @@ def test_shortest_spy_term_is_positive_dte_spy_only() -> None:
     assert got["dte"] == 1
     assert got["forward"] == pytest.approx(F)
     assert shortest_spy_term([_term(dte=0)]) is None
+
+
+def test_shortest_spy_term_refuses_an_unstamped_row() -> None:
+    from signals.spot import SpotError
+
+    with pytest.raises(SpotError, match="no daycount stamp"):
+        shortest_spy_term([_term(daycount=None)])
+    with pytest.raises(SpotError, match="unknown daycount"):
+        shortest_spy_term([_term(daycount="hybrid")])
+
+
+def test_proxy_uses_money_time_not_the_vol_stamp() -> None:
+    """After the hybrid flip ``t_years`` is vol time. Discounting must not follow it."""
+    vol_t = 3 / 252.0
+    spot_wrong_t, _ = proxy_spot(_term(t_years=vol_t), [], SESSION)
+    spot_act, _ = proxy_spot(_term(), [], SESSION)
+    assert spot_wrong_t == pytest.approx(spot_act)
+    assert spot_act == pytest.approx(F * math.exp(-R * T))
+    assert spot_act != pytest.approx(F * math.exp(-R * vol_t))
 
 
 def test_proxy_without_a_dividend_is_discounted_forward() -> None:
@@ -254,6 +274,7 @@ def test_build_for_date_reads_the_three_sources(tmp_path) -> None:
         [{
             "date": SESSION.isoformat(), "underlying": "SPY",
             "expiration_date": EXPIRY.isoformat(), "dte": DTE, "t_years": T,
+            "daycount": "act/365",
             "forward": F, "atm_strike": F, "call_price": 1.0, "put_price": 1.0,
             "call_iv": 0.1, "put_iv": 0.1, "atm_iv": 0.1, "rate": R,
             "pairs": 3, "method": "parity", "src": "day_bars",
@@ -283,7 +304,8 @@ def _write_term(tmp_path, session: date, expiry: date, forward: float, rate: flo
         [{
             "date": session.isoformat(), "underlying": "SPY",
             "expiration_date": expiry.isoformat(), "dte": dte,
-            "t_years": dte / 365.0, "forward": forward, "atm_strike": forward,
+            "t_years": dte / 365.0, "daycount": "act/365",
+            "forward": forward, "atm_strike": forward,
             "call_price": 1.0, "put_price": 1.0, "call_iv": 0.1, "put_iv": 0.1,
             "atm_iv": 0.1, "rate": rate, "pairs": 3, "method": "parity",
             "src": "day_bars",

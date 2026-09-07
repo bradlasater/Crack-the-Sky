@@ -31,7 +31,7 @@ entitlement or owner decision before code helps).
 | Ingestion / capture | **built** | systemd timers via `deploy/`, typed reads in `marketdata/`, immutable parquet raw. |
 | Validation / QC gate | **partial** | Fail-loud schema validation (`marketdata/validate.py`), `coverage_audit`, flat-file reconciliation. Missing: *market-level* QC — staleness, crossed markets, bad prints — and a gate that blocks downstream consumers. |
 | Warehouse / event store | **partial** | Parquet raw/clean under `DATA_ROOT`. **Decision logs do not exist** — the diagram's "do not overwrite decision history" has no schema yet. Cheap to add now, expensive to retrofit. |
-| Reference data | **built** | Contracts (incl. expired), dividends, rates (Treasury to 1962), holidays. Trading-day calendar exists as `_meta/trading_days.json` but **nothing consumes it** (T is still ACT/365). |
+| Reference data | **built** | Contracts (incl. expired), dividends, rates (Treasury to 1962), holidays. Trading-day calendar is consumed on the day-bar path (hybrid vol time, stamped per row); the live path is still ACT/365. |
 
 ### Analytics / decision
 
@@ -88,8 +88,8 @@ job or a script, not just a module.
    (`scripts/build_surface.py`). Add the scheduled job + healthcheck, per
    the not-built ledger. Then wire drift_check's off-ATM slice consumer.
 2. **Adopt the trading-day calendar** in `pricing/` (decision 4 above).
-   One convention change; touch `year_fraction`, theta, and the term
-   structure in one pass.
+   Day-bar path: hybrid default, per-row stamp (step 3). Live path still
+   ACT/365 (step 4). Production `clean/` swap is the remaining cutover.
 3. **Decision-log schema.** Define the append-only decision record (inputs,
    signal values, gate outcome, rationale, versions) in the warehouse even
    before the strategy engine emits real ones — the backtester in week 2

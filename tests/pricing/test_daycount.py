@@ -1,9 +1,9 @@
 """Day-count conventions, and the vol-time / money-time split they encode.
 
-Nothing here changes a number yet: ACT/365 is still the default everywhere,
-and the pins below are what will make flipping it a deliberate act rather than
-a silent one. The load-bearing tests are the two at the bottom -- a passed
-convention must move vol time and must *not* move the rate tenor.
+The day-bar default is the hybrid. The pins below make flipping it back, or
+stamping the wrong name, fail a test rather than mix silently. The load-bearing
+tests are still the two at the seam -- a passed convention must move vol time
+and must *not* move the rate tenor.
 """
 
 from __future__ import annotations
@@ -22,9 +22,11 @@ from pricing.daycount import (
     DEFAULT_DAYCOUNT,
     CalendarDays,
     DayCount,
+    DayCountStampError,
     HybridSessions,
     TradingSessions,
     discount_year_fraction,
+    require_daycount_stamps,
 )
 
 DAY = date(2026, 8, 28)
@@ -75,12 +77,13 @@ def test_calendar_days_is_exactly_act_365() -> None:
     assert ACT_365.name == "act/365"
 
 
-def test_default_is_still_act_365() -> None:
-    """The pin that makes step 3 a decision. Changing the default moves every
-    T on the day-bar path at once, so it should fail a test on the way."""
-    assert DEFAULT_DAYCOUNT is ACT_365
-    assert isinstance(DEFAULT_DAYCOUNT, CalendarDays)
-    assert DEFAULT_DAYCOUNT.days_per_year == 365.0
+def test_default_is_the_hybrid() -> None:
+    """The pin that made step 3 a decision. The default moves every T on the
+    day-bar path at once; it is the hybrid, not ACT/365 and not a raw session
+    count that would refuse the LEAPS tail."""
+    assert DEFAULT_DAYCOUNT.name == "hybrid"
+    assert not isinstance(DEFAULT_DAYCOUNT, CalendarDays)
+    assert isinstance(DEFAULT_DAYCOUNT, DayCount)
 
 
 def test_trading_sessions_counts_sessions_over_252(
@@ -182,15 +185,15 @@ def test_zero_vol_time_rows_are_skipped_not_landed(
 def test_the_same_span_still_lands_under_act_365(builder: str) -> None:
     """The guard is about vol time, not about the date.
 
-    Under the default convention the span is 1/365 and the row is perfectly
-    ordinary, so the skip must not fire -- otherwise this would be a silent
-    behaviour change to the landed archive rather than a guard on a
-    convention that is not switched on yet.
+    Under ACT/365 the span is 1/365 and the row is perfectly ordinary, so the
+    skip must not fire -- the convention is still selectable, it is just no
+    longer the default.
     """
-    assert _built(builder) == 1
+    assert _built(builder, daycount=ACT_365) == 1
     row = ts.build_rows(_one_day_chain(), MOURNING_EVE, roots=("SPXW",),
-                        rate_fn=lambda _a, _t: R)[0]
+                        rate_fn=lambda _a, _t: R, daycount=ACT_365)[0]
     assert row["t_years"] == pytest.approx(1.0 / 365.0, rel=1e-12)
+    assert row["daycount"] == "act/365"
 
 
 # ---------------------------------------------------------------------------
@@ -209,10 +212,11 @@ def _rate_probe():
     return rate_fn, seen
 
 
-def test_default_build_is_unchanged_act_365() -> None:
+def test_default_build_stamps_act_365_when_that_convention_is_passed() -> None:
     row = ts.build_rows(_chain_bars(), DAY, roots=("SPXW",),
-                        rate_fn=lambda _a, _t: R)[0]
+                        rate_fn=lambda _a, _t: R, daycount=ACT_365)[0]
     assert row["t_years"] == pytest.approx(DTE / 365.0, rel=1e-12)
+    assert row["daycount"] == "act/365"
 
 
 @pytest.mark.parametrize("builder", ["term_structure", "surface"])
@@ -360,5 +364,64 @@ def test_simple_conventions_report_their_own_name() -> None:
 
 def test_hybrid_satisfies_the_protocol(session_calendar: SessionCalendar) -> None:
     for conv in (ACT_365, TradingSessions(session_calendar),
-                 HybridSessions(TradingSessions(session_calendar))):
+                 HybridSessions(TradingSessions(session_calendar)),
+                 DEFAULT_DAYCOUNT):
         assert isinstance(conv, DayCount)
+
+
+# ---------------------------------------------------------------------------
+# Per-row stamp
+# ---------------------------------------------------------------------------
+
+
+def test_hybrid_rows_stamp_the_convention_that_produced_them(
+    session_calendar: SessionCalendar,
+) -> None:
+    h = HybridSessions(TradingSessions(session_calendar))
+    row = ts.build_rows(_chain_bars(), DAY, roots=("SPXW",),
+                        rate_fn=lambda _a, _t: R, daycount=h)[0]
+    assert row["daycount"] == "bus/252"
+    assert row["t_years"] == pytest.approx(SESSIONS / 252.0, rel=1e-12)
+
+    leaps = date(2031, 12, 19)
+    t = (leaps - DAY).days / 365.0
+    bars = []
+    for k in (float(x) for x in range(7300, 8101, 25)):
+        vol = VOL - 0.15 * math.log(k / F)
+        for kind in ("call", "put"):
+            bars.append({"ticker": _sym("SPXW", leaps, kind, k),
+                         "close": float(price(F, k, t, R, vol, kind, q=R)),
+                         "window_end_ns": 1})
+    leaps_row = ts.build_rows(bars, DAY, roots=("SPXW",),
+                              rate_fn=lambda _a, _t: R, daycount=h)[0]
+    assert leaps_row["daycount"] == "act/365"
+    assert leaps_row["t_years"] == pytest.approx(t, rel=1e-12)
+
+
+def test_require_daycount_stamps_fails_loud_on_missing_or_unknown() -> None:
+    ok = [{"daycount": "bus/252"}, {"daycount": "act/365"}]
+    assert require_daycount_stamps(ok) == ["bus/252", "act/365"]
+    with pytest.raises(DayCountStampError, match="no daycount stamp"):
+        require_daycount_stamps([{"t_years": 0.1}])
+    with pytest.raises(DayCountStampError, match="unknown daycount"):
+        require_daycount_stamps([{"daycount": "hybrid"}])
+    with pytest.raises(DayCountStampError, match="unknown daycount"):
+        require_daycount_stamps([{"daycount": "act/365.25"}])
+
+
+def test_build_for_date_binds_hybrid_to_the_warehouse(tmp_path, monkeypatch) -> None:
+    """A staging DATA_ROOT must not be priced on the box calendar."""
+    from ingest.common.config import Settings
+
+    seen: list[str] = []
+
+    def fake_hybrid(root=None):  # noqa: ANN001
+        seen.append(str(root) if root is not None else "")
+        return ACT_365
+
+    monkeypatch.setattr(ts, "hybrid_for", fake_hybrid)
+    monkeypatch.setattr(ts, "load_curve", lambda _d, _root: type("C", (), {"at": staticmethod(lambda T: 0.04)})())
+    monkeypatch.setattr(ts, "read_day_bars", lambda _settings, _d: [])
+    settings = Settings(massive_api_key="k", data_root=tmp_path, log_root=tmp_path / "logs")
+    assert ts.build_for_date(settings, DAY) == []
+    assert seen == [str(tmp_path)]

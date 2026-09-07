@@ -5,11 +5,12 @@ is the mistake this module exists to prevent.
 
 **Vol time** is the T in σ√T. It measures how much *trading* falls between two
 dates, because that is when prices move: a Saturday contributes no variance,
-and neither does Labor Day. Whether it should therefore be counted in sessions
-rather than calendar days is exactly the open question -- see
-``docs/plans/trading-day-calendar.md``. This module makes the choice a passed
-object instead of a module constant, so it can be made deliberately, measured
-against the alternative, and recorded per landed row.
+and neither does Labor Day. The day-bar path defaults to the hybrid -- sessions
+where the calendar can vouch, ACT/365 past the horizon -- and stamps
+``name_for`` on every landed row. The live path is still ACT/365 until step 4;
+see ``docs/plans/trading-day-calendar.md``. This module makes the choice a
+passed object instead of a module constant, so it can be measured against the
+alternative and recorded per landed row.
 
 **Money time** is the T in e^(−rT) and the tenor used to look up the Treasury
 curve. Interest accrues on weekends and holidays like every other day, so this
@@ -31,6 +32,8 @@ adopting a session count here would not change it.
 
 from __future__ import annotations
 
+import os
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Protocol, runtime_checkable
@@ -38,6 +41,11 @@ from typing import Protocol, runtime_checkable
 from ingest.common.market_gate import is_weekday
 from pricing.calendar import CalendarRangeError, SessionCalendar, load_session_calendar
 from pricing.conventions import CALENDAR_DAYS_PER_YEAR, TRADING_DAYS_PER_YEAR
+
+# What a landed row may stamp. ``HybridSessions.name`` is "hybrid"; rows stamp
+# ``name_for``, which is one of these two -- never "hybrid" -- so a reader can
+# tell which convention actually produced ``t_years``.
+ROW_DAYCOUNTS = frozenset({"act/365", "bus/252"})
 
 
 @runtime_checkable
@@ -62,8 +70,10 @@ class DayCount(Protocol):
 class CalendarDays:
     """ACT/365 -- calendar days to expiry over 365.
 
-    The convention behind every row landed to date, and the default until a
-    deliberate change says otherwise.
+    Kept selectable so the backtester can re-run history under either
+    convention. The day-bar default is the hybrid; this is still what the
+    hybrid falls back to past the calendar horizon, and what the live path
+    uses until step 4.
     """
 
     name: str = "act/365"
@@ -80,10 +90,10 @@ class CalendarDays:
 class TradingSessions:
     """Bus/252 -- sessions in ``(start, end]`` over 252, on a real calendar.
 
-    Defined but not yet the default anywhere. It raises rather than guessing
-    for a date its calendar cannot vouch for, which includes every expiry past
-    the vendor's upcoming-holiday horizon -- so switching a caller to it is a
-    decision about the long end of the book, not only about the convention.
+    Used inside :class:`HybridSessions`. On its own it raises rather than
+    guessing for a date its calendar cannot vouch for, which includes every
+    expiry past the vendor's upcoming-holiday horizon -- that is why the
+    default is the hybrid, not this convention by itself.
     """
 
     calendar: SessionCalendar
@@ -168,14 +178,77 @@ class HybridSessions:
         return self._resolve(start, end)[1]
 
 
+class DayCountStampError(ValueError):
+    """A landed row is missing its convention stamp, or the stamp is unknown."""
+
+
+def require_daycount_stamps(
+    rows: Sequence[Mapping[str, object]],
+    *,
+    context: str = "",
+) -> list[str]:
+    """Return each row's stamp, or raise if one is missing or unknown.
+
+    Mixed ``act/365`` and ``bus/252`` in one batch is the hybrid's normal
+    shape (LEAPS tail vs the rest) and is not an error. Interpreting an
+    unstamped ``t_years`` under either convention would be.
+    """
+    prefix = f"{context}: " if context else ""
+    stamps: list[str] = []
+    for i, row in enumerate(rows):
+        raw = row.get("daycount")
+        if raw is None or str(raw).strip() == "":
+            raise DayCountStampError(f"{prefix}row {i} has no daycount stamp")
+        stamp = str(raw)
+        if stamp not in ROW_DAYCOUNTS:
+            raise DayCountStampError(
+                f"{prefix}row {i} has unknown daycount {stamp!r}; "
+                f"expected one of {sorted(ROW_DAYCOUNTS)}"
+            )
+        stamps.append(stamp)
+    return stamps
+
+
+_HYBRID_CACHE: dict[str, HybridSessions] = {}
+
+
+def _resolve_data_root(data_root: str | os.PathLike[str] | None) -> str:
+    if data_root is not None:
+        return str(data_root)
+    return os.environ.get("DATA_ROOT", "/data/massive")
+
+
+def hybrid_for(data_root: str | os.PathLike[str] | None = None) -> HybridSessions:
+    """The session-count convention over the box's own calendar files."""
+    key = _resolve_data_root(data_root)
+    cached = _HYBRID_CACHE.get(key)
+    if cached is None:
+        cached = HybridSessions(TradingSessions(load_session_calendar(data_root)))
+        _HYBRID_CACHE[key] = cached
+    return cached
+
+
+@dataclass(frozen=True, slots=True)
+class _DefaultHybrid:
+    """Lazy hybrid over ``DATA_ROOT``. Importing this module must not need the warehouse.
+
+    ``build_for_date`` binds :func:`hybrid_for` to ``settings.data_root`` so a
+    staging warehouse is not priced on the box calendar. Tests that recover a
+    synthetic ACT/365 chain must pass :data:`ACT_365` explicitly.
+    """
+
+    name: str = "hybrid"
+
+    def year_fraction(self, start: date, end: date) -> float:
+        return hybrid_for().year_fraction(start, end)
+
+    def name_for(self, start: date, end: date) -> str:
+        return hybrid_for().name_for(start, end)
+
+
 # What every caller gets when it does not say. Changing this line changes every
 # T in the day-bar path at once, which is why it is a line and not a literal.
-DEFAULT_DAYCOUNT: DayCount = ACT_365
-
-
-def hybrid_for(data_root: str | None = None) -> HybridSessions:
-    """The session-count convention over the box's own calendar files."""
-    return HybridSessions(TradingSessions(load_session_calendar(data_root)))
+DEFAULT_DAYCOUNT: DayCount = _DefaultHybrid()
 
 
 def discount_year_fraction(start: date, end: date) -> float:

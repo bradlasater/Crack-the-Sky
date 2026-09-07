@@ -169,6 +169,15 @@
           <code>vol_surface</code>. Read back with <code>load_surface</code> /
           <code>Surface.from_rows</code> — do not refit from day bars. No VIX surface:
           those options are on the VX future, a different modelling question.
+          BLAS threads are pinned to 1 by <code>scripts/cronjob.sh</code> and
+          <code>scripts/build_surface.py</code>: the fit is a constrained
+          least-squares solve, and at 8 threads instead of 1 it lands elsewhere
+          in an equally good basin — 397 of 720 values moved on 2026-09-04,
+          <code>svi_rho</code> by up to 2.24e-03 relative, with
+          <code>rms_error</code> moving less than 1e-09. Parameters that depend
+          on how busy the box was cannot be diffed across a rebuild or
+          reproduced by a backtest. The ATM curve is unaffected (scalar Brent,
+          no BLAS).
         </dd>
       </dl>
 

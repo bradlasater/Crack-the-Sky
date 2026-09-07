@@ -27,10 +27,20 @@ run, and the guard's message says which expiries to look at.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from datetime import date
 from pathlib import Path
+
+# Must precede the pricing import below, and therefore numpy's: OpenBLAS reads
+# its thread count once, when the shared library loads. Setting it afterwards
+# is silently a no-op. See scripts/cronjob.sh for why the fit needs pinning at
+# all -- this script is the archive rebuild, so it is the one run where an
+# unreproducible fit does the most damage.
+for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+             "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    os.environ.setdefault(_var, "1")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 

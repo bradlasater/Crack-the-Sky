@@ -210,7 +210,7 @@
     "snapshot_sweep_all_chains": {
       "schedule": "* 10-15 * * 1-5",
       "grace_min": 10,
-      "desc": "Every snapshot chain clean. Pinged only when no chain failed, so a chain down longer than the grace alerts while one blip does not.",
+      "desc": "Every snapshot chain clean (covers 10:00-15:59). Pinged only when no chain failed, so a chain down longer than the grace alerts while one blip does not.",
       "owner": "snapshot_sweep"
     }
   }

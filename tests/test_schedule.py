@@ -83,6 +83,22 @@ def test_extra_checks_are_owned_by_scheduled_jobs() -> None:
         assert set(check) >= {"schedule", "grace_min", "desc"}
 
 
+def test_all_chains_check_uses_the_owner_session_schedule() -> None:
+    """One Healthchecks cron cannot say 09:30-16:30, so extra checks use the
+    same liquid-session expression as the owner. An open/close outage that
+    recovers before 10:00 is the same gap the primary check already accepts.
+    """
+    owner = next(
+        u["healthchecks"]
+        for u in UNITS
+        if u["job"] == "snapshot_sweep" and u["healthchecks"] is not None
+    )
+    extra = SCHEDULE["extra_checks"]["snapshot_sweep_all_chains"]
+    assert extra["schedule"] == owner["schedule"]
+    assert extra["grace_min"] == owner["grace_min"]
+    assert "10:00-15:59" in extra["desc"]
+
+
 def _fires_per_firing_day(unit: dict) -> int:
     """Distinct (hour, minute) instants the unit's cron forms fire on a matched day."""
     instants: set[tuple[int, int]] = set()

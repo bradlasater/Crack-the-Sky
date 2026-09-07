@@ -16,6 +16,7 @@ import pytest
 from ingest.jobs import parse_option_ticker
 from pricing import term_structure as ts
 from pricing.bsm import price
+from pricing.daycount import ACT_365
 
 DAY = date(2026, 8, 28)
 EXPIRY = date(2026, 9, 25)
@@ -86,7 +87,7 @@ def test_round_trips_against_the_symbol_builder() -> None:
 # ---------------------------------------------------------------------------
 
 def test_recovers_the_vol_the_chain_was_priced_at() -> None:
-    rows = ts.build_rows(_chain_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate)
+    rows = ts.build_rows(_chain_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)
     assert len(rows) == 1
     row = rows[0]
     assert row["atm_iv"] == pytest.approx(VOL, abs=1e-6)
@@ -105,25 +106,26 @@ def test_inversion_is_black_with_the_forward_as_spot() -> None:
 
 
 def test_recovers_the_forward_from_parity() -> None:
-    rows = ts.build_rows(_chain_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate)
+    rows = ts.build_rows(_chain_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)
     assert rows[0]["forward"] == pytest.approx(F, rel=1e-9)
     assert rows[0]["atm_strike"] == 7700.0
 
 
-def test_dte_and_t_years_are_act_365() -> None:
-    # Was an assertion on a module constant; the default is now the convention
-    # object, and the rows below are what actually proves which one ran.
-    assert ts.DEFAULT_DAYCOUNT.name == "act/365"
-    row = ts.build_rows(_chain_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate)[0]
+def test_dte_is_calendar_days_and_t_years_follows_the_convention() -> None:
+    # dte is a calendar-day count regardless of vol-time convention. The
+    # default is now the hybrid; this pin keeps ACT/365 selectable.
+    assert ts.DEFAULT_DAYCOUNT.name == "hybrid"
+    row = ts.build_rows(_chain_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)[0]
     assert row["dte"] == DTE
     assert row["t_years"] == pytest.approx(DTE / 365.0, rel=1e-12)
     assert row["t_years"] != pytest.approx(DTE / 365.25, rel=1e-9)
     assert row["t_years"] != pytest.approx(DTE / 252.0, rel=1e-9)
+    assert row["daycount"] == "act/365"
 
 
 @pytest.mark.parametrize("vol", [0.08, 0.18, 0.45, 0.90])
 def test_recovers_across_the_vol_range(vol: float) -> None:
-    rows = ts.build_rows(_chain_bars(vol=vol), DAY, roots=("SPXW",), rate_fn=_flat_rate)
+    rows = ts.build_rows(_chain_bars(vol=vol), DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)
     assert rows[0]["atm_iv"] == pytest.approx(vol, abs=1e-5)
 
 
@@ -133,7 +135,7 @@ def test_recovers_across_the_vol_range(vol: float) -> None:
 
 def test_roots_are_not_merged() -> None:
     bars = _chain_bars("SPXW") + _chain_bars("SPX", vol=0.25)
-    rows = ts.build_rows(bars, DAY, roots=("SPX", "SPXW"), rate_fn=_flat_rate)
+    rows = ts.build_rows(bars, DAY, roots=("SPX", "SPXW"), rate_fn=_flat_rate, daycount=ACT_365)
     got = {r["underlying"]: r["atm_iv"] for r in rows}
     assert got["SPXW"] == pytest.approx(VOL, abs=1e-5)
     assert got["SPX"] == pytest.approx(0.25, abs=1e-5)
@@ -141,13 +143,13 @@ def test_roots_are_not_merged() -> None:
 
 def test_unrequested_roots_are_skipped() -> None:
     bars = _chain_bars("SPXW") + _chain_bars("SPY")
-    rows = ts.build_rows(bars, DAY, roots=("SPY",), rate_fn=_flat_rate)
+    rows = ts.build_rows(bars, DAY, roots=("SPY",), rate_fn=_flat_rate, daycount=ACT_365)
     assert {r["underlying"] for r in rows} == {"SPY"}
 
 
 def test_non_option_tickers_are_ignored() -> None:
     bars = _chain_bars() + [{"ticker": "SPXL", "close": 1.0, "window_end_ns": 1}]
-    rows = ts.build_rows(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate)
+    rows = ts.build_rows(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)
     assert len(rows) == 1
 
 
@@ -163,7 +165,7 @@ def test_same_day_expiry_is_skipped_not_priced_at_t_zero() -> None:
             intrinsic = max(F - k, 0.0) if kind == "call" else max(k - F, 0.0)
             bars.append({"ticker": _sym("SPXW", DAY, kind, k),
                          "close": intrinsic or 0.05, "window_end_ns": 1})
-    assert ts.build_rows(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate) == []
+    assert ts.build_rows(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365) == []
 
 
 def test_stale_atm_print_is_null_rather_than_zero_vol() -> None:
@@ -179,7 +181,7 @@ def test_stale_atm_print_is_null_rather_than_zero_vol() -> None:
         terms = parse_option_ticker(b["ticker"])
         if terms["contract_type"] == "put" and terms["strike"] == 7700.0:
             b["close"] = 1e-9
-    rows = ts.build_rows(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate)
+    rows = ts.build_rows(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)
     assert rows[0]["put_iv"] is None
     assert rows[0]["call_iv"] is not None
     # The mean must come from the leg that inverted, not be dragged to zero.
@@ -193,7 +195,7 @@ def test_crossed_print_above_the_bound_is_null() -> None:
         terms = parse_option_ticker(b["ticker"])
         if terms["contract_type"] == "call" and terms["strike"] == 7700.0:
             b["close"] = F * 10  # far above any arbitrage-free call value
-    rows = ts.build_rows(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate)
+    rows = ts.build_rows(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)
     assert rows[0]["call_iv"] is None
     assert rows[0]["put_iv"] is not None
 
@@ -202,7 +204,7 @@ def test_expiry_with_no_paired_strike_yields_no_row() -> None:
     """Parity needs both legs; a calls-only expiry cannot produce a forward."""
     bars = [b for b in _chain_bars()
             if parse_option_ticker(b["ticker"])["contract_type"] == "call"]
-    assert ts.build_rows(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate) == []
+    assert ts.build_rows(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365) == []
 
 
 def test_zero_and_negative_closes_are_dropped() -> None:
@@ -212,12 +214,12 @@ def test_zero_and_negative_closes_are_dropped() -> None:
         {"ticker": _sym("SPXW", EXPIRY, "put", 8000.0), "close": -1.0,
          "window_end_ns": 1},
     ]
-    rows = ts.build_rows(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate)
+    rows = ts.build_rows(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)
     assert rows[0]["atm_strike"] == 7700.0, "the dropped strike must not win ATM"
 
 
 def test_empty_input_is_empty_output_not_an_error() -> None:
-    assert ts.build_rows([], DAY, roots=("SPXW",), rate_fn=_flat_rate) == []
+    assert ts.build_rows([], DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365) == []
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +229,7 @@ def test_empty_input_is_empty_output_not_an_error() -> None:
 def test_rows_match_the_landed_schema() -> None:
     from ingest import schemas
 
-    rows = ts.build_rows(_chain_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate)
+    rows = ts.build_rows(_chain_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)
     fields = {f.name for f in schemas.SCHEMAS[ts.DATASET]}
     assert set(rows[0]) == fields, "extra keys are dropped silently on write"
 
@@ -242,7 +244,7 @@ def test_term_structure_slopes_with_expiry() -> None:
             px = float(price(F, k, far_T, R, 0.24, kind, q=R))
             bars.append({"ticker": _sym("SPXW", far, kind, k),
                          "close": px, "window_end_ns": 1})
-    rows = ts.build_rows(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate)
+    rows = ts.build_rows(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)
     by_expiry = {r["expiration_date"]: r["atm_iv"] for r in rows}
     assert by_expiry["2026-09-25"] == pytest.approx(VOL, abs=1e-5)
     assert by_expiry["2026-11-20"] == pytest.approx(0.24, abs=1e-5)
@@ -271,7 +273,7 @@ def test_atm_is_the_paired_strike_nearest_the_forward() -> None:
          "close": float(price(F, k_atm, T, R, vol_p, "put", q=R)),
          "window_end_ns": 1},
     ]
-    row = ts.build_rows(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate)[0]
+    row = ts.build_rows(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)[0]
     assert abs(k_atm - F) < abs(k_parity - F)
     assert row["forward"] == pytest.approx(F, rel=1e-12)
     assert row["atm_strike"] == k_atm
@@ -293,7 +295,7 @@ def test_atm_skips_a_nearer_one_sided_strike() -> None:
     bars.append({"ticker": _sym("SPXW", EXPIRY, "call", 7695.0),
                  "close": float(price(F, 7695.0, T, R, VOL, "call", q=R)),
                  "window_end_ns": 1})
-    row = ts.build_rows(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate)[0]
+    row = ts.build_rows(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)[0]
     assert row["atm_strike"] == 7700.0, "one-sided 7695 must not win ATM"
     assert row["call_iv"] is not None and row["put_iv"] is not None
 
@@ -304,7 +306,7 @@ def test_both_legs_present_on_every_row() -> None:
     bars.append({"ticker": _sym("SPXW", EXPIRY, "put", 7702.0),
                  "close": float(price(F, 7702.0, T, R, VOL, "put", q=R)),
                  "window_end_ns": 1})
-    for row in ts.build_rows(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate):
+    for row in ts.build_rows(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365):
         assert row["call_price"] is not None
         assert row["put_price"] is not None
 
@@ -320,7 +322,7 @@ def test_second_write_replaces_rather_than_appends(tmp_path) -> None:
 
     settings = Settings(massive_api_key="k", data_root=tmp_path,
                         log_root=tmp_path / "logs")
-    rows = ts.build_rows(_chain_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate)
+    rows = ts.build_rows(_chain_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)
     ts.write_rows(settings, DAY, rows)
     ts.write_rows(settings, DAY, rows)
 
@@ -334,7 +336,7 @@ def test_replaced_output_is_moved_not_deleted(tmp_path) -> None:
 
     settings = Settings(massive_api_key="k", data_root=tmp_path,
                         log_root=tmp_path / "logs")
-    rows = ts.build_rows(_chain_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate)
+    rows = ts.build_rows(_chain_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)
     first = ts.write_rows(settings, DAY, rows)
     ts.write_rows(settings, DAY, rows)
 

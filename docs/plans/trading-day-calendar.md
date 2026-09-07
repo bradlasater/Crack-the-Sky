@@ -4,20 +4,18 @@ Build plan for `PLAN.md` Week 1 item 2. Written 2026-09-06 against `main` at
 `8c4a422`. Scope: make time-to-expiry trading-day aware, before the HAR-RV
 forecast (item 4) and the event replay (item 7) bake ACT/365 in deeper.
 
-Status: **steps 1-2 landed, step 3 half-landed and now unblocked.**
-`pricing/calendar.py` and `pricing/daycount.py` ship with 42 tests between
-them, and no number has moved yet. Building step 1 turned up three further
-findings (3-5) that change what steps 3 and 4 can do: step 3 is smaller than
-this plan first assumed, step 4 is larger, and neither can cover the whole
-book with today's sources. Measuring step 3 added finding 8, since resolved:
-zero-session spans are skipped, on the rule the builders already applied to
-same-day expiries.
+Status: **steps 1–3 landed in code; production `clean/` swap still pending.**
+`pricing/calendar.py` and `pricing/daycount.py` ship the session calendar,
+the hybrid, and `DEFAULT_DAYCOUNT` as the hybrid. Landed `atm_term_structure`
+and `vol_surface` rows stamp `daycount` (`bus/252` or `act/365`). The archive
+rebuilds into a staging `DATA_ROOT` (decision 5(b)); production readers keep
+the ACT/365 archive until the subtree swap.
 
-Three things have cleared since: the BLAS thread pin (finding 7) makes the
-archive reproducible enough to diff a rebuild against, decision 5 is made
-(staging rebuild, then swap), and the `expiry_instant` half of decision 6 is
-fixed. What step 3 still needs is the build itself, not another decision.
-Decision 2 remains open, and gates step 4 rather than step 3.
+Three things had already cleared before this cutover: the BLAS thread pin
+(finding 7) makes the archive reproducible enough to diff a rebuild against,
+decision 5 is made (staging rebuild, then swap), and the `expiry_instant` half
+of decision 6 is fixed. Decision 2 remains open, and gates step 4 rather than
+step 3.
 
 ---
 
@@ -246,13 +244,44 @@ blocks the default flip.
 
 5. **Cutover for the schema change** (from finding 6). **Decided: (b).**
    Rebuild into a staging `DATA_ROOT` under the new code, then swap the two
-   `clean/` subtrees and deploy — readers see the old archive until the swap,
-   and the swap is a rename. Run outside the 12:00-12:30 job window with the
-   `prune`/`coverage_audit` timers stopped for the swap. The alternatives were
-   (a) merge then rebuild in place, accepting a multi-hour window where every
-   reader raises, and (c) drop the stamp and lose the ability to tell the
-   conventions apart; (a) degrades the box for the duration and (c) is the
-   silent mixing this plan exists to prevent.
+   derived `clean/` subtrees and deploy — readers see the old archive until the
+   swap, and the swap is a rename. Run outside the 12:00-12:30 job window with
+   the `prune`/`coverage_audit` timers stopped for the swap. The alternatives
+   were (a) merge then rebuild in place, accepting a multi-hour window where
+   every reader raises, and (c) drop the stamp and lose the ability to tell
+   the conventions apart; (a) degrades the box for the duration and (c) is the
+   silent mixing this plan exists to prevent. The remaining owner action is
+   the rename itself.
+
+   Procedure (do not run the swap while `term_structure` / `surface` /
+   `coverage_audit` / `prune` can fire; those are Tue–Sat 12:00–12:30 ET,
+   plus the monthly prune):
+
+   1. Rebuild into `/data/massive-hybrid-staging` with input datasets
+      symlinked from `/data/massive` and `atm_term_structure` /
+      `vol_surface` written locally (`DATA_ROOT` pointed at staging,
+      `--force`, every worker bounded with `--end`).
+   2. Confirm staging partitions carry `daycount` and that
+      `load_surface` / a term-structure catalog read succeed against staging.
+   3. Stop the `term_structure`, `surface`, `coverage_audit` (and `prune`,
+      if it could run) timers for the swap window.
+   4. Rename, per dataset, not the whole `clean/` tree (other clean datasets
+      stay in production):
+
+      ```
+      mv /data/massive/clean/atm_term_structure \
+         /data/massive/clean/atm_term_structure.act365
+      mv /data/massive-hybrid-staging/clean/atm_term_structure \
+         /data/massive/clean/atm_term_structure
+      mv /data/massive/clean/vol_surface \
+         /data/massive/clean/vol_surface.act365
+      mv /data/massive-hybrid-staging/clean/vol_surface \
+         /data/massive/clean/vol_surface
+      ```
+
+   5. Deploy the branch (or merge to `main` and pull) so scheduled jobs write
+      the new schema. Start the timers. Keep the `.act365` trees until a
+      week of jobs and a `coverage_audit` look healthy, then delete.
 
 6. **Half days.**
    `holidays.json` carries 4 `early-close` records (13:00 ET) alongside 20
@@ -324,7 +353,7 @@ GitHub CI, not only on the box.
 
 **Step 2 — make the convention explicit. — DONE.**
 `pricing/daycount.py` defines `DayCount` with two implementations —
-`CalendarDays` (`act/365`, the default) and `TradingSessions` (`bus/252`, on a
+`CalendarDays` (`act/365`, then the default) and `TradingSessions` (`bus/252`, on a
 `SessionCalendar`) — plus `discount_year_fraction`, the single spelling of
 money time. `build_rows` and `build_surfaces` (and both `build_for_date`
 wrappers) take `daycount=DEFAULT_DAYCOUNT`; the rate tenor in each now calls
@@ -345,36 +374,23 @@ The two tests worth keeping in mind for step 3 are
 must move `t_years` to sessions/252 and must leave every tenor handed to
 `rate_fn` on ACT/365.
 
-**Step 3 — business-day T on the day-bar path. — HALF LANDED.**
+**Step 3 — business-day T on the day-bar path. — LANDED (staging rebuild; production swap pending).**
 
-Landed: `HybridSessions` (sessions where the calendar can vouch for the span,
-ACT/365 beyond it, per decision 4) and `DayCount.name_for`, which reports the
-convention that actually produced one row rather than the convention's own
-name — the two differ precisely when the hybrid falls back, and a row that
-could not say which it got is the silent mixing this plan is trying to avoid.
-`hybrid_for(data_root)` builds it from the box's calendar files. Nothing is
-switched over: `DEFAULT_DAYCOUNT` is still ACT/365.
+`DEFAULT_DAYCOUNT` is the hybrid. `build_for_date` binds `hybrid_for(settings.data_root)`
+so a staging warehouse is not priced on the box calendar. Every landed
+`atm_term_structure` / `vol_surface` row stamps `daycount.name_for` (`bus/252`
+or `act/365`). Loaders (`Surface.from_rows` / `load_surface`, `shortest_spy_term`)
+raise on a missing or unknown stamp. Mixed `bus/252` and `act/365` in one
+session is the hybrid's normal shape and is not an error.
 
-The fallback is deliberately narrow: it covers the horizon and dates before
-attested history, and re-raises a `CalendarRangeError` from the gap between
-attested history and the forward window. That gap means a sync job is behind,
-not that the book is long-dated, and it lands on the short end where a
-one-session error in T is largest — so it must not be answered with a
-plausible ACT/365 number.
+`signals.spot.proxy_spot` discounts on `discount_year_fraction`, not on the
+row's vol-time `t_years`, so the flip does not silently shorten the SPY proxy.
 
-Blocked on decision 5: the schema stamp and the default flip, because finding
-6 makes those inseparable from a full rebuild and a production cutover.
-Finding 8 no longer blocks it.
-
-The original plan for the rest:
-Switch `term_structure` and `surface` to the new convention, stamp the
-convention into the landed rows, and rebuild the archive with
-`scripts/build_term_structure.py` / `build_surface.py`. Expect IVs to move:
-45 DTE is 31–32 sessions, so `31/252 = 0.1230` against `45/365 = 0.1233`
-(−0.2%) — but 32 sessions gives `0.1270`, or **+3.0%**, so even the long end
-swings either way on one session. The short end is worse, where weekends
-dominate: 5 DTE spanning a weekend is `3/252 = 0.0119` vs `5/365 = 0.0137`,
-**−13.1% on T**. Quantify the real distribution across the archive before
+The IVs move. 45 DTE is 31–32 sessions, so `31/252 = 0.1230` against
+`45/365 = 0.1233` (−0.2%) — but 32 sessions gives `0.1270`, or **+3.0%**, so
+even the long end swings either way on one session. The short end is worse,
+where weekends dominate: 5 DTE spanning a weekend is `3/252 = 0.0119` vs
+`5/365 = 0.0137`, **−13.1% on T**. Quantified across the archive before
 merging, not after.
 
 **Measured** across the archive. Of 101,467 `atm_term_structure` rows the

@@ -98,7 +98,7 @@
           </tr>
           <tr>
             <td>T</td>
-            <td>ACT/365 to settlement instant (SPY/SPXW 16:00 ET PM; SPX monthlies and VIX/VIXW 09:30 ET AM). On the day-bar path the day count is a passed object (<code>pricing.daycount</code>) rather than a module constant, still defaulting to ACT/365. Two quantities are kept apart there: <em>vol time</em>, the T in σ√T, is what the convention decides; <em>money time</em>, the T in e<sup>−rT</sup> and the Treasury-curve tenor, is always ACT/365 because interest accrues on weekends.</td>
+            <td>ACT/365 to settlement instant on the live path (SPY/SPXW 16:00 ET PM; SPX monthlies and VIX/VIXW 09:30 ET AM). On the day-bar path the day count is a passed object (<code>pricing.daycount</code>); the default is the hybrid — sessions over 252 where the calendar can vouch, ACT/365 past the horizon — and every landed <code>atm_term_structure</code> / <code>vol_surface</code> row stamps which convention produced its <code>t_years</code> (<code>bus/252</code> or <code>act/365</code>, never the name <code>hybrid</code>). Two quantities are kept apart there: <em>vol time</em>, the T in σ√T, is what the convention decides; <em>money time</em>, the T in e<sup>−rT</sup> and the Treasury-curve tenor, is always ACT/365 because interest accrues on weekends.</td>
             <td>expiry date at UTC midnight understates T (~108 bp IV at 7 DTE); converting the discount factor and the curve tenor along with σ√T</td>
           </tr>
           <tr>

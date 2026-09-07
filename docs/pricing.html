@@ -128,7 +128,11 @@
         <dd>
           <code>pricing.term_structure</code> reduces <code>option_day_bars</code>
           to one row per (date, root, expiry): parity forward, ATM strike, both
-          leg IVs. Same chain the surface fits. Scheduled Tue–Sat 12:00 ET;
+          leg IVs. Same chain the surface fits. Vol time is the hybrid
+          (<code>DEFAULT_DAYCOUNT</code>): sessions/252 inside the calendar
+          horizon, ACT/365 past it; each row stamps <code>daycount</code> as
+          <code>bus/252</code> or <code>act/365</code>. Money time (the rate
+          tenor) stays ACT/365. Scheduled Tue–Sat 12:00 ET;
           archive rebuild via <code>scripts/build_term_structure.py</code>.
           A stale or crossed ATM print is written null, never as zero vol.
         </dd>

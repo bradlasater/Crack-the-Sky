@@ -498,7 +498,8 @@ def test_reserved_summary_keys_do_not_crash_job_end(tmp_path, monkeypatch, recor
     """A good run must not become job_error because its summary reused a kwarg.
 
     ``logger.log("job_end", job=..., rows=..., bytes=..., duration_s=...,
-    **extras)`` raises TypeError if extras also contains those names. The
+    **extras)`` raises TypeError if extras also contains those names, or
+    ``event`` (the positional parameter of ``JsonlLogger.log``). The
     BaseException handler then logs job_error and pings /fail.
     """
     import json
@@ -508,6 +509,7 @@ def test_reserved_summary_keys_do_not_crash_job_end(tmp_path, monkeypatch, recor
 
     def main_fn(a, s, log):
         return {
+            "event": "spoofed",
             "rows": 7,
             "bytes": 12,
             "job": "spoofed",

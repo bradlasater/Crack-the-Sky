@@ -7,9 +7,9 @@ gate, timing, job_end summary logging, healthcheck pings and exit codes.
 ``main_fn`` is called as ``main_fn(args, settings, logger)`` and should
 return an optional dict of summary fields (e.g. ``{"rows": n, "bytes": b}``)
 which are merged into the ``job_end`` event. Keys already set on that event
-(``job``, ``rows``, ``bytes``, ``duration_s``) keep the values ``run_job``
-sets; a colliding summary key is dropped, not allowed to TypeError after
-success.
+(``event``, ``job``, ``rows``, ``bytes``, ``duration_s``) keep the values
+``run_job`` sets; a colliding summary key is dropped, not allowed to
+TypeError after success.
 
 Healthchecks
 ------------
@@ -238,12 +238,12 @@ def run_job(job_name: str, main_fn: MainFn, argv: list[str] | None = None) -> No
                                             data_root=settings.data_root)
             summary = main_fn(args, settings, logger) or {}
             duration_s = round(time.monotonic() - start, 3)
-            # Reserved names are already keyword args; leaking them through
+            # Reserved names collide with log() args; leaking them through
             # **extras TypeErrors *after* success and the handler reports
             # job_error + /fail.
             extras = {
                 k: v for k, v in summary.items()
-                if k not in ("rows", "bytes", "job", "duration_s")
+                if k not in ("event", "rows", "bytes", "job", "duration_s")
             }
             logger.log("job_end", job=job_name, rows=summary.get("rows", 0),
                        bytes=summary.get("bytes", 0), duration_s=duration_s,

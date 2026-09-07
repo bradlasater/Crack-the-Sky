@@ -37,10 +37,9 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   roots are unaffected: an early close moves the close, not the open. Wiring
   the live path is step 4 of `docs/plans/trading-day-calendar.md`; the first
   date it actually bites is 2026-11-27.
-- `ingest/common/cli.py:205` — a job whose summary dict contains a reserved key
-  (`rows`, `bytes`, `job`, `duration_s`) crashes `job_end` logging *after*
-  succeeding, turning a good run into `job_error` + a `/fail` ping. Latent
-  today. Fix: filter reserved keys from the `**extras` merge.
+- `ingest/common/cli.py` — **fixed**: reserved keys (`event`, `rows`, `bytes`,
+  `job`, `duration_s`) are dropped from the `**extras` merge so a successful
+  job cannot crash `job_end` and get reported as `job_error`.
 - `ingest/jobs/ws_minute_bars.py:648` — a 0-row capture pings healthcheck
   `/fail` but `main` still exits 0. Exit code and monitoring disagree; decide
   whether cron mail or Healthchecks is the alert channel, then align them.

@@ -21,6 +21,7 @@ import pytest
 from pricing import surface as sf
 from pricing import term_structure as ts
 from pricing.bsm import price
+from pricing.daycount import ACT_365
 
 DAY = date(2026, 8, 28)
 R = 0.04
@@ -87,7 +88,7 @@ def _svi_bars(expiry: date = NEAR, t: float = T_NEAR) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def test_round_trips_a_synthetic_svi_smile() -> None:
-    surfaces = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate)
+    surfaces = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)
     surf = surfaces["SPXW"]
     s = surf.slices[0]
     assert s.expiration_date == NEAR.isoformat()
@@ -104,15 +105,15 @@ def test_round_trips_a_synthetic_svi_smile() -> None:
 def test_refit_is_deterministic() -> None:
     """The seed is data-derived: the same slice refits to the same params."""
     one = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",),
-                            rate_fn=_flat_rate)["SPXW"].slices[0]
+                            rate_fn=_flat_rate, daycount=ACT_365)["SPXW"].slices[0]
     two = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",),
-                            rate_fn=_flat_rate)["SPXW"].slices[0]
+                            rate_fn=_flat_rate, daycount=ACT_365)["SPXW"].slices[0]
     assert one == two
 
 
 def test_flat_black76_smile_fits_near_flat() -> None:
     bars = _chain_bars(NEAR, T_NEAR, lambda k: 0.18)
-    surf = sf.build_surfaces(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate)["SPXW"]
+    surf = sf.build_surfaces(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)["SPXW"]
     s = surf.slices[0]
     assert s.b == pytest.approx(0.0, abs=1e-5)
     for K in (7400.0, 7600.0, 7700.0, 7800.0, 8000.0):
@@ -127,8 +128,8 @@ def test_surface_agrees_with_the_atm_curve_at_the_atm_strike() -> None:
     """vol(K_atm, T) and atm_term_structure.atm_iv are two reductions of the
     same closes; they must agree to within fit error."""
     bars = _svi_bars()
-    surf = sf.build_surfaces(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate)["SPXW"]
-    row = ts.build_rows(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate)[0]
+    surf = sf.build_surfaces(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)["SPXW"]
+    row = ts.build_rows(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)[0]
     assert surf.vol(row["atm_strike"], row["t_years"]) == pytest.approx(
         row["atm_iv"], abs=1e-6)
 
@@ -141,8 +142,8 @@ def test_fit_uses_otm_strikes_only() -> None:
     """Dropping every ITM leg must not move the fit: they were never inputs."""
     full = _svi_bars()
     otm = _chain_bars(NEAR, T_NEAR, lambda k: _true_vol(k, T_NEAR), both_legs=False)
-    a = sf.build_surfaces(full, DAY, roots=("SPXW",), rate_fn=_flat_rate)["SPXW"].slices[0]
-    b = sf.build_surfaces(otm, DAY, roots=("SPXW",), rate_fn=_flat_rate)["SPXW"].slices[0]
+    a = sf.build_surfaces(full, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)["SPXW"].slices[0]
+    b = sf.build_surfaces(otm, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)["SPXW"].slices[0]
     assert a.n_strikes == len(STRIKES) - 1  # all strikes, one leg each
     assert (a.a, a.b, a.rho, a.m, a.sigma) == (b.a, b.b, b.rho, b.m, b.sigma)
 
@@ -151,7 +152,7 @@ def test_spy_is_refused_not_fit_under_the_wrong_model() -> None:
     """SPY is American; its strikes are not comparable under a BSM inversion."""
     bars = _chain_bars(NEAR, T_NEAR, lambda k: 0.18, root="SPY")
     with pytest.raises(sf.SurfaceError, match="European"):
-        sf.build_surfaces(bars, DAY, roots=("SPY",), rate_fn=_flat_rate)
+        sf.build_surfaces(bars, DAY, roots=("SPY",), rate_fn=_flat_rate, daycount=ACT_365)
 
 
 # ---------------------------------------------------------------------------
@@ -164,9 +165,9 @@ def test_near_worthless_close_is_filtered_not_fit() -> None:
     garbage = {"ticker": _sym("SPXW", NEAR, "put", 7000.0),
                "close": 0.10, "window_end_ns": 1}
     assert garbage["close"] <= sf.MIN_TIME_VALUE_FRAC * F  # below the floor
-    base = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate)
+    base = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)
     dirty = sf.build_surfaces(_svi_bars() + [garbage], DAY, roots=("SPXW",),
-                              rate_fn=_flat_rate)
+                              rate_fn=_flat_rate, daycount=ACT_365)
     a = base["SPXW"].slices[0]
     b = dirty["SPXW"].slices[0]
     assert (a.n_strikes, a.a, a.b, a.rho, a.m, a.sigma) == \
@@ -181,9 +182,9 @@ def test_close_above_the_floor_is_fit() -> None:
     assert px > sf.MIN_TIME_VALUE_FRAC * F  # the fixture must clear the floor
     extra = {"ticker": _sym("SPXW", NEAR, "put", extra_k),
              "close": px, "window_end_ns": 1}
-    base = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate)
+    base = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)
     wider = sf.build_surfaces(_svi_bars() + [extra], DAY, roots=("SPXW",),
-                              rate_fn=_flat_rate)
+                              rate_fn=_flat_rate, daycount=ACT_365)
     a = base["SPXW"].slices[0]
     b = wider["SPXW"].slices[0]
     assert b.n_strikes == a.n_strikes + 1
@@ -227,7 +228,7 @@ def test_butterfly_violating_smile_is_repaired_not_rejected() -> None:
 def test_butterfly_violating_chain_is_repaired_end_to_end() -> None:
     bars = _chain_bars(
         NEAR, T_NEAR, lambda k: math.sqrt(_true_w(math.log(k / F), BUTTERFLY_BAD) / T_NEAR))
-    surf = sf.build_surfaces(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate)["SPXW"]
+    surf = sf.build_surfaces(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)["SPXW"]
     assert surf.slices[0].min_g >= 0.0
 
 
@@ -273,7 +274,7 @@ def test_calendar_arbitrage_is_detected() -> None:
     bars = (_chain_bars(NEAR, T_NEAR, lambda k: 0.30)
             + _chain_bars(FAR, T_FAR, lambda k: 0.10))
     with pytest.raises(sf.SurfaceArbitrageError, match="calendar"):
-        sf.build_surfaces(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate)
+        sf.build_surfaces(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)
 
 
 def test_calendar_wing_crossing_is_repaired_not_rejected() -> None:
@@ -312,7 +313,7 @@ def test_build_surfaces_chains_the_calendar_repair() -> None:
     bars = (_svi_bars()  # NEAR off the true smile
             + _chain_bars(FAR, T_FAR, lambda k: math.sqrt(
                 _true_w(math.log(k / F), lower_smile) / T_FAR)))
-    surf = sf.build_surfaces(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate)["SPXW"]
+    surf = sf.build_surfaces(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)["SPXW"]
     assert len(surf.slices) == 2
     near, far = surf.slices
     grid = np.linspace(min(near.k_min, far.k_min), max(near.k_max, far.k_max),
@@ -384,7 +385,7 @@ def _three_expiry_surface() -> sf.Surface:
     bars = (_chain_bars(NEAR, T_NEAR, lambda k: 0.16)
             + _chain_bars(MID, T_MID, lambda k: 0.20)
             + _chain_bars(FAR, T_FAR, lambda k: 0.24))
-    return sf.build_surfaces(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate)["SPXW"]
+    return sf.build_surfaces(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)["SPXW"]
 
 
 def test_term_interpolation_is_exact_at_fitted_expiries() -> None:
@@ -430,7 +431,7 @@ def test_thin_expiry_is_skipped_not_fit() -> None:
     # parity print's last ulp) -- under MIN_STRIKES either way.
     strikes = [7640.0, 7670.0, 7700.0, 7730.0]
     bars = _chain_bars(NEAR, T_NEAR, lambda k: 0.18, strikes=strikes)
-    assert sf.build_surfaces(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate) == {}
+    assert sf.build_surfaces(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365) == {}
 
 
 # ---------------------------------------------------------------------------
@@ -440,7 +441,7 @@ def test_thin_expiry_is_skipped_not_fit() -> None:
 def test_rows_match_the_landed_schema() -> None:
     from ingest import schemas
 
-    surfaces = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate)
+    surfaces = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)
     rows = sf.rows_from_surfaces(surfaces)
     fields = {f.name for f in schemas.SCHEMAS[sf.DATASET]}
     assert set(rows[0]) == fields, "extra keys are dropped silently on write"
@@ -452,7 +453,7 @@ def test_rows_match_the_landed_schema() -> None:
 
 
 def test_from_rows_round_trips_a_fitted_surface() -> None:
-    surf = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate)["SPXW"]
+    surf = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)["SPXW"]
     loaded = sf.Surface.from_rows(sf.rows_from_surfaces({"SPXW": surf}))
     assert loaded.date == surf.date
     assert loaded.underlying == "SPXW"
@@ -465,7 +466,7 @@ def test_from_rows_still_calendar_checks() -> None:
     near = {
         "date": DAY.isoformat(), "underlying": "SPXW",
         "expiration_date": NEAR.isoformat(), "dte": (NEAR - DAY).days,
-        "t_years": T_NEAR, "forward": F,
+        "t_years": T_NEAR, "daycount": "act/365", "forward": F,
         "svi_a": 0.04, "svi_b": 0.01, "svi_rho": 0.0, "svi_m": 0.0, "svi_sigma": 0.1,
         "k_min": -0.05, "k_max": 0.05, "n_strikes": 21,
         "rms_error": 0.0, "min_g": 0.5, "rate": R, "src": "day_bars",
@@ -477,7 +478,7 @@ def test_from_rows_still_calendar_checks() -> None:
 
 
 def test_from_rows_refuses_mixed_roots_or_dates() -> None:
-    surf = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate)["SPXW"]
+    surf = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)["SPXW"]
     rows = sf.rows_from_surfaces({"SPXW": surf})
     mixed = [dict(rows[0], underlying="SPX")]
     with pytest.raises(sf.SurfaceError, match="one \\(date, underlying\\)"):
@@ -487,7 +488,7 @@ def test_from_rows_refuses_mixed_roots_or_dates() -> None:
 
 
 def test_from_rows_refuses_an_american_root() -> None:
-    surf = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate)["SPXW"]
+    surf = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)["SPXW"]
     rows = [dict(sf.rows_from_surfaces({"SPXW": surf})[0], underlying="SPY")]
     with pytest.raises(sf.SurfaceError, match="European index roots"):
         sf.Surface.from_rows(rows)
@@ -496,7 +497,7 @@ def test_from_rows_refuses_an_american_root() -> None:
 def test_load_surface_reads_what_write_rows_landed(tmp_path) -> None:
     from ingest.common.config import Settings
 
-    surfaces = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate)
+    surfaces = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)
     settings = Settings(massive_api_key="k", data_root=tmp_path, log_root=tmp_path / "logs")
     sf.write_rows(settings, DAY, sf.rows_from_surfaces(surfaces))
     loaded = sf.load_surface(settings, DAY, "SPXW")
@@ -511,9 +512,36 @@ def test_load_surface_refuses_a_mismatched_row_date(tmp_path) -> None:
     """A dt= partition whose rows are dated some other session must not answer as T."""
     from ingest.common.config import Settings
 
-    surfaces = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate)
+    surfaces = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)
     settings = Settings(massive_api_key="k", data_root=tmp_path, log_root=tmp_path / "logs")
     rows = [dict(r, date="2020-01-02") for r in sf.rows_from_surfaces(surfaces)]
     sf.write_rows(settings, DAY, rows)
     with pytest.raises(sf.SurfaceError, match="have date="):
         sf.load_surface(settings, DAY, "SPXW")
+
+
+def test_from_rows_refuses_a_missing_or_unknown_daycount_stamp() -> None:
+    """Unstamped T would be interpreted under whichever convention the reader
+    assumed -- the silent mixing the stamp exists to prevent."""
+    surf = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",),
+                             rate_fn=_flat_rate, daycount=ACT_365)["SPXW"]
+    rows = sf.rows_from_surfaces({"SPXW": surf})
+    missing = [dict(rows[0], daycount=None)]
+    with pytest.raises(sf.SurfaceError, match="no daycount stamp"):
+        sf.Surface.from_rows(missing)
+    unknown = [dict(rows[0], daycount="hybrid")]
+    with pytest.raises(sf.SurfaceError, match="unknown daycount"):
+        sf.Surface.from_rows(unknown)
+
+
+def test_from_rows_accepts_the_hybrid_mix_of_stamps() -> None:
+    """LEAPS fall back to ACT/365 while the rest of the book is bus/252.
+    Mixing those stamps in one surface is the hybrid's normal shape."""
+    surf = _three_expiry_surface()
+    rows = sf.rows_from_surfaces({"SPXW": surf})
+    assert len(rows) >= 2
+    rows[0]["daycount"] = "bus/252"
+    rows[-1]["daycount"] = "act/365"
+    loaded = sf.Surface.from_rows(rows)
+    assert [s.daycount for s in loaded.slices][0] == "bus/252"
+    assert [s.daycount for s in loaded.slices][-1] == "act/365"

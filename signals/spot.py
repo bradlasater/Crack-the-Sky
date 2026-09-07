@@ -47,7 +47,11 @@ from ingest.common.config import Settings
 from ingest.common.logging_utils import JsonlLogger
 from ingest.jobs import latest_clean_records, partition_dates, read_partition
 from pricing.bsm import resolve_q
-from pricing.daycount import discount_year_fraction
+from pricing.daycount import (
+    DayCountStampError,
+    discount_year_fraction,
+    require_daycount_stamps,
+)
 
 JOB = "spy_spot"
 DATASET = "spy_spot"
@@ -113,6 +117,10 @@ def shortest_spy_term(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any] | Non
         eligible.append(dict(rec))
     if not eligible:
         return None
+    try:
+        require_daycount_stamps(eligible, context="atm_term_structure")
+    except DayCountStampError as exc:
+        raise SpotError(str(exc)) from exc
     return min(eligible, key=lambda r: int(r["dte"]))
 
 
@@ -127,9 +135,12 @@ def proxy_spot(
     continuous-yield form ``S = F e^{-(r-q)T}`` is the same number.
     """
     F = float(term["forward"])
-    T = float(term["t_years"])
     r = float(term["rate"])
     expiry = date.fromisoformat(str(term["expiration_date"])[:10])
+    # Money time, not the row's vol-time ``t_years``. After the hybrid default
+    # flip those two diverge, and using sessions/252 here would silently
+    # shorten the discount -- the mistake finding 3 exists to prevent.
+    T = discount_year_fraction(session, expiry)
     income = pv_dividends(dividends, session, expiry, r)
     if T <= 0:
         return F + income, 0.0

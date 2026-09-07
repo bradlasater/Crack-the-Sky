@@ -265,7 +265,8 @@ def _build_schemas() -> dict[str, Any]:
         pa.field("underlying", pa.string()),       # OPRA root: SPXW, VIX, ...
         pa.field("expiration_date", pa.string()),
         pa.field("dte", pa.int64()),               # calendar days to expiry
-        pa.field("t_years", pa.float64()),         # ACT/365, matching pricing
+        pa.field("t_years", pa.float64()),         # vol time; convention in daycount
+        pa.field("daycount", pa.string()),         # 'bus/252' | 'act/365' (name_for)
         pa.field("forward", pa.float64()),         # put-call parity forward
         pa.field("atm_strike", pa.float64()),      # strike nearest the forward
         pa.field("call_price", pa.float64()),
@@ -289,7 +290,8 @@ def _build_schemas() -> dict[str, Any]:
         pa.field("underlying", pa.string()),       # SPX | SPXW (European only)
         pa.field("expiration_date", pa.string()),
         pa.field("dte", pa.int64()),               # calendar days to expiry
-        pa.field("t_years", pa.float64()),         # ACT/365, matching pricing
+        pa.field("t_years", pa.float64()),         # vol time; convention in daycount
+        pa.field("daycount", pa.string()),         # 'bus/252' | 'act/365' (name_for)
         pa.field("forward", pa.float64()),         # put-call parity forward
         pa.field("svi_a", pa.float64()),           # w(k) = a + b(rho(k-m) + ...)
         pa.field("svi_b", pa.float64()),

@@ -147,7 +147,10 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger, eod: bool, write_raw
     underlyings = parse_underlyings(args.underlying, DEFAULT_UNDERLYINGS)
     log_lock = threading.Lock()
     totals = {"rows": 0, "pages": 0, "forwards": 0, "eod": eod}
-    errors: list[dict[str, str]] = []
+    # The exception objects are kept, not just their text: run_job classifies
+    # retryability by exception *type*, so the all-failed path below has to
+    # re-raise the real thing.
+    failures: list[tuple[str, Exception]] = []
 
     def sweep(underlying: str) -> dict[str, int] | None:
         try:
@@ -156,9 +159,7 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger, eod: bool, write_raw
             )
         except Exception as exc:  # noqa: BLE001 - one bad chain must not kill the run
             with log_lock:
-                errors.append(
-                    {"underlying": underlying, "error": f"{type(exc).__name__}: {exc}"}
-                )
+                failures.append((underlying, exc))
             return None
 
     with ThreadPoolExecutor(
@@ -171,8 +172,10 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger, eod: bool, write_raw
             totals["pages"] += counters["pages"]
             totals["forwards"] += counters["forwards"]
 
-    for err in errors:
-        logger.log("chain_error", **err)
+    for underlying, exc in failures:
+        logger.log(
+            "chain_error", underlying=underlying, error=f"{type(exc).__name__}: {exc}"
+        )
 
     # Letting one chain's exception out of this function costs the run twice
     # over. Each chain writes its own parquet inside _sweep_underlying, so the
@@ -185,13 +188,25 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger, eod: bool, write_raw
     # Every chain failing is the different case: an outage (lost entitlement,
     # broken endpoint) that must not report success, and one with nothing
     # landed for the retry to duplicate.
-    if underlyings and len(errors) == len(underlyings):
-        raise RuntimeError(
-            f"every chain failed ({len(errors)}/{len(underlyings)}); "
-            f"first: {errors[0]['error']}"
+    if underlyings and len(failures) == len(underlyings):
+        logger.log(
+            "sweep_failed",
+            chains=len(underlyings),
+            failed=[underlying for underlying, _ in failures],
         )
+        # Re-raise the first chain's own exception rather than a summarising
+        # wrapper. cli._is_retryable classifies by exception *type* and does
+        # not look through __cause__, so a RuntimeError around an exhausted
+        # 429/5xx would mark a transient whole-endpoint outage deterministic
+        # and spend one attempt where this used to get three. The summary is
+        # in sweep_failed above, which is the part a human reads anyway; the
+        # exception's job here is to carry the retry classification.
+        #
+        # Retrying is safe precisely here: every chain failed, so nothing
+        # landed for the retry to duplicate.
+        raise failures[0][1]
 
-    totals["errors"] = len(errors)
+    totals["errors"] = len(failures)
     return totals
 
 

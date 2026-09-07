@@ -20,7 +20,9 @@ from pathlib import Path
 
 import pytest
 
+from ingest.common.cli import _is_retryable
 from ingest.common.config import Settings
+from ingest.common.http_client import MassiveHTTPError
 from ingest.common.logging_utils import JsonlLogger
 from ingest.jobs import snapshot_sweep as job
 from tests.conftest import load_fixture
@@ -47,8 +49,14 @@ def _results() -> list[dict]:
     return load_fixture("snapshot_options_spy.json")["results"]
 
 
-def _client_factory(broken: set[str], fetched: list[str] | None = None):
-    """A MassiveClient stand-in whose chains fail by name."""
+def _client_factory(
+    broken: set[str], fetched: list[str] | None = None, exc: Exception | None = None
+):
+    """A MassiveClient stand-in whose chains fail by name.
+
+    ``exc`` chooses the failure type, which is what the retry-classification
+    tests turn on; the default is a plain RuntimeError.
+    """
     seen = fetched if fetched is not None else []
 
     class _Client:
@@ -64,7 +72,7 @@ def _client_factory(broken: set[str], fetched: list[str] | None = None):
             underlying = path.rsplit("/", 1)[-1]
             seen.append(underlying)
             if underlying in broken:
-                raise RuntimeError(f"upstream exploded for {underlying}")
+                raise exc or RuntimeError(f"upstream exploded for {underlying}")
             return iter(_results())
 
     return _Client
@@ -93,9 +101,59 @@ def _landed(tmp_path: Path) -> list[str]:
 
 def test_every_chain_failing_raises(tmp_path: Path, monkeypatch) -> None:
     """A 100% failure rate is an outage and must not report success."""
-    with pytest.raises(RuntimeError, match="every chain failed"):
+    with pytest.raises(RuntimeError, match="upstream exploded"):
         _run(tmp_path, monkeypatch, {"SPY", "I:SPX", "VIX"})
     assert _landed(tmp_path) == []
+
+
+def test_every_chain_failing_keeps_the_original_exception_retryable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """run_job decides whether to retry from the exception *type*, and does not
+    look through ``__cause__``. Summarising an exhausted 429/5xx into a
+    RuntimeError would call a transient whole-endpoint outage deterministic and
+    spend one attempt where three were available -- and this is the one path
+    where retrying is free, since no chain landed anything to duplicate."""
+    transient = MassiveHTTPError(503, "https://api.example/v3/snapshot/options/SPY")
+    monkeypatch.setattr(
+        job, "MassiveClient", _client_factory({"SPY", "I:SPX", "VIX"}, exc=transient)
+    )
+    logger = JsonlLogger(path=None, echo=False)
+    with pytest.raises(MassiveHTTPError) as excinfo:
+        job._main_fn(_args(), _settings(tmp_path), logger, False, False)
+    assert excinfo.value.status_code == 503
+    assert _is_retryable(excinfo.value) is True
+
+
+def test_a_deterministic_all_chain_failure_stays_deterministic(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The other half: a 403 must not become retryable on the way out."""
+    denied = MassiveHTTPError(403, "https://api.example/v3/snapshot/options/SPY")
+    monkeypatch.setattr(
+        job, "MassiveClient", _client_factory({"SPY", "I:SPX", "VIX"}, exc=denied)
+    )
+    logger = JsonlLogger(path=None, echo=False)
+    with pytest.raises(MassiveHTTPError) as excinfo:
+        job._main_fn(_args(), _settings(tmp_path), logger, False, False)
+    assert _is_retryable(excinfo.value) is False
+
+
+def test_the_all_failed_summary_is_logged(tmp_path: Path, monkeypatch) -> None:
+    """The count moved out of the exception message, so it must be in the log."""
+    log_path = tmp_path / "logs" / "sweep.jsonl"
+    logger = JsonlLogger(path=log_path, echo=False)
+    monkeypatch.setattr(
+        job, "MassiveClient", _client_factory({"SPY", "I:SPX", "VIX"})
+    )
+    with pytest.raises(RuntimeError):
+        job._main_fn(_args(), _settings(tmp_path), logger, False, False)
+    logger.close()
+    events = [json.loads(line) for line in log_path.read_text().splitlines()]
+    failed = [e for e in events if e["event"] == "sweep_failed"]
+    assert len(failed) == 1
+    assert failed[0]["chains"] == 3
+    assert sorted(failed[0]["failed"]) == ["I:SPX", "SPY", "VIX"]
 
 
 def test_one_bad_chain_still_lands_the_others(tmp_path: Path, monkeypatch) -> None:

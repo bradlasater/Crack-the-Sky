@@ -44,7 +44,15 @@ MAX_FIRES_PER_DAY_FOR_RESTART = 4
 def test_unit_schema_and_uniqueness() -> None:
     seen: set[str] = set()
     for u in UNITS:
-        assert set(u) >= {"job", "unit", "command", "cron", "on_calendar", "healthchecks", "restart"}
+        assert set(u) >= {
+            "job",
+            "unit",
+            "command",
+            "cron",
+            "on_calendar",
+            "healthchecks",
+            "restart",
+        }
         assert u["unit"] not in seen, f"duplicate unit {u['unit']}"
         seen.add(u["unit"])
         assert u["unit"].startswith("massive-" + u["job"].replace("_", "-"))
@@ -154,6 +162,19 @@ _ELAPSE_RE = re.compile(
     r"(?:Next elapse|Iter(?:ation)?\.?\s+#\d+):\s+\w{3}\s+(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})"
 )
 
+# Both sides of the comparison start here: now plus a margin. systemd-analyze
+# samples its own clock a moment after Python samples ours, so a fire instant
+# falling between the two samples would land in one list and not the other.
+# Starting both lists a little in the future puts that race entirely behind the
+# start line.
+_MARGIN = timedelta(minutes=2)
+
+# The elapses the margin covers have to be discarded from the systemd side, so
+# ask for that many extra. Every schedule in the file fires on a whole minute
+# and at most once a minute, which bounds how many the margin can hide; the
+# helper below asserts that bound rather than trusting it.
+_MARGIN_ELAPSES = int(_MARGIN.total_seconds() // 60) + 1
+
 
 def _cron_fire_times(expr: str, start: datetime, horizon: timedelta) -> list[datetime]:
     """Instants (naive ET wall clock) a cron expression fires on in [start, start+horizon]."""
@@ -189,21 +210,31 @@ def _cron_fire_times(expr: str, start: datetime, horizon: timedelta) -> list[dat
     return fires
 
 
-def _systemd_fire_times(expr: str, count: int) -> list[datetime]:
-    """The next `count` elapses of an OnCalendar expression, as naive ET wall clock."""
+def _systemd_fire_times(expr: str, count: int, since: datetime) -> list[datetime]:
+    """The first `count` elapses of an OnCalendar expression at or after `since`.
+
+    ``--iterations`` always counts from systemd's own now, which is behind
+    `since` by the margin, so the leading elapses the margin covers are asked
+    for and then dropped. Without that the two sides start at different
+    instants, and any schedule that fires within the margin -- the by-the-minute
+    sweeps -- diverges by construction.
+    """
+    requested = count + _MARGIN_ELAPSES
     out = subprocess.run(
-        [SYSTEMD_ANALYZE, "calendar", f"--iterations={count}", expr],
+        [SYSTEMD_ANALYZE, "calendar", f"--iterations={requested}", expr],
         check=True,
         capture_output=True,
         text=True,
         env={**os.environ, "TZ": "America/New_York"},
     ).stdout
-    fires = [
-        datetime.strptime(f"{d} {t}", "%Y-%m-%d %H:%M:%S")
-        for d, t in _ELAPSE_RE.findall(out)
-    ]
-    assert len(fires) == count, f"parsed {len(fires)} elapses, expected {count}:\n{out}"
-    return fires
+    fires = [datetime.strptime(f"{d} {t}", "%Y-%m-%d %H:%M:%S") for d, t in _ELAPSE_RE.findall(out)]
+    assert len(fires) == requested, f"parsed {len(fires)} elapses, expected {requested}:\n{out}"
+    trimmed = [f for f in fires if f >= since]
+    assert len(trimmed) >= count, (
+        f"{expr!r}: the {_MARGIN} margin hid more than {_MARGIN_ELAPSES} elapses, "
+        f"so the schedule fires more often than once a minute:\n{out}"
+    )
+    return trimmed[:count]
 
 
 def _dst_shift_day(d: date) -> bool:
@@ -215,19 +246,18 @@ def _dst_shift_day(d: date) -> bool:
 @pytest.mark.skipif(SYSTEMD_ANALYZE is None, reason="systemd-analyze not installed")
 @pytest.mark.parametrize("unit", UNITS, ids=[u["unit"] for u in UNITS])
 def test_on_calendar_fires_at_the_same_instants_as_cron(unit: dict) -> None:
-    # Two minutes of margin: systemd-analyze computes from its own now, so
-    # instants right at the boundary could fall on either side of it.
-    # Naive ET wall clock: systemd-analyze runs with TZ=America/New_York, so
-    # seed the cron side from ET too -- a UTC-local now (CI runners) can be a
-    # calendar day ahead and shift the whole comparison.
-    threshold = (datetime.now(ET) + timedelta(minutes=2)).replace(microsecond=0, tzinfo=None)
+    # Both lists start at this same instant -- see _MARGIN. Naive ET wall clock:
+    # systemd-analyze runs with TZ=America/New_York, so seed the cron side from
+    # ET too -- a UTC-local now (CI runners) can be a calendar day ahead and
+    # shift the whole comparison.
+    threshold = (datetime.now(ET) + _MARGIN).replace(microsecond=0, tzinfo=None)
     for cron_expr, cal_expr in zip(unit["cron"], unit["on_calendar"], strict=True):
         cron_fires = _cron_fire_times(cron_expr, threshold, timedelta(days=9))
         if len(cron_fires) < 3:
             # Weekly/monthly entries need a longer window to fire enough times
             # to prove anything.
             cron_fires = _cron_fire_times(cron_expr, threshold, timedelta(days=95))
-        systemd_fires = _systemd_fire_times(cal_expr, len(cron_fires))
+        systemd_fires = _systemd_fire_times(cal_expr, len(cron_fires), threshold)
         # On the two DST-shift days a year, cron and systemd legitimately
         # disagree on the skipped/repeated hour; expression equivalence is not
         # what differs there, so those days are excluded from the comparison.

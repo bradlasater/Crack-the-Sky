@@ -52,8 +52,8 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   response has results but none of the wanted tickers matched.
 - `scripts/cronjob.sh` — **fixed**: the lock is taken on fd 9 before the
   command runs, so a wrapped process that exits 99 is no longer misreported
-  as `job_skipped` and swallowed to 0. A skip is "flock refused", not a
-  magic exit code.
+  as `job_skipped` and swallowed to 0. Contention is flock's `-E 99` on
+  that fd; a missing `flock` or an unusable lock file stays nonzero.
 - `marketdata/opra.py:106` vs `ingest/jobs/__init__.py:85` — two OPRA year-pivot
   decoders disagree on `yy >= 80` (19xx vs 20xx). Unreachable today; hoist one
   shared decoder before the universe widens.

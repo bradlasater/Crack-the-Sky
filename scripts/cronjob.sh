@@ -9,9 +9,11 @@
 # diff against the schedule to notice. A job with no headroom left is exactly
 # the thing that should be visible before it becomes a job that stops.
 #
-# The lock is taken on fd 9 *before* the command runs, so a skip is "flock
-# refused" rather than a magic exit code. Wrapping with `flock -n -E 99` used
-# to treat a command that exited 99 as job_skipped and swallow it to 0.
+# The lock is taken on fd 9 *before* the command runs, so a command that
+# exits 99 is no longer logged as job_skipped. `flock -n -E 99` is used
+# only on that fd acquire: 99 is contention, other flock failures stay
+# nonzero. Wrapping the command itself with `flock -n -E 99` used to
+# swallow a real exit 99 to 0.
 #
 # BLAS threads are pinned because the SVI fit is not reproducible without it.
 # Same code, same inputs, 1 thread against 8, on 2026-09-04: 397 of 720
@@ -108,11 +110,20 @@ _hc_ping() {
 
 # Hold the lock on this shell's fd 9, then run the command in this same
 # process. The command's exit status cannot be confused with "lock not taken".
-exec 9>"$LOCK"
-if ! flock -n 9; then
+if ! exec 9>"$LOCK"; then
+  echo "error: cannot open lock $LOCK" >&2
+  exit 1
+fi
+flock -n -E 99 9
+flock_rc=$?
+if [ "$flock_rc" -eq 99 ]; then
   printf '{"ts":"%s","event":"job_skipped","job":"%s","reason":"previous run still holds %s"}\n' \
     "$(date -Is)" "$JOB" "$LOCK"
   exit 0
+fi
+if [ "$flock_rc" -ne 0 ]; then
+  echo "error: flock failed with status $flock_rc (lock $LOCK)" >&2
+  exit "$flock_rc"
 fi
 
 if [ "$_is_shell_job" -eq 1 ]; then

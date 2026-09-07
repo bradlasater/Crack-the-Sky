@@ -101,7 +101,7 @@
           </tr>
           <tr>
             <td class="job">snapshot_sweep</td>
-            <td>One failing chain (e.g. VIX 403s) fails the whole run; the in-process retry re-fetches SPY+SPX and lands duplicate per-underlying files.</td>
+            <td><strong>fixed</strong>: chains fail independently. One bad chain is recorded and the rest still land; the run fails only when every chain does. <code>snapshot_sweep_all_chains</code> is pinged only on a fully clean sweep, so a chain down longer than the grace pages by absence.</td>
           </tr>
         </tbody>
       </table>

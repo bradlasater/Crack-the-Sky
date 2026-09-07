@@ -294,6 +294,9 @@ def test_latent_page_points_at_improvements() -> None:
     assert "IMPROVEMENTS.md" in text
     assert "job_end" in text
     assert "massive-prune" in text
+    assert "snapshot_sweep_all_chains" in text
+    assert "fails the whole run" not in text
+    assert "duplicate per-underlying" not in text
 
 
 def test_handbook_nav_includes_red_day_and_latent() -> None:

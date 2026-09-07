@@ -87,8 +87,8 @@
           </tr>
           <tr>
             <td class="job">massive-snapshot-sweep</td>
-            <td>The irreplaceable dataset missed a minute (or a chain 403'd the whole run).</td>
-            <td>That minute is gone. Do not repair. Check the other chains landed; see <a href="latent.html">latent holes</a> for the all-chains-fail retry.</td>
+            <td>The irreplaceable dataset missed a minute (every chain failed, or the job died).</td>
+            <td>That minute is gone. Do not repair. A single chain 403 no longer fails the run; <code>massive-snapshot-sweep-all-chains</code> pages by absence if one chain stays down longer than the grace.</td>
           </tr>
           <tr>
             <td class="job">massive-ws-minute-bars / _alive</td>

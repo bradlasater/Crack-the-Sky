@@ -132,6 +132,82 @@ def test_discount_year_fraction_clamps_at_zero() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Zero-session spans (finding 8)
+# ---------------------------------------------------------------------------
+
+# 2025-01-09 was a full-day close -- the national day of mourning for
+# President Carter -- and it is the expiry of the only zero-session spans in
+# the archive. Wednesday to Thursday: one calendar day, no sessions.
+MOURNING_DAY = date(2025, 1, 9)
+MOURNING_EVE = date(2025, 1, 8)
+
+
+def _one_day_chain() -> list[dict]:
+    """A chain expiring the day after ``MOURNING_EVE``, priced at ACT/365."""
+    t = 1.0 / 365.0
+    bars = []
+    for k in (float(x) for x in range(7300, 8101, 25)):
+        vol = VOL - 0.15 * math.log(k / F)
+        for kind in ("call", "put"):
+            bars.append({"ticker": _sym("SPXW", MOURNING_DAY, kind, k),
+                         "close": float(price(F, k, t, R, vol, kind, q=R)),
+                         "window_end_ns": 1})
+    return bars
+
+
+def _built(builder: str, **kw) -> int:
+    """How many rows / slices the builder produced for the one-day chain."""
+    if builder == "term_structure":
+        return len(ts.build_rows(_one_day_chain(), MOURNING_EVE,
+                                 roots=("SPXW",), rate_fn=lambda _a, _t: R, **kw))
+    surfaces = sf.build_surfaces(_one_day_chain(), MOURNING_EVE,
+                                 roots=("SPXW",), rate_fn=lambda _a, _t: R, **kw)
+    return sum(len(s.slices) for s in surfaces.values())
+
+
+def test_a_closure_only_span_counts_zero_sessions(
+    session_calendar: SessionCalendar,
+) -> None:
+    """The premise: dte is 1, but no session falls in the span."""
+    assert (MOURNING_DAY - MOURNING_EVE).days == 1
+    assert session_calendar.is_session(MOURNING_DAY) is False
+    assert session_calendar.sessions_between(MOURNING_EVE, MOURNING_DAY) == 0
+    assert TradingSessions(session_calendar).year_fraction(
+        MOURNING_EVE, MOURNING_DAY) == 0.0
+
+
+@pytest.mark.parametrize("builder", ["term_structure", "surface"])
+def test_zero_vol_time_rows_are_skipped_not_landed(
+    session_calendar: SessionCalendar, builder: str
+) -> None:
+    """A row whose IV cannot exist must not be written.
+
+    Without the guard the span survives the ``dte <= 0`` check, T reaches the
+    solver as 0.0, every inversion raises and is swallowed into None, and the
+    row lands with a null IV -- the silent shape this whole change exists to
+    prevent. Landing it would also stamp ``t_years = 0``, a division by zero
+    waiting in every downstream greek.
+    """
+    bus = TradingSessions(session_calendar)
+    assert _built(builder, daycount=bus) == 0
+
+
+@pytest.mark.parametrize("builder", ["term_structure", "surface"])
+def test_the_same_span_still_lands_under_act_365(builder: str) -> None:
+    """The guard is about vol time, not about the date.
+
+    Under the default convention the span is 1/365 and the row is perfectly
+    ordinary, so the skip must not fire -- otherwise this would be a silent
+    behaviour change to the landed archive rather than a guard on a
+    convention that is not switched on yet.
+    """
+    assert _built(builder) == 1
+    row = ts.build_rows(_one_day_chain(), MOURNING_EVE, roots=("SPXW",),
+                        rate_fn=lambda _a, _t: R)[0]
+    assert row["t_years"] == pytest.approx(1.0 / 365.0, rel=1e-12)
+
+
+# ---------------------------------------------------------------------------
 # The seam, on the day-bar path
 # ---------------------------------------------------------------------------
 

@@ -55,7 +55,6 @@ from ingest.jobs import (
     parse_option_ticker,
     parse_underlyings,
 )
-from pricing.conventions import CALENDAR_DAYS_PER_YEAR
 from pricing.daycount import DEFAULT_DAYCOUNT, DayCount, discount_year_fraction
 from pricing.iv import implied_vol
 
@@ -63,10 +62,10 @@ JOB = "term_structure"
 DATASET = "atm_term_structure"
 SRC = "day_bars"
 
-# Money time: the rate-curve tenor below, and nothing else. Vol time -- the T
-# that reaches sigma*sqrt(T) -- goes through the passed ``daycount`` instead,
-# so the two can diverge deliberately. See pricing/daycount.py.
-DAYS_PER_YEAR = float(CALENDAR_DAYS_PER_YEAR)
+# No DAYS_PER_YEAR here any more, deliberately: one module-level constant is
+# what let vol time and money time share a denominator without saying so.
+# Money time is ``discount_year_fraction``; vol time is the passed
+# ``daycount``. See pricing/daycount.py.
 
 
 def bars_to_chain(rows: list[dict[str, Any]], root: str) -> list[dict[str, Any]]:

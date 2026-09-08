@@ -470,6 +470,7 @@ def test_from_rows_still_calendar_checks() -> None:
         "svi_a": 0.04, "svi_b": 0.01, "svi_rho": 0.0, "svi_m": 0.0, "svi_sigma": 0.1,
         "k_min": -0.05, "k_max": 0.05, "n_strikes": 21,
         "rms_error": 0.0, "min_g": 0.5, "rate": R, "src": "day_bars",
+        "blas_threads": 1,
     }
     far = dict(near, expiration_date=FAR.isoformat(),
                dte=(FAR - DAY).days, t_years=T_FAR, svi_a=0.001)
@@ -545,3 +546,55 @@ def test_from_rows_accepts_the_hybrid_mix_of_stamps() -> None:
     loaded = sf.Surface.from_rows(rows)
     assert [s.daycount for s in loaded.slices][0] == "bus/252"
     assert [s.daycount for s in loaded.slices][-1] == "act/365"
+
+
+# ---------------------------------------------------------------------------
+# BLAS thread-pin stamp: a row is reproducible only if the count is recorded
+# ---------------------------------------------------------------------------
+
+
+def test_rows_stamp_the_blas_thread_pin(monkeypatch) -> None:
+    """The optimum moves with the thread count, so the count the fit ran under
+    lands on every row -- and survives the from_rows round-trip."""
+    monkeypatch.setenv("OPENBLAS_NUM_THREADS", "1")
+    surf = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",),
+                             rate_fn=_flat_rate, daycount=ACT_365)["SPXW"]
+    rows = sf.rows_from_surfaces({"SPXW": surf})
+    assert {r["blas_threads"] for r in rows} == {1}
+    loaded = sf.Surface.from_rows(rows)
+    assert {s.blas_threads for s in loaded.slices} == {1}
+
+
+def test_rows_record_a_deliberate_override(monkeypatch) -> None:
+    """cronjob.sh leaves an operator's override in place; the stamp must record
+    the configured value, not the scheduled default. This pins the env-to-row
+    plumbing only -- that the configured value IS the count the loaded backend
+    uses is the subprocess tests' claim (tests/test_thread_pin.py), where the
+    env is fixed before OpenBLAS loads; nothing mutates it in-process."""
+    monkeypatch.setenv("OPENBLAS_NUM_THREADS", "4")
+    surf = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",),
+                             rate_fn=_flat_rate, daycount=ACT_365)["SPXW"]
+    assert {r["blas_threads"] for r in sf.rows_from_surfaces({"SPXW": surf})} == {4}
+
+
+def test_rows_record_null_when_unpinned(monkeypatch) -> None:
+    """An unpinned run is honestly not reproducible; the row records null
+    rather than guessing a count."""
+    monkeypatch.delenv("OPENBLAS_NUM_THREADS", raising=False)
+    surf = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",),
+                             rate_fn=_flat_rate, daycount=ACT_365)["SPXW"]
+    rows = sf.rows_from_surfaces({"SPXW": surf})
+    assert {r["blas_threads"] for r in rows} == {None}
+    assert {s.blas_threads for s in sf.Surface.from_rows(rows).slices} == {None}
+
+
+def test_from_rows_refuses_rows_without_the_thread_pin_column() -> None:
+    """A partition written before the stamp existed must fail loud, not read
+    as an unpinned fit -- same contract as the daycount stamp."""
+    surf = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",),
+                             rate_fn=_flat_rate, daycount=ACT_365)["SPXW"]
+    rows = sf.rows_from_surfaces({"SPXW": surf})
+    for r in rows:
+        del r["blas_threads"]
+    with pytest.raises(sf.SurfaceError, match="no blas_threads column"):
+        sf.Surface.from_rows(rows)

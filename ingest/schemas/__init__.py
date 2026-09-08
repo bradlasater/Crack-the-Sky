@@ -306,6 +306,11 @@ def _build_schemas() -> dict[str, Any]:
         pa.field("min_g", pa.float64()),           # min of Gatheral's g(k)
         pa.field("rate", pa.float64()),            # r used, from the curve
         pa.field("src", pa.string()),              # 'day_bars'
+        # BLAS thread pin the SVI fit ran under (OPENBLAS_NUM_THREADS); null
+        # when the writer ran unpinned. Without it the fit is not
+        # reproducible across a hardware change -- the optimiser lands
+        # elsewhere in an equally good basin at another thread count.
+        pa.field("blas_threads", pa.int64()),
     ]
 
     # One row per session: SPY cash level. Prefers underlying_day_bars.close

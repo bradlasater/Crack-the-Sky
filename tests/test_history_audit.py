@@ -320,3 +320,42 @@ def test_main_defaults_date_to_the_previous_trading_day(monkeypatch) -> None:
                         lambda job, fn, argv: seen.setdefault("argv", argv))
     ha.main([])
     assert seen["argv"][0] == "--date"
+
+
+def _parse_via_main(monkeypatch, argv: list[str]) -> dict:
+    """The (start, end, offline) main() peels off, and the argv it forwards."""
+    seen: dict = {}
+
+    def fake_run_job(job, fn, forwarded):
+        from types import SimpleNamespace
+
+        seen["argv"] = forwarded
+        fn(SimpleNamespace(), None, None)
+
+    monkeypatch.setattr(ha, "run_job", fake_run_job)
+    monkeypatch.setattr(
+        ha, "_main_fn",
+        lambda a, st, log: seen.update(start=a.start, end=a.end, offline=a.offline),
+    )
+    ha.main(argv)
+    return seen
+
+
+def test_main_accepts_equals_style_start_and_end(monkeypatch) -> None:
+    """argparse accepts ``--flag=value``; the hand-rolled loop must too --
+    passing ``--start=X`` through to run_job dies loudly on the shared
+    parser's "unrecognized arguments"."""
+    seen = _parse_via_main(
+        monkeypatch, ["--start=2023-02-15", "--end=2023-02-16", "--offline"]
+    )
+    assert (seen["start"], seen["end"], seen["offline"]) == \
+        ("2023-02-15", "2023-02-16", True)
+    # The job-specific flags are peeled off; only the default --date remains.
+    assert not any(a.startswith(("--start", "--end", "--offline"))
+                   for a in seen["argv"])
+
+
+def test_main_still_accepts_space_separated_start_and_end(monkeypatch) -> None:
+    seen = _parse_via_main(monkeypatch, ["--start", "2023-02-15", "--end", "2023-02-16"])
+    assert (seen["start"], seen["end"], seen["offline"]) == \
+        ("2023-02-15", "2023-02-16", False)

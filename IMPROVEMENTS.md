@@ -117,8 +117,12 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   session-long process picks up a mid-run `holidays_sync` rewrite. A missing
   file still caches as empty (fail-open) and starts answering the moment the
   file appears.
-- `ingest/common/landing.py:212` — `quarantine_prior` uses `Path.replace`,
-  overwriting a same-named quarantined file. Rare; collision-nudge the target.
+- `ingest/common/landing.py:212` — **fixed**: `quarantine_prior` now nudges
+  the stamp token forward when the quarantine target name is already taken,
+  so a second refilter/reconcile of one partition no longer overwrites the
+  earlier quarantined file. Same shape-preserving nudge as
+  `_unique_clean_path` (readers parse the final `-` token as an integer
+  stamp).
 - `ingest/jobs/coverage_audit.py:120` + `deploy/crontab:57` — on 13:00
   early-close days the cron cadence still runs to 16:30, so ~178 post-close
   sweeps read as "stray" and the 13:32–16:30 window is unchecked. Decide which

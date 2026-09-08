@@ -187,6 +187,30 @@ def clean_files(
     return sorted(part.glob(f"{job}-*.parquet"))
 
 
+def _unique_quarantine_path(dest: Path, name: str) -> Path:
+    """A path under ``dest`` for ``name`` that no file already occupies.
+
+    Quarantining the same partition twice (a second refilter, or a reconcile
+    rerun) produces same-named sources, and ``Path.replace`` would silently
+    overwrite the earlier quarantined file -- the very data the move exists
+    to keep recoverable. The stamp token is nudged forward rather than given
+    a ``-2`` suffix, for the same reason ``_unique_clean_path`` does: readers
+    parse the final ``-``-separated token as an integer stamp.
+    """
+    target = dest / name
+    if not target.exists():
+        return target
+    stem, dot, suffix = name.partition(".")
+    prefix, sep, stamp = stem.rpartition("-")
+    base = int(stamp) if sep and stamp.isdigit() else None
+    n = 1
+    while target.exists():
+        bumped = f"{prefix}-{base + n}" if base is not None else f"{stem}-{n}"
+        target = dest / (bumped + dot + suffix) if dot else dest / bumped
+        n += 1
+    return target
+
+
 def quarantine_prior(
     dataset: str,
     dt: date | str,
@@ -218,7 +242,7 @@ def quarantine_prior(
         if not path.is_file():
             continue
         dest.mkdir(parents=True, exist_ok=True)
-        target = dest / path.name
+        target = _unique_quarantine_path(dest, path.name)
         path.replace(target)
         moved.append(target)
     return moved

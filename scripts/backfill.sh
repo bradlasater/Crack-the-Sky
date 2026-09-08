@@ -49,11 +49,17 @@ MIN_FREE_GB="${MIN_FREE_GB:-100}"
 ORDER="${BACKFILL_ORDER:-newest}"
 WORKERS="${BACKFILL_WORKERS:-4}"
 case "$WORKERS" in
-    ''|*[!0-9]*)
+    ''|*[!0-9]*|0)
         echo "[backfill] BACKFILL_WORKERS must be a positive integer (got '$WORKERS')" >&2
         exit 2
         ;;
 esac
+# Catches numerically-zero spellings the pattern misses ('00'); xargs -P 0
+# would mean *unlimited* parallelism, the opposite of a rejected zero.
+if [ "$WORKERS" -lt 1 ]; then
+    echo "[backfill] BACKFILL_WORKERS must be a positive integer (got '$WORKERS')" >&2
+    exit 2
+fi
 
 DATA_ROOT="${DATA_ROOT:-$(grep -E '^DATA_ROOT=' .env 2>/dev/null | cut -d= -f2 || true)}"
 DATA_ROOT="${DATA_ROOT:-/data/massive}"
@@ -141,8 +147,7 @@ fi
 
 run_one() {
     # Pull one date. A per-date failure is logged and swallowed so one bad
-    # date never sinks the batch; only the low-disk abort propagates (255,
-    # which also stops xargs immediately).
+    # date never sinks the batch; only the low-disk abort propagates (255).
     d="$1"
     avail="$(free_gb)"; avail="${avail:-0}"
     if [ "$avail" -lt "$MIN_FREE_GB" ]; then
@@ -156,7 +161,7 @@ run_one() {
     sleep "$SLEEP_BETWEEN_DAYS"
 }
 
-if [ "$WORKERS" -le 1 ]; then
+if [ "$WORKERS" -eq 1 ]; then
     i=0
     for d in ${todo[@]+"${todo[@]}"}; do
         i=$((i + 1))
@@ -167,6 +172,9 @@ else
     export -f run_one free_gb
     export DATA_ROOT MIN_FREE_GB PY SLEEP_BETWEEN_DAYS
     rc=0
+    # A worker's 255 (low disk) makes GNU xargs stop launching new dates and
+    # exit nonzero; pulls already in flight still finish their current date
+    # (bounded work) and free space is re-checked before every launch.
     printf '%s\n' "${todo[@]}" | xargs -r -P "$WORKERS" -n 1 bash -c 'run_one "$1"' _ || rc=$?
     if [ "$rc" -ne 0 ]; then
         echo "[backfill] aborted (worker exit $rc); resume with the same command" >&2

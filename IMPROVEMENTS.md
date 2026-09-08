@@ -108,7 +108,9 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   (the SharedTokenBucket pattern), so concurrent flatfile_pull processes
   cannot corrupt or lose manifest entries. backfill.sh then runs dates
   `BACKFILL_WORKERS`-wide in parallel (`xargs -P`, default 4, 1 = the old
-  serial loop); a low-disk worker exits 255, which stops xargs immediately.
+  serial loop); a low-disk worker exits 255, which stops xargs from launching
+  further dates (in-flight pulls finish their current date, then the run
+  aborts with the usual resume message).
   Day-to-day ingest stays serial: it is vendor-rate-bound (40 rps shared
   bucket), not compute-bound — parallelism only pays for backfills.
 

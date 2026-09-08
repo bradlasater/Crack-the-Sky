@@ -184,6 +184,15 @@ def test_a_failed_date_does_not_stop_the_batch(tmp_path: Path, stub_py: Path) ->
     assert "continuing" in proc.stdout
 
 
+@pytest.mark.parametrize("workers", ["0", "00", "-1", "abc"])
+def test_invalid_worker_counts_are_rejected(tmp_path: Path, stub_py: Path, workers: str) -> None:
+    """0 used to pass validation and silently select the serial branch."""
+    proc = _run(tmp_path, "2026-08-24", "2026-08-25", stub_py, BACKFILL_WORKERS=workers)
+    assert proc.returncode == 2
+    assert "BACKFILL_WORKERS" in proc.stderr
+    assert _calls(tmp_path) == []
+
+
 def test_everything_already_done_pulls_nothing(tmp_path: Path, stub_py: Path) -> None:
     days = ["2026-08-24", "2026-08-25"]
     _seed_manifest(tmp_path, [_entry(ds, d, 5) for d in days for ds in DATASETS])

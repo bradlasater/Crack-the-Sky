@@ -39,7 +39,7 @@ entitlement or owner decision before code helps).
 |---|---|---|
 | Feature engineering | **partial** | ATM term structure (`pricing/term_structure.py`), SVI slice params (`pricing/surface.py`), continuous spot series (`signals/spot.py`). No RV features, no feature pipeline, no regimes/event flags. |
 | Forecasting (HAR-RV baseline, distributions) | **missing** | The next real build item. `signals/spot.py` was written expressly to feed it (Stage 1.1 Roll-debias decision already measured: do not debias). |
-| Pricing / surface analytics | **built** | Own IV (European + American/CRR), parity forwards, raw-SVI surface with butterfly *and* calendar arbitrage repaired inside the fit (`SurfaceArbitrageError` otherwise). Gaps on record: SPY smile (American under a European fit path), VIX surface, **no scheduled surface job**, drift_check's off-ATM consumer. |
+| Pricing / surface analytics | **built** | Own IV (European + American/CRR), parity forwards, raw-SVI surface with butterfly *and* calendar arbitrage repaired inside the fit (`SurfaceArbitrageError` otherwise). Gaps on record: SPY smile (American under a European fit path), VIX surface, **no scheduled surface job**. |
 | Signal / strategy engine | **missing** | No candidate structures, no entry/exit/roll/no-trade rules, no edge-net-of-costs. |
 
 ### Trading control loop — all missing, none near-term

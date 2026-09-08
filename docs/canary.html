@@ -94,6 +94,18 @@
         enough vendor-comparable ATM names. Still fail-loud on no snapshots,
         schema errors, foreign roots, empty allowlisted root, filesystem errors.
       </p>
+      <p>
+        Off-ATM, the canary reads the landed <code>vol_surface</code> SVI slice
+        params back (never refits) and round-trips a fixed log-moneyness grid
+        (<code>k = ±0.05, ±0.10</code>, the OTM halves) at the slices nearest
+        30 and 90 DTE: price off the slice vol in the forward measure, invert
+        back with the engine's own solver, band on <code>|Δσ|</code>
+        (<code>surface_vol_abs = 1e-4</code> — solver tolerance, like the
+        reprice bands). No <code>vol_surface</code> partition for the date is a
+        <strong>skip</strong> (<code>surface_compare_skipped</code>), not a
+        FAIL; a partition that exists but cannot be read, calendar-checked, or
+        repriced back to its own vol is fail-loud.
+      </p>
 
       <h2 id="canary-fail-means">What a FAIL means</h2>
       <p>
@@ -124,6 +136,10 @@
           <tr>
             <td>median |ΔIV| exceeds 0.04, or vendor fraction &gt; 25%</td>
             <td>Vendor diagnostic, and only after ≥ 20 ATM names carry vendor IV. Null vendor IV logs <code>vendor_compare_skipped</code> and still PASSes. A vendor FAIL with holding identities means the vendor moved, not us — still exit 1, still a page.</td>
+          </tr>
+          <tr>
+            <td>surface: … (not evaluable / |Δσ| exceeds 1e-4 / no rows)</td>
+            <td>The landed <code>vol_surface</code> partition for the date exists but the engine cannot reproduce it off-ATM: unreadable parquet, failed calendar guard, negative total variance at the grid, or a round-trip residual beyond solver tolerance. Rebuild the date with <code>scripts/build_surface.py --start D --end D --force</code>; if the rebuild lands the same params, the drift is real. A missing partition is <code>surface_compare_skipped</code>, not this row.</td>
           </tr>
         </tbody>
       </table>

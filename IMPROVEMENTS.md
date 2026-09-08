@@ -144,9 +144,12 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   computed without `data_root` (unlike `history_audit`), so a non-standard
   `DATA_ROOT` picks T-1 against the wrong holiday calendar. Pass the settings
   root consistently.
-- `ingest/jobs/history_audit.py:280` — hand-rolled argv parser doesn't accept
-  `--start=X`/`--end=X` equals-forms (dies loudly, not silently). Extend the
-  loop or register the flags via the shared parser.
+- `ingest/jobs/history_audit.py:280` — **fixed**: the hand-rolled loop now
+  accepts `--start=X`/`--end=X` equals-forms alongside the space-separated
+  ones. Done by extending the loop rather than the shared parser, matching
+  the repo convention that jobs peel their own flags before handing the rest
+  to `cli.run_job` (`strip_flag` documents the pattern); the shared parser
+  only knows flags common to every job.
 - `scripts/backfill.sh:60` vs `scripts/prune_raw.sh:98` — inconsistent
   "is this date done" semantics: backfill skips dates with ≥3 manifest entries
   regardless of `rows_kept`, so a 0-rows-kept date is skipped forever. Build a

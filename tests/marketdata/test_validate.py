@@ -58,6 +58,32 @@ def test_required_nulls_fail() -> None:
     assert req.status == FAIL
 
 
+def test_decision_log_required_nulls_fail() -> None:
+    """A decision row without its rationale or versions is a FAIL, not a gap."""
+    from datetime import date as _date
+
+    from ingest.schemas import decision_record
+
+    schema = SCHEMAS["decision_log"]
+    rec = decision_record(
+        decision_id="bt-0001",
+        session_date=_date(2026, 9, 4),
+        asof_ns=1,
+        src="backtest",
+        job="backtest_v0",
+        gate="entry",
+        rationale="vrp spread above threshold",
+        inputs={},
+        signals={},
+    )
+    rec["rationale"] = None
+    table = pa.Table.from_pylist([{f.name: rec.get(f.name) for f in schema}], schema=schema)
+    checks = validate_table(table, "decision_log")
+    req = next(c for c in checks if c.name == "required[rationale]")
+    assert req.status == FAIL
+    assert not any(c.name.startswith("ticker_") for c in checks)
+
+
 def test_empty_table_fails() -> None:
     table = SCHEMAS["option_snapshots"].empty_table()
     checks = validate_table(table, "option_snapshots")

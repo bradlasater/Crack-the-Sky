@@ -220,6 +220,20 @@ def test_spy_spot_is_documented() -> None:
     assert "build_spy_spot.py" in layout
 
 
+def test_decision_log_is_documented() -> None:
+    """Append-only decision history must be findable before a producer exists."""
+    ingest = (DOCS_DIR / "ingest.html").read_text()
+    flow = (DOCS_DIR / "data-flow.html").read_text()
+    marketdata = (DOCS_DIR / "marketdata.html").read_text()
+    not_built = (DOCS_DIR / "not-built.html").read_text()
+    assert "decision_log" in ingest
+    assert "decision_log" in flow
+    assert "append-only" in flow
+    assert "decision_log" in marketdata
+    assert "decision_log" in not_built
+    assert "write_decisions" in ingest
+
+
 def test_surface_roots_on_pricing_page() -> None:
     from pricing.surface import SURFACE_ROOTS
 

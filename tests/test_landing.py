@@ -73,3 +73,102 @@ def test_write_raw_text_retries_on_a_preclaimed_path(
     assert path == out_dir / "ibkr_executions-1788298047098.xml"
     assert path.read_text(encoding="utf-8") == "<xml>new</xml>"
     assert preclaimed.read_text(encoding="utf-8") == "<xml>pre-existing</xml>"
+
+
+# ---------------------------------------------------------------------------
+# quarantine_prior
+# ---------------------------------------------------------------------------
+
+def _land_clean_bytes(root: Path, name: str, payload: bytes) -> Path:
+    part = root / "clean" / "option_trades" / f"dt={DT.isoformat()}"
+    part.mkdir(parents=True, exist_ok=True)
+    path = part / name
+    path.write_bytes(payload)
+    return path
+
+
+def test_quarantine_prior_never_overwrites_a_same_named_file(tmp_path: Path) -> None:
+    """Quarantining one partition twice must keep both versions recoverable.
+
+    Path.replace overwrites a same-named target, so the second refilter used
+    to silently destroy the first quarantined file -- the data the move
+    exists to preserve. The stamp token nudges forward instead, keeping the
+    name's shape for the readers that parse it as an integer.
+    """
+    name = "flatfile_pull-1788298047097.parquet"
+    _land_clean_bytes(tmp_path, name, b"first")
+    landing.quarantine_prior("option_trades", DT, "flatfile_pull", data_root=tmp_path)
+    _land_clean_bytes(tmp_path, name, b"second")
+    moved = landing.quarantine_prior("option_trades", DT, "flatfile_pull",
+                                     data_root=tmp_path)
+
+    dest = tmp_path / "_quarantine" / "refilter" / "option_trades" / f"dt={DT.isoformat()}"
+    assert (dest / name).read_bytes() == b"first"
+    assert moved == [dest / "flatfile_pull-1788298047098.parquet"]
+    assert moved[0].read_bytes() == b"second"
+
+
+def test_quarantine_prior_nudges_past_a_run_of_collisions(tmp_path: Path) -> None:
+    name = "flatfile_pull-1788298047097.parquet"
+    for i in range(3):
+        _land_clean_bytes(tmp_path, name, f"v{i}".encode())
+        landing.quarantine_prior("option_trades", DT, "flatfile_pull",
+                                 data_root=tmp_path)
+    dest = tmp_path / "_quarantine" / "refilter" / "option_trades" / f"dt={DT.isoformat()}"
+    assert sorted(p.read_bytes() for p in dest.glob("*.parquet")) == [b"v0", b"v1", b"v2"]
+
+
+def test_quarantine_prior_keeps_the_source_when_the_link_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The source is unlinked only after its hard link lands.
+
+    Quarantine claims each candidate with os.link so a concurrent move can
+    never overwrite a placed file; if the link itself errors (the target fs
+    is full, say), the source must stay where a retry can find it rather than
+    be half-moved.
+    """
+    name = "flatfile_pull-1788298047097.parquet"
+    src = _land_clean_bytes(tmp_path, name, b"first")
+
+    def fail_link(s, d):
+        raise OSError("no space left")
+
+    monkeypatch.setattr(landing.os, "link", fail_link)
+    with pytest.raises(OSError):
+        landing.quarantine_prior("option_trades", DT, "flatfile_pull",
+                                 data_root=tmp_path)
+    assert src.is_file() and src.read_bytes() == b"first"
+
+
+def test_quarantine_prior_retries_after_a_lost_link_race(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A candidate claimed between selection and link must not lose the file.
+
+    Simulates the TOCTOU race: another process hard-links its own file onto
+    the first candidate just as this one tries. The move must fall through to
+    the nudged stamp with both versions intact.
+    """
+    import os
+
+    real_link = os.link
+    raced = {"done": False}
+
+    def racing_link(src, dst):
+        if not raced["done"]:
+            raced["done"] = True
+            (tmp_path / "winner").write_bytes(b"winner")
+            real_link(tmp_path / "winner", dst)
+        return real_link(src, dst)
+
+    name = "flatfile_pull-1788298047097.parquet"
+    _land_clean_bytes(tmp_path, name, b"ours")
+    monkeypatch.setattr(landing.os, "link", racing_link)
+    moved = landing.quarantine_prior("option_trades", DT, "flatfile_pull",
+                                     data_root=tmp_path)
+
+    dest = tmp_path / "_quarantine" / "refilter" / "option_trades" / f"dt={DT.isoformat()}"
+    assert (dest / name).read_bytes() == b"winner"
+    assert moved == [dest / "flatfile_pull-1788298047098.parquet"]
+    assert moved[0].read_bytes() == b"ours"

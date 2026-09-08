@@ -38,7 +38,7 @@ from typing import Any
 
 from ingest.common import landing, market_gate
 from ingest.common.cli import run_job
-from ingest.common.config import Settings
+from ingest.common.config import Settings, default_data_root
 from ingest.common.logging_utils import JsonlLogger
 from ingest.jobs import OPTION_ROOTS, ticker_root, underlying_root
 
@@ -76,6 +76,17 @@ MAX_SWEEP_GAP_S = 180
 #
 # So: the cadence numbers below are computed over the continuous window only,
 # and the two deliberate singletons are asserted separately.
+#
+# Early closes are the audit's to own (owner decision 2026-09; the crontab
+# stays as installed). Cron cannot express the NYSE calendar, so on a 13:00
+# close the cadence lines keep firing to 16:30 and those sweeps land in the
+# same partition. sweep_window ends the canonical window at the actual
+# session close via market_gate.market_close_et, and _classify_stamps puts
+# the post-close firings in their own bucket rather than reading ~178 of them
+# as "stray". The early-close answer comes from market_gate reading
+# _meta/holidays.json directly -- the same underlying file pricing.calendar
+# unions into its session calendar -- because the import direction in this
+# repo is pricing -> ingest, never the reverse (see SURFACE_ROOTS above).
 SWEEP_WINDOW_OPEN_ET = time(9, 30)
 # Continuous cadence runs to close + 30 min (the schedule's "0-30 16" line).
 # This is deliberately *not* market_gate.option_capture_end_et (close + 35):
@@ -163,17 +174,39 @@ def _classify_stamps(
     cadence and gap numbers may be computed from. ``preopen`` and ``eod`` are
     the two scheduled singletons. ``stray`` is everything else -- typically a
     sweep run by hand outside the session; reported, never counted.
+
+    ``post_close`` is the early-close case. Cron cannot express the NYSE
+    calendar, so on a 13:00 close the cadence lines keep firing to 16:30 and
+    ~178 sweeps land after the canonical window has ended. The audit owns
+    early closes (the crontab deliberately stays put): those sweeps are the
+    schedule working as installed, so they are accounted for separately
+    rather than reported as strays -- and never asserted on, so a sweep job
+    that learns to stop at the early close does not fail the day it ships.
     """
     open_et, end_et = sweep_window(d, data_root)
     preopen_at = datetime.combine(d, PREOPEN_SWEEP_ET, tzinfo=market_gate.ET)
     eod_at = datetime.combine(d, EOD_SWEEP_ET, tzinfo=market_gate.ET)
-    out: dict[str, list[int]] = {"window": [], "preopen": [], "eod": [], "stray": []}
+    # The cadence's hard stop on any day: regular close + tail + write grace.
+    cadence_end = (
+        datetime.combine(d, market_gate.REGULAR_CLOSE, tzinfo=market_gate.ET)
+        + SWEEP_TAIL + SWEEP_WRITE_GRACE
+    )
+    early_close = d in market_gate.load_early_closes(data_root)
+    out: dict[str, list[int]] = {
+        "window": [], "preopen": [], "eod": [], "post_close": [], "stray": [],
+    }
     for ms in stamps:
         at = datetime.fromtimestamp(ms / 1000.0, tz=market_gate.ET)
         if open_et <= at <= end_et:
             out["window"].append(ms)
         elif abs(at - preopen_at) <= SINGLETON_TOLERANCE:
             out["preopen"].append(ms)
+        elif early_close and end_et < at <= cadence_end:
+            # Before the EOD tolerance: the real EOD sweep runs at 16:35,
+            # after cadence_end, so on an early close the still-firing
+            # cadence (16:25-16:30) reaches the tolerance window first and
+            # would otherwise stand in for a missing EOD run.
+            out["post_close"].append(ms)
         elif abs(at - eod_at) <= SINGLETON_TOLERANCE:
             out["eod"].append(ms)
         else:
@@ -201,6 +234,7 @@ def check_snapshots(settings: Settings, d: date) -> list[Check]:
                 f"no in-session sweeps landed (expected ~{expected})",
                 {"sweeps": 0, "expected": expected,
                  "preopen": len(parts["preopen"]), "eod": len(parts["eod"]),
+                 "post_close": len(parts["post_close"]),
                  "stray": len(parts["stray"])},
             ))
             continue
@@ -226,6 +260,7 @@ def check_snapshots(settings: Settings, d: date) -> list[Check]:
             {"sweeps": len(got), "expected": expected,
              "ratio": round(ratio, 4), "max_gap_s": round(max_gap, 1),
              "preopen": len(parts["preopen"]), "eod": len(parts["eod"]),
+             "post_close": len(parts["post_close"]),
              "stray": len(parts["stray"])},
         ))
     # The two singletons carry data the cadence cannot: the pre-open sweep is
@@ -705,9 +740,12 @@ def main(argv: list[str] | None = None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
     # argparse also accepts ``--date=X``; a bare "--date" membership test
     # misses that form, and the appended default would silently override the
-    # date the caller asked to audit.
+    # date the caller asked to audit. The T-1 default is computed against the
+    # configured root: main() runs before run_job's Settings.load(), so a
+    # DATA_ROOT that lives only in .env needs config.default_data_root.
     if not any(a == "--date" or a.startswith("--date=") for a in argv):
-        prev = market_gate.previous_trading_day(market_gate.today_et())
+        prev = market_gate.previous_trading_day(
+            market_gate.today_et(), default_data_root())
         argv += ["--date", prev.isoformat()]
     run_job(JOB, _main_fn, argv)
 

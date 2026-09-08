@@ -63,8 +63,11 @@ OPTION_CAPTURE_BUFFER = (
     OPTION_CLOSE_LAG + WS_FEED_DELAY + WS_BAR_WINDOW + WS_DELIVERY_MARGIN
 )
 
-# Cache of parsed holidays.json keyed by resolved file path.
-_holiday_cache: dict[Path, list[dict]] = {}
+# Cache of parsed holidays.json keyed by resolved file path, carrying the
+# mtime it was read at. holidays_sync rewrites the file atomically, and a
+# session-long process (the websocket capture runs all day) would otherwise
+# gate on the calendar it started with.
+_holiday_cache: dict[Path, tuple[int | None, list[dict]]] = {}
 
 
 def _default_data_root() -> Path:
@@ -96,17 +99,28 @@ def _holidays_file(data_root: str | os.PathLike[str] | None) -> Path:
 
 
 def _load_records(data_root: str | os.PathLike[str] | None = None) -> list[dict]:
-    """Read and cache the raw holiday records from _meta/holidays.json."""
+    """Read and cache the raw holiday records from _meta/holidays.json.
+
+    The cache is invalidated on mtime change, so a mid-run rewrite by
+    holidays_sync is picked up on the next call. A missing file caches as
+    empty (fail-open) and starts answering the moment the file appears.
+    """
     path = _holidays_file(data_root)
-    if path not in _holiday_cache:
+    try:
+        mtime: int | None = path.stat().st_mtime_ns
+    except OSError:
+        mtime = None
+    cached = _holiday_cache.get(path)
+    if cached is None or cached[0] != mtime:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (FileNotFoundError, json.JSONDecodeError):
             data = []
         if isinstance(data, dict):  # tolerate {"holidays": [...]} wrappers
             data = data.get("holidays", [])
-        _holiday_cache[path] = [r for r in data if isinstance(r, dict) and r.get("date")]
-    return _holiday_cache[path]
+        records = [r for r in data if isinstance(r, dict) and r.get("date")]
+        _holiday_cache[path] = (mtime, records)
+    return _holiday_cache[path][1]
 
 
 def load_holidays(data_root: str | os.PathLike[str] | None = None) -> set[date]:

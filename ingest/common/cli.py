@@ -75,6 +75,7 @@ def build_parser(job_name: str) -> argparse.ArgumentParser:
 
 HEALTHCHECK_SLUG_PREFIX = "massive-"
 PING_TIMEOUT_S = 5  # snapshot_sweep has a 60s budget; never block on monitoring
+PING_BODY_MAX_BYTES = 10_000  # Healthchecks rejects a ping body past 10 KB
 RETRY_CAP_S = 300.0  # longest single backoff between in-run attempts
 
 
@@ -189,8 +190,12 @@ def ping(
     if autocreate:
         target += "?create=1"
     try:
-        requests.post(target, data=(body or "")[:10000].encode("utf-8"),
-                      timeout=PING_TIMEOUT_S)
+        # Truncate after encoding: the 10 KB limit is on bytes, and cutting
+        # 10,000 *chars* first lets a non-ASCII body sail past it. The decode
+        # round-trip drops a UTF-8 sequence the cut landed inside.
+        payload = (body or "").encode("utf-8")[:PING_BODY_MAX_BYTES]
+        payload = payload.decode("utf-8", errors="ignore").encode("utf-8")
+        requests.post(target, data=payload, timeout=PING_TIMEOUT_S)
     except Exception as exc:  # noqa: BLE001 - healthchecks must not fail jobs
         print(f"warning: healthcheck ping failed: {exc}", file=sys.stderr)
 

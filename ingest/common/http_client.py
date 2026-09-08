@@ -194,14 +194,22 @@ class MassiveClient:
 
         Follows ``next_url``, re-appending ``apiKey`` each time (the API does
         not include it). ``limit`` is merged into the first request's params.
+        A ``next_url`` that repeats one already followed is a server-side
+        cursor bug; following it would page forever, so the loop stops with a
+        warning instead.
         """
         merged: dict[str, Any] | None = dict(params or {})
         merged.setdefault("limit", limit)
         url = self._url(path)
+        seen = {url}
         while True:
             body = self.get(url, merged)
             yield from body.get("results") or []
             next_url = body.get("next_url")
             if not next_url:
                 return
+            if next_url in seen:
+                log.warning("paginate: repeated next_url %s; stopping", redact(next_url))
+                return
+            seen.add(next_url)
             url, merged = next_url, None

@@ -88,15 +88,30 @@ def _offline(monkeypatch, tmp_path) -> None:
 
     monkeypatch.setattr(config, "_parse_env_file", _scrubbed)
 
-    real_connect = socket.socket.connect
-
-    def _blocked(self, address, *args, **kwargs):
+    def _check_address(sock: socket.socket, address: Any) -> None:
+        # Only IP sockets can leave the box; AF_UNIX path addresses,
+        # AF_NETLINK, etc. are local by construction.
+        if sock.family not in (socket.AF_INET, socket.AF_INET6):
+            return
         host = address[0] if isinstance(address, tuple) else address
         if isinstance(host, str) and host not in ("localhost", "127.0.0.1", "::1"):
             raise OfflineTestViolation(
                 f"outbound connection to {host!r} attempted in a test; "
                 "monkeypatch the client instead of reaching the network"
             )
+
+    real_connect = socket.socket.connect
+    real_connect_ex = socket.socket.connect_ex
+
+    def _blocked(self, address, *args, **kwargs):
+        _check_address(self, address)
         return real_connect(self, address, *args, **kwargs)
 
+    # connect_ex reports refusal as an errno instead of raising, which would
+    # silently degrade a client to "host unreachable" without this.
+    def _blocked_ex(self, address, *args, **kwargs):
+        _check_address(self, address)
+        return real_connect_ex(self, address, *args, **kwargs)
+
     monkeypatch.setattr(socket.socket, "connect", _blocked)
+    monkeypatch.setattr(socket.socket, "connect_ex", _blocked_ex)

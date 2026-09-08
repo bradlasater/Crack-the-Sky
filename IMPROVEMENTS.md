@@ -87,10 +87,11 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   unit now also gets `OnFailure=massive-alert@massive-prune`. Re-run
   `scripts/setup_healthchecks.py` on the box so the check is created with
   the monthly schedule; an auto-created check would default to daily.
-- `pricing/drift_check.py:811` — `date.fromisoformat(args.date)` runs before
-  the logger and `/start` ping, so a malformed `--date` dies with a bare
-  traceback and no Healthchecks signal. Decide: argparse `type=` validation
-  (exit 2 to cron mail) or logging against a fallback date.
+- `pricing/drift_check.py:811` — **fixed**: `--date` now validates through an
+  argparse `type=` converter, so a malformed date exits 2 with a usage error
+  on stderr (cron mail) before the logger or any ping exists. Chosen over
+  logging against a fallback date: the run never starts, so there is nothing
+  to log against, and exit 2 is distinct from the canary's exit-1 FAIL path.
 - `ingest/jobs/snapshot_sweep.py` — **fixed**: chains now fail independently.
   One bad chain is recorded and the rest still land; the run fails only when
   every chain does. Previously a single failure discarded the chains that had

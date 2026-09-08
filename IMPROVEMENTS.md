@@ -128,10 +128,13 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   sweeps read as "stray" and the 13:32–16:30 window is unchecked. Decide which
   side owns early closes: crontab stops early, or the audit treats the full
   window as canonical.
-- `ingest/jobs/coverage_audit.py:536` / `reconcile.py:138` — default T-1 is
-  computed without `data_root` (unlike `history_audit`), so a non-standard
-  `DATA_ROOT` picks T-1 against the wrong holiday calendar. Pass the settings
-  root consistently.
+- `ingest/jobs/coverage_audit.py:536` / `reconcile.py:138` — **fixed**: both
+  jobs now compute the T-1 default against `config.default_data_root()`, a
+  new helper that resolves `DATA_ROOT` exactly as `Settings.load()` does
+  (environment, then .env) without the credential check. `main()` runs before
+  `run_job`'s `Settings.load()`, so a `DATA_ROOT` that lives only in .env was
+  previously invisible and T-1 was picked against `/data/massive`'s holiday
+  calendar — the same root `history_audit` already passes explicitly.
 - `ingest/jobs/history_audit.py:280` — hand-rolled argv parser doesn't accept
   `--start=X`/`--end=X` equals-forms (dies loudly, not silently). Extend the
   loop or register the flags via the shared parser.

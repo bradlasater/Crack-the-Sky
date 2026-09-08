@@ -28,7 +28,7 @@ from typing import Any
 
 from ingest.common import landing, market_gate
 from ingest.common.cli import run_job
-from ingest.common.config import Settings
+from ingest.common.config import Settings, default_data_root
 from ingest.common.logging_utils import JsonlLogger
 from ingest.jobs import read_partition
 from ingest.jobs.flatfile_pull import previous_trading_day
@@ -139,9 +139,11 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(argv) if argv is not None else sys.argv[1:]
     # argparse also accepts ``--date=X``; a bare "--date" membership test
     # misses that form, and the appended default would silently override the
-    # date the caller asked to reconcile.
+    # date the caller asked to reconcile. The T-1 default is computed against
+    # the configured root: main() runs before run_job's Settings.load(), so a
+    # DATA_ROOT that lives only in .env needs config.default_data_root.
     if not any(a == "--date" or a.startswith("--date=") for a in argv):
-        prev = previous_trading_day(market_gate.today_et())
+        prev = previous_trading_day(market_gate.today_et(), default_data_root())
         argv += ["--date", prev.isoformat()]
     return run_job(JOB, _main, argv)  # run_job exits; return is for tests
 

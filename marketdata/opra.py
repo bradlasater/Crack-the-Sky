@@ -73,6 +73,23 @@ class OPRAParseError(ValueError):
     """Raised when a ticker is not a well-formed allowlisted OPRA symbol."""
 
 
+def expiry_year(yy: int) -> int:
+    """Full year for a two-digit OPRA expiry suffix: always ``2000 + yy``.
+
+    The 19xx pivot some symbology decoders apply to ``yy >= 80`` does not
+    apply here. Everything this codebase reads -- vendor flat files from 2020
+    on, REST reference data for the live universe -- holds only 21st-century
+    contracts, so a ``yy >= 80`` suffix is a corrupt ticker, not a 1980s
+    expiry, and decoding it to 19xx would hand pricing an expiry decades in
+    the past instead of an obviously out-of-range future date.
+
+    This is the single decoder: ``ingest.jobs.parse_option_ticker`` (which
+    recovers terms from four years of ``option_day_bars`` tickers) imports it
+    from here, so the two paths cannot drift apart again.
+    """
+    return 2000 + yy
+
+
 def ticker_root(ticker: str) -> str | None:
     """OPRA root of an option ticker (``O:SPXW26...`` -> ``SPXW``), else None.
 
@@ -103,9 +120,8 @@ def parse_opra(ticker: str) -> Contract:
 
     root = m.group("root")
     yy, mm, dd = int(m.group("yy")), int(m.group("mm")), int(m.group("dd"))
-    year = 2000 + yy if yy < 80 else 1900 + yy
     try:
-        expiry = date(year, mm, dd)
+        expiry = date(expiry_year(yy), mm, dd)
     except ValueError as exc:
         raise OPRAParseError(f"invalid OPRA expiry in {ticker!r}: {exc}") from exc
 

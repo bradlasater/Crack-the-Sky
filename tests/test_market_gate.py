@@ -117,6 +117,55 @@ def test_missing_calendar_fails_open_on_weekday(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Holiday-cache invalidation
+# ---------------------------------------------------------------------------
+
+def _write_holidays(root: Path, dates: list[str], mtime_ns: int) -> None:
+    """Write _meta/holidays.json at an explicit mtime, so the cache's
+    invalidation check is exercised deterministically rather than left to
+    filesystem timestamp granularity."""
+    import json
+    import os
+
+    meta = root / "_meta"
+    meta.mkdir(exist_ok=True)
+    path = meta / "holidays.json"
+    path.write_text(json.dumps([
+        {"date": d, "exchange": "NYSE", "name": "X", "status": "closed"}
+        for d in dates
+    ]), encoding="utf-8")
+    os.utime(path, ns=(mtime_ns, mtime_ns))
+
+
+def test_cache_picks_up_a_mid_run_rewrite(tmp_path: Path) -> None:
+    """holidays_sync rewrites the file under a session-long process; the next
+    call must see the new calendar without a restart (fail-open unchanged)."""
+    _write_holidays(tmp_path, ["2026-09-07"], mtime_ns=1_000_000_000)
+    assert market_gate.load_holidays(tmp_path) == {date(2026, 9, 7)}
+
+    _write_holidays(tmp_path, ["2026-09-07", "2026-11-26"], mtime_ns=2_000_000_000)
+    assert market_gate.load_holidays(tmp_path) == {date(2026, 9, 7), date(2026, 11, 26)}
+
+
+def test_cache_serves_an_unchanged_file(tmp_path: Path) -> None:
+    """Same mtime means same file: no re-read, so a rewrite that preserves
+    mtime is served from cache."""
+    _write_holidays(tmp_path, ["2026-09-07"], mtime_ns=1_000_000_000)
+    assert market_gate.load_holidays(tmp_path) == {date(2026, 9, 7)}
+
+    _write_holidays(tmp_path, [], mtime_ns=1_000_000_000)
+    assert market_gate.load_holidays(tmp_path) == {date(2026, 9, 7)}
+
+
+def test_cache_recovers_when_the_file_appears(tmp_path: Path) -> None:
+    """The missing-file answer (fail-open empty) is cached too, and must not
+    pin a process that outlives holidays_sync's first write."""
+    assert market_gate.load_holidays(tmp_path) == set()
+    _write_holidays(tmp_path, ["2026-09-07"], mtime_ns=1_000_000_000)
+    assert market_gate.load_holidays(tmp_path) == {date(2026, 9, 7)}
+
+
+# ---------------------------------------------------------------------------
 # Weekend-only schedule entries vs. the gate
 # ---------------------------------------------------------------------------
 #

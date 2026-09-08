@@ -112,10 +112,11 @@ conservative audit pass. Grouped by area, roughly highest-value first.
 
 ## Robustness / consistency
 
-- `ingest/common/market_gate.py:36` — the holiday cache is keyed by path with
-  no mtime check; a session-long process keeps a stale calendar if
-  `holidays_sync` rewrites the file mid-run. Fail-open by design, so low
-  urgency; add mtime invalidation.
+- `ingest/common/market_gate.py:36` — **fixed**: the holiday cache now carries
+  the mtime it was read at and reloads when the file changes, so a
+  session-long process picks up a mid-run `holidays_sync` rewrite. A missing
+  file still caches as empty (fail-open) and starts answering the moment the
+  file appears.
 - `ingest/common/landing.py:212` — `quarantine_prior` uses `Path.replace`,
   overwriting a same-named quarantined file. Rare; collision-nudge the target.
 - `ingest/jobs/coverage_audit.py:120` + `deploy/crontab:57` — on 13:00

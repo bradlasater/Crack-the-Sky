@@ -33,6 +33,7 @@ DATASETS = [
     "atm_term_structure",
     "vol_surface",
     "spy_spot",
+    "decision_log",
     "dividends",
     "splits",
 ]
@@ -241,6 +242,29 @@ def test_spy_spot_schema_roundtrip() -> None:
     table = check_records("spy_spot", records)
     assert table["src"].to_pylist() == ["bars"]
     assert table["spot"].to_pylist()[0] == pytest.approx(765.16)
+
+
+def test_decision_log_schema_roundtrip() -> None:
+    rec = schemas.decision_record(
+        decision_id="bt-1",
+        session_date="2026-09-02",
+        asof_ns=1_757_000_000_000_000_000,
+        src="backtest",
+        job="backtester",
+        gate="no-trade",
+        rationale="schema pin",
+        inputs={"spot": 765.16},
+        signals={"vrp": 0.01},
+        versions={"har_rv": "unbuilt"},
+    )
+    table = check_records("decision_log", [rec])
+    row = {k: v[0] for k, v in table.to_pydict().items()}
+    assert row["decision_id"] == "bt-1"
+    assert row["gate"] == "no-trade"
+    assert json.loads(row["inputs"]) == {"spot": 765.16}
+    assert json.loads(row["signals"]) == {"vrp": 0.01}
+    assert json.loads(row["versions"]) == {"har_rv": "unbuilt"}
+    assert {"decision_log"} == schemas.APPEND_ONLY_DATASETS
 
 
 def test_src_column_on_bars_and_trades() -> None:

@@ -100,6 +100,8 @@
 
       <h2 id="flow-write-only">Write-only and derived</h2>
       <dl class="notes">
+        <dt>Decision history</dt>
+        <dd><code>decision_log</code> — the append-only decision record: one row per entry / exit / roll / no-trade event carrying inputs, signal values, gate outcome, rationale, and versions. No producer yet; the backtester writes first. A second write is a second file, never a quarantine, and reads take the whole partition (<code>ingest.common.decision_log.read_decisions</code>) — as-of last-file-wins would hide earlier events, so <code>read_asof</code> refuses the dataset.</dd>
         <dt>Write-only today</dt>
         <dd><code>contracts_expired</code>, <code>ibkr_executions</code>. Captured; nothing in pricing/marketdata/signals consumes them yet.</dd>
         <dt>Now consumed</dt>

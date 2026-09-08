@@ -105,7 +105,10 @@
           <code>asof_ns</code> (filename epoch-ms). Absence is an error.
           <code>option_trades</code> is multi-source: a partition can hold
           overlapping REST and flat-file rows, so readers must pass
-          <code>src</code>.
+          <code>src</code>. <code>decision_log</code> is the opposite case —
+          append-only event history, so <code>read_asof</code> refuses it
+          (last-file-wins would hide earlier events); read the whole
+          partition via <code>ingest.common.decision_log.read_decisions</code>.
         </dd>
         <dt id="md-fail-loud">Fail-loud</dt>
         <dd>

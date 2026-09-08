@@ -27,6 +27,7 @@ always targets yesterday); pass ``--date`` explicitly to backfill.
 from __future__ import annotations
 
 import csv
+import fcntl
 import gzip
 import hashlib
 import json
@@ -449,17 +450,33 @@ def _filter_file(
 
 
 def _update_manifest(data_root: Path, entry: dict[str, Any]) -> Path:
-    """Append/replace an entry in _meta/flatfile_manifest.json (keyed by dataset+date)."""
+    """Append/replace an entry in _meta/flatfile_manifest.json (keyed by dataset+date).
+
+    A parallel backfill (``BACKFILL_WORKERS`` in scripts/backfill.sh) runs
+    several flatfile_pull processes against the same manifest, so the
+    read-modify-write is serialized with an ``flock`` on a sidecar lock file
+    -- the same pattern SharedTokenBucket uses for its state file -- and the
+    write is a temp-file rename, so an unlocked reader (prune_raw.sh,
+    ``reuse_local``) never sees a half-written manifest.
+    """
     path = landing.meta_path("flatfile_manifest.json", data_root)
-    try:
-        manifest = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        manifest = []
-    manifest = [e for e in manifest
-                if not (e.get("dataset") == entry["dataset"] and e.get("date") == entry["date"])]
-    manifest.append(entry)
-    manifest.sort(key=lambda e: (e.get("date", ""), e.get("dataset", "")))
-    path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    with open(path.with_suffix(".lock"), "a", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            try:
+                manifest = json.loads(path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, json.JSONDecodeError):
+                manifest = []
+            manifest = [e for e in manifest
+                        if not (e.get("dataset") == entry["dataset"]
+                                and e.get("date") == entry["date"])]
+            manifest.append(entry)
+            manifest.sort(key=lambda e: (e.get("date", ""), e.get("dataset", "")))
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+            tmp.replace(path)
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
     return path
 
 

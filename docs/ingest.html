@@ -295,6 +295,13 @@
 
       <p>On-demand: <code>python -m ingest.entitlements</code>, <code>scripts/backfill.sh</code>, <code>scripts/repair.sh</code>, <code>python -m pricing.from_market</code>. Archive rebuilds: <code>scripts/build_term_structure.py</code>, <code>scripts/build_surface.py</code>.</p>
 
+      <p>Not a job: <code>decision_log</code> is the append-only decision
+      record — schema in <code>ingest.schemas</code>, writer
+      <code>ingest.common.decision_log.write_decisions</code>. Nothing is
+      scheduled to produce it yet; the backtester writes first. A batch is
+      one session and one job, and the dataset can never be quarantined or
+      read as-of — decision history is never overwritten.</p>
+
       <h3 id="ingest-cron">NY cron</h3>
       <p>
         Source of truth: <code>deploy/schedule.json</code>, one entry per unit

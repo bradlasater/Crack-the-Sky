@@ -9,11 +9,12 @@ recut is landed in code, and its staging rebuild + swap is the remaining owner
 operation.** Production `clean/atm_term_structure` and `clean/vol_surface`
 were swapped to the stamped hybrid archive on 2026-09-07; the pre-swap ACT/365
 trees are retained as `clean/atm_term_structure.act365` and
-`clean/vol_surface.act365`. Since then `vol_surface` rows also stamp
-`blas_threads` (finding 7 — the fit is reproducible only while the pinned
-thread count is recorded with the row). The schema is fail-loud on a missing
-column, so every production `vol_surface` partition is unreadable under the
-new code until the decision-5 procedure runs a second time for the recut —
+`clean/vol_surface.act365`. The *code* now also stamps `blas_threads` on every
+`vol_surface` row it writes (finding 7 — the fit is reproducible only while
+the pinned thread count is recorded with the row). No production partition
+carries that column yet: the schema is fail-loud on a missing column, so
+every production `vol_surface` partition is unreadable under the new code
+until the decision-5 procedure runs a second time for the recut —
 see "Second pass" under decision 5. `atm_term_structure` needs no second pass:
 it is a scalar Brent inversion with no BLAS underneath, so there is no thread
 count to record.
@@ -320,22 +321,26 @@ blocks the default flip.
       `--start`/`--end` windows; every row stamps `blas_threads` = 1 either
       way. Do **not** override the thread vars for speed — the stamp would
       honestly record a count the backtester then has to match.)
-   2. Verify staging *before* touching production: every partition carries
-      `blas_threads`, all values are 1 and non-null, `daycount` stamps are
-      `bus/252`/`act/365` only, and a catalog read plus a `load_surface`
-      round-trip succeed:
+   2. Verify staging *before* touching production: **every** partition —
+      `read_partition` is itself the schema check (fail-loud on a missing or
+      extra column), so iterating the whole list is what proves no partial or
+      mixed rebuild slips through — carries `blas_threads` with all values 1
+      and non-null, `daycount` stamps are `bus/252`/`act/365` only, and a
+      `load_surface` round-trip succeeds on the latest partition:
 
       ```
       DATA_ROOT=/data/massive-hybrid-staging venv/bin/python - <<'EOF'
-      from datetime import date
       from marketdata.catalog import list_partitions, read_partition
       root = "/data/massive-hybrid-staging"
       parts = list_partitions("vol_surface", data_root=root)
       print(len(parts), "partitions,", parts[0], "->", parts[-1])
-      t = read_partition("vol_surface", parts[-1], data_root=root)
-      bt = t.column("blas_threads").to_pylist()
-      assert bt and all(v == 1 for v in bt), "unpinned or misstamped rows"
-      assert set(t.column("daycount").to_pylist()) <= {"bus/252", "act/365"}
+      for i, p in enumerate(parts, 1):
+          t = read_partition("vol_surface", p, data_root=root)  # schema gate
+          bt = t.column("blas_threads").to_pylist()
+          assert bt and all(v == 1 for v in bt), f"{p}: unpinned/misstamped rows"
+          assert set(t.column("daycount").to_pylist()) <= {"bus/252", "act/365"}, p
+          if i % 100 == 0:
+              print(i, "/", len(parts), flush=True)
       from ingest.common.config import Settings
       from pricing.surface import load_surface
       s = Settings(massive_api_key="check", data_root=root)

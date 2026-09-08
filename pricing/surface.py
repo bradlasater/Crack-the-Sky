@@ -192,6 +192,18 @@ def blas_thread_pin() -> int | None:
     that reaches the solver on this box; the other BLAS flavours are pinned
     to the same value alongside it. A run without the pin records null rather
     than guessing, because an unstamped fit is honestly not reproducible.
+
+    Why reading the environment here is the loaded count, not a stale copy of
+    it: OpenBLAS reads the var once at load, and both writers are fresh
+    processes whose environment is fixed before numpy loads -- cronjob.sh
+    exports the pin in the shell that execs the job, and build_surface.py sets
+    it above the pricing import (tests/test_thread_pin.py pins that ordering
+    and runs the stamp end-to-end in a subprocess). Nothing in the repo
+    mutates these vars in-process afterwards; a caller that did would break
+    the stamp, which is why the contract lives in a test. Querying the loaded
+    backend instead (threadpoolctl) is not available -- it is not a
+    dependency, and ctypes on whatever BLAS numpy happened to load is more
+    fragile than the contract it would replace.
     """
     raw = os.environ.get("OPENBLAS_NUM_THREADS")
     return int(raw) if raw else None

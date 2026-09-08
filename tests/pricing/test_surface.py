@@ -567,7 +567,10 @@ def test_rows_stamp_the_blas_thread_pin(monkeypatch) -> None:
 
 def test_rows_record_a_deliberate_override(monkeypatch) -> None:
     """cronjob.sh leaves an operator's override in place; the stamp must record
-    what the fit actually ran under, not the scheduled default."""
+    the configured value, not the scheduled default. This pins the env-to-row
+    plumbing only -- that the configured value IS the count the loaded backend
+    uses is the subprocess tests' claim (tests/test_thread_pin.py), where the
+    env is fixed before OpenBLAS loads; nothing mutates it in-process."""
     monkeypatch.setenv("OPENBLAS_NUM_THREADS", "4")
     surf = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",),
                              rate_fn=_flat_rate, daycount=ACT_365)["SPXW"]

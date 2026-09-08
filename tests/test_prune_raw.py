@@ -20,6 +20,36 @@ SCRIPT = REPO_ROOT / "scripts" / "prune_raw.sh"
 DAY = 86400
 
 
+def _has_gnu_toolchain() -> bool:
+    """prune_raw.sh speaks GNU: ``date -d/-I`` cutoffs and ``du -sb`` sizes.
+
+    Stock macOS ships BSD date/du, where those flags mean something else or
+    nothing at all, so every test here would fail for toolchain reasons
+    rather than behavioural ones. Probe the exact commands the script runs.
+    """
+    probes = (
+        ["date", "-I", "-d", "2023-01-03"],
+        ["du", "-sb", str(REPO_ROOT)],
+    )
+    for cmd in probes:
+        try:
+            proc = subprocess.run(cmd, capture_output=True, check=False)
+        except FileNotFoundError:
+            return False
+        if proc.returncode != 0:
+            return False
+    return True
+
+
+pytestmark = pytest.mark.skipif(
+    not _has_gnu_toolchain(),
+    reason=(
+        "scripts/prune_raw.sh needs GNU coreutils (date -d/-I, du -sb); "
+        "on macOS: brew install coreutils, with gnubin on PATH"
+    ),
+)
+
+
 def _age(path: Path, days: float) -> None:
     """Backdate a directory's mtime; retention is measured from it."""
     when = time.time() - days * DAY

@@ -45,16 +45,26 @@ conservative audit pass. Grouped by area, roughly highest-value first.
 - `ingest/common/cli.py` — **fixed**: reserved keys (`event`, `rows`, `bytes`,
   `job`, `duration_s`) are dropped from the `**extras` merge so a successful
   job cannot crash `job_end` and get reported as `job_error`.
-- `ingest/jobs/ws_minute_bars.py:648` — a 0-row capture pings healthcheck
-  `/fail` but `main` still exits 0. Exit code and monitoring disagree; decide
-  whether cron mail or Healthchecks is the alert channel, then align them.
-- `ingest/jobs/eod_dayaggs_rest.py:91` — non-watchlist mode does one sequential
-  REST call per contract (~100k contracts ≈ 6 h) with no checkpointing; a crash
-  at hour 5 restarts from zero. Options: batch via a snapshot endpoint, or
-  persist partial progress. Needs a runtime-budget decision.
-- `ingest/jobs/grouped_daily.py:76` — an empty `records` on a trading day logs
-  `grouped_empty` and exits 0 (green healthcheck). Consider failing when the
-  response has results but none of the wanted tickers matched.
+- `ingest/jobs/ws_minute_bars.py:648` — **fixed**: Healthchecks is the alert
+  channel and the exit code now agrees with it. A capture that ends with zero
+  rows, or one that lost records to writer errors, pings `/fail` and returns
+  1. Legitimate zero-row situations stay green: a holiday still exits 0 from
+  the market gate, and an already-closed capture window returns 0 before any
+  capture runs.
+- `ingest/jobs/eod_dayaggs_rest.py:91` — **fixed**: partial progress is
+  persisted (endpoint strategy unchanged). The full-universe sweep
+  checkpoints done tickers and counters to `_meta/dayaggs_checkpoint.json`
+  and appends fetched raw bars to `_meta/dayaggs_partial.jsonl` every 500
+  contracts, so a restarted run for the same date resumes where it stopped;
+  both files are removed on completion. Missing/corrupt/stale-date state
+  restarts the sweep — refetching is idempotent, skipping would be a silent
+  gap. The watchlist sweep and dry runs do not checkpoint.
+- `ingest/jobs/grouped_daily.py:76` — **fixed**: when the grouped response
+  has market rows but none of the wanted tickers are among them, the job
+  raises (nonzero exit, `/fail` ping) instead of logging `grouped_empty` and
+  exiting 0. A genuinely empty response (forced holiday run, wrong date)
+  still lands `grouped_empty` and stays green; real holidays never reach
+  `main_fn` because the market gate exits 0 first.
 - `scripts/cronjob.sh` — **fixed**: the lock is taken on fd 9 before the
   command runs, so a wrapped process that exits 99 is no longer misreported
   as `job_skipped` and swallowed to 0. Contention is flock's `-E 99` on
@@ -68,10 +78,10 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   ingest-side parser already decoded that way, so the term-structure archive
   built on its output stays valid. A `yy >= 80` suffix is a corrupt ticker,
   and 2080+ is a less dangerous decode than an expiry decades in the past.
-- `ingest/jobs/ws_minute_bars.py:117` — `contract_universe` uses bare
-  `startswith(("O:SPY", "O:SPX"))`, which would admit `O:SPXL`/`O:SPXU` roots.
-  Impossible with today's contracts partition; reuse the anchored regex from
-  `keep_ticker` if the universe ever widens.
+- `ingest/jobs/ws_minute_bars.py:117` — **fixed**: `contract_universe` matches
+  roots with an anchored OPRA regex (`^O:(ROOT)\d{6}[CP]\d+$`, the same shape
+  as `keep_ticker`'s), so `O:SPXL`/`O:SPXU` can never be admitted. Weekly
+  roots ride with their underlying (`SPX` also admits `SPXW`).
 
 ## Monitoring gaps
 

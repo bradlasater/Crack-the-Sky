@@ -123,11 +123,20 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   earlier quarantined file. Same shape-preserving nudge as
   `_unique_clean_path` (readers parse the final `-` token as an integer
   stamp).
-- `ingest/jobs/coverage_audit.py:120` + `deploy/crontab:57` — on 13:00
-  early-close days the cron cadence still runs to 16:30, so ~178 post-close
-  sweeps read as "stray" and the 13:32–16:30 window is unchecked. Decide which
-  side owns early closes: crontab stops early, or the audit treats the full
-  window as canonical.
+- `ingest/jobs/coverage_audit.py:120` + `deploy/crontab:57` — **fixed**:
+  owner decision was that the audit owns early closes, so the crontab stays
+  as installed. The canonical sweep window already ended at the actual
+  session close via `market_gate.market_close_et`; what misread was the
+  classification — `_classify_stamps` now puts the post-close cadence firings
+  (13:33–16:24 on a 13:00 close, up to the crontab's hard stop) in their own
+  `post_close` bucket: accounted for in the check data, never counted towards
+  the ratio, never required (a sweep job that learns to stop at the early
+  close must not fail the day it ships), and no longer reported as ~178
+  "stray" sweeps. Layering: the audit keeps reading `_meta/holidays.json`
+  through `market_gate` rather than importing `pricing.calendar` — the repo's
+  import direction is pricing → ingest (`pricing.calendar` itself unions
+  those same files via `market_gate`), and ingesting pricing would invert it
+  for zero new information.
 - `ingest/jobs/coverage_audit.py:536` / `reconcile.py:138` — **fixed**: both
   jobs now compute the T-1 default against `config.default_data_root()`, a
   new helper that resolves `DATA_ROOT` exactly as `Settings.load()` does

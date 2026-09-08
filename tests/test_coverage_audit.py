@@ -7,7 +7,7 @@ so these assert both directions explicitly.
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 from ingest.common import landing
@@ -97,6 +97,114 @@ def test_expected_sweeps_early_close_is_inclusive_minutes_to_close_plus_tail(
     try:
         assert minutes + 1 == 241
         assert audit.expected_sweeps(early, tmp_path) == minutes + 1
+    finally:
+        market_gate._holiday_cache.clear()
+
+
+# ---------------------------------------------------------------------------
+# Early-close days: the audit owns the session calendar
+# ---------------------------------------------------------------------------
+#
+# Cron cannot express the NYSE calendar, so on a 13:00 close the cadence
+# lines keep firing to 16:30. The canonical window ends at the actual session
+# close, and the post-close firings are accounted for as such -- not read as
+# strays, and not required either.
+
+EARLY_DATE = date(2026, 11, 27)  # Black Friday: 13:00 ET close
+
+
+def _mark_early_close(root: Path) -> None:
+    meta = root / "_meta"
+    meta.mkdir(parents=True, exist_ok=True)
+    (meta / "holidays.json").write_text(json.dumps([
+        {"date": EARLY_DATE.isoformat(), "exchange": "NYSE",
+         "name": "Thanksgiving", "status": "early-close"}
+    ]), encoding="utf-8")
+
+
+def _ms(day: date, hh: int, mm: int) -> int:
+    from ingest.common import market_gate
+    return int(datetime.combine(day, time(hh, mm), tzinfo=market_gate.ET).timestamp() * 1000)
+
+
+def _land_early_close_day(tmp_path: Path) -> Path:
+    """An early-close day exactly as the crontab produces it: the full
+    09:30-13:30 window, both singletons, and the cadence still firing every
+    minute 13:31-16:30 past the close (cron cannot express early closes)."""
+    part = tmp_path / "clean" / "option_snapshots" / f"dt={EARLY_DATE.isoformat()}"
+    part.mkdir(parents=True, exist_ok=True)
+    expected = audit.expected_sweeps(EARLY_DATE, tmp_path)
+    base = _ms(EARLY_DATE, 9, 30)
+    for root in ("SPY", "I:SPX", "VIX"):
+        for i in range(expected):
+            (part / f"snapshot_sweep-{root}-{base + i * 60_000}.parquet").touch()
+        for ms in (_ms(EARLY_DATE, 9, 5), _ms(EARLY_DATE, 16, 35)):
+            (part / f"snapshot_sweep-eod-{root}-{ms}.parquet").touch()
+        # 13:31 is base+241min; the 16:30 firing is base+420min.
+        for offset_min in range(expected, 421):
+            ms = base + offset_min * 60_000
+            (part / f"snapshot_sweep-{root}-{ms}.parquet").touch()
+    return part
+
+
+def test_early_close_day_passes_with_post_close_cadence(tmp_path: Path) -> None:
+    """The regression: ~178 post-close sweeps used to read as "stray"."""
+    from ingest.common import market_gate
+    market_gate._holiday_cache.clear()
+    _mark_early_close(tmp_path)
+    try:
+        _land_early_close_day(tmp_path)
+        checks = {c.name: c for c in audit.check_snapshots(_settings(tmp_path), EARLY_DATE)}
+        spy = checks["snapshots[SPY]"]
+        assert spy.status == audit.PASS
+        assert spy.data["stray"] == 0
+        # 13:31/13:32 land inside the write grace; 13:33..16:24 are post_close;
+        # 16:25..16:30 fall in the EOD singleton's tolerance, with the 16:35
+        # singleton itself.
+        assert spy.data["sweeps"] == 243
+        assert spy.data["post_close"] == 172
+        assert spy.data["eod"] == 7
+        assert checks["snapshots_preopen"].status == audit.PASS
+        assert checks["snapshots_eod"].status == audit.PASS
+    finally:
+        market_gate._holiday_cache.clear()
+
+
+def test_early_close_window_still_fails_when_the_session_is_missing(
+    tmp_path: Path,
+) -> None:
+    """Owning early closes must not blind the audit to a dead sweep job."""
+    from ingest.common import market_gate
+    market_gate._holiday_cache.clear()
+    _mark_early_close(tmp_path)
+    try:
+        part = _land_early_close_day(tmp_path)
+        # Wipe the second half of the in-session window; post-close sweeps
+        # must not buy it back.
+        expected = audit.expected_sweeps(EARLY_DATE, tmp_path)
+        base = _ms(EARLY_DATE, 9, 30)
+        for root in ("SPY", "I:SPX", "VIX"):
+            for i in range(expected // 2, expected):
+                (part / f"snapshot_sweep-{root}-{base + i * 60_000}.parquet").unlink()
+        checks = {c.name: c for c in audit.check_snapshots(_settings(tmp_path), EARLY_DATE)}
+        assert checks["snapshots[SPY]"].status == audit.FAIL
+    finally:
+        market_gate._holiday_cache.clear()
+
+
+def test_past_the_cadence_hard_stop_is_still_stray_on_an_early_close(
+    tmp_path: Path,
+) -> None:
+    """post_close ends where the crontab's cadence ends; a 17:00 sweep is a
+    manual run, early close or not."""
+    from ingest.common import market_gate
+    market_gate._holiday_cache.clear()
+    _mark_early_close(tmp_path)
+    try:
+        part = _land_early_close_day(tmp_path)
+        (part / f"snapshot_sweep-SPY-{_ms(EARLY_DATE, 17, 0)}.parquet").touch()
+        checks = {c.name: c for c in audit.check_snapshots(_settings(tmp_path), EARLY_DATE)}
+        assert checks["snapshots[SPY]"].data["stray"] == 1
     finally:
         market_gate._holiday_cache.clear()
 

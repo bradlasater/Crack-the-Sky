@@ -37,11 +37,14 @@ instead of refitting: for a fixed log-moneyness grid on the OTM halves
 is priced off the surface vol in the forward measure and inverted back with
 the engine's own solver (:func:`pricing.iv.implied_vol`). Same philosophy as
 the reprice identity: the residual is solver tolerance, banded by
-``surface_vol_abs``. A missing ``vol_surface`` partition is a *skip*, not a
-FAIL -- the scheduled build may not have run on this box -- but a partition
-that exists and cannot be read, calendar-checked, or repriced back to its
-own vol is fail-loud: landed parameters the engine cannot reproduce are
-exactly the drift this consumer exists for.
+``surface_vol_abs``. The checked session is the *previous* trading day: the
+surface build lands session S's smile the next morning at 12:15, so the
+17:00 canary for S would find no partition for S itself. A missing
+``vol_surface`` partition is a *skip*, not a FAIL -- the scheduled build may
+not have run on this box -- but a partition that exists and is empty,
+unreadable, dated for another session, or cannot be repriced back to its own
+vol is fail-loud: landed parameters the engine cannot reproduce are exactly
+the drift this consumer exists for.
 
 Still fail-loud for: no snapshots, schema errors, foreign roots, empty
 allowlisted root, too few ATM names to test identities.
@@ -82,7 +85,7 @@ from ingest.common import config as _config
 from ingest.common.cli import healthcheck_slug, ping
 from ingest.common.landing import meta_path
 from ingest.common.logging_utils import get_run_logger
-from ingest.common.market_gate import require_trading_day, today_et
+from ingest.common.market_gate import previous_trading_day, require_trading_day, today_et
 from marketdata.catalog import CatalogError, SchemaError
 from marketdata.opra import ALLOWED_ROOTS
 from marketdata.validate import narrow_roots
@@ -375,6 +378,7 @@ class SurfaceCheck:
     """
 
     skipped: bool = False
+    date: str = ""
     roots: list[str] = field(default_factory=list)
     slices: int = 0
     points: int = 0
@@ -405,19 +409,31 @@ def check_offatm_surface(
 ) -> SurfaceCheck:
     """Reprice off-ATM grid points from the landed surface and invert them back.
 
+    ``dt`` is the *surface session*, not the canary date: the scheduled
+    surface build lands session S's smile the next morning, so the canary
+    checks the previous trading day's partition (see :func:`run_drift`).
+
     Each grid point is priced off the slice's SVI vol in the forward measure
     (the convention the fit itself inverts under, ``term_structure._invert``)
     and inverted back with :func:`pricing.iv.implied_vol`; the residual is
-    banded by ``thresholds.surface_vol_abs``. No partition → skip; a
-    partition that exists but is unreadable, fails the calendar guard, or
-    reprices outside the band → failures.
+    banded by ``thresholds.surface_vol_abs``. Only a *missing* partition
+    directory skips; a partition that exists but is empty, unreadable, dated
+    for another session, fails the calendar guard, or reprices outside the
+    band → failures.
     """
     root = Path(data_root) if data_root is not None else Path(_config.DEFAULT_DATA_ROOT)
-    result = SurfaceCheck()
+    result = SurfaceCheck(date=dt.isoformat())
     part = root / "clean" / SURFACE_DATASET / f"dt={dt.isoformat()}"
-    paths = sorted(part.glob("*.parquet")) if part.is_dir() else []
-    if not paths:
+    if not part.is_dir():
         result.skipped = True
+        return result
+    paths = sorted(part.glob("*.parquet"))
+    if not paths:
+        # An existing-but-empty directory is an interrupted or corrupted
+        # write, not "the build has not reached this box" -- fail loud.
+        result.failures.append(
+            f"{SURFACE_DATASET} partition for {dt} exists but holds no parquet files"
+        )
         return result
     rows: list[dict[str, Any]] = []
     try:
@@ -436,11 +452,26 @@ def check_offatm_surface(
             f"{SURFACE_DATASET} partition for {dt} has no {list(SURFACE_ROOTS)} rows"
         )
         return result
+    want = dt.isoformat()
     for underlying in sorted(by_root):
+        root_rows = by_root[underlying]
+        # Same guard as surface.load_surface: a file misplaced under another
+        # dt= directory must not be reconstructed and answer as this session.
+        row_dates = {str(r.get("date"))[:10] for r in root_rows}
+        if row_dates != {want}:
+            result.failures.append(
+                f"{underlying}: {SURFACE_DATASET} rows in dt={want} have "
+                f"date={sorted(row_dates)}"
+            )
+            continue
         try:
-            surface = Surface.from_rows(by_root[underlying])
-        except SurfaceError as exc:
-            result.failures.append(f"{underlying}: {exc}")
+            surface = Surface.from_rows(root_rows)
+        except (SurfaceError, KeyError, TypeError, ValueError, OverflowError) as exc:
+            # from_rows raises SurfaceError for its own guards, but malformed
+            # rows (missing/invalid columns) surface as plain KeyError /
+            # TypeError / ValueError; those are corrupt landed data too and
+            # belong in the report, not in main's unhandled-exception path.
+            result.failures.append(f"{underlying}: {type(exc).__name__}: {exc}")
             continue
         result.roots.append(underlying)
         slices = _grid_slices(surface, target_dte)
@@ -718,9 +749,9 @@ def _render(report: DriftReport) -> str:
     if report.surface_check is not None:
         sc = report.surface_check
         surface_note = (
-            "surface_compare_skipped"
+            f"surface_compare_skipped (no vol_surface for {sc.get('date')})"
             if sc.get("skipped")
-            else f"surface max_|Δσ|={sc.get('max_abs_vol')}  "
+            else f"surface {sc.get('date')} max_|Δσ|={sc.get('max_abs_vol')}  "
                  f"points={sc.get('points')}  slices={sc.get('slices')}  "
                  f"roots={sc.get('roots')}"
         )
@@ -844,8 +875,16 @@ def run_drift(
     uninvertible: str = "skip",
     thresholds: Thresholds | None = None,
     european_iv: bool = False,
+    surface_date: date | None = None,
 ) -> DriftReport:
-    """Load as-of chain, run identity checks, attach vendor diagnostics."""
+    """Load as-of chain, run identity checks, attach vendor diagnostics.
+
+    ``surface_date`` is the session whose landed ``vol_surface`` the off-ATM
+    check reads. Default: the previous trading day -- the surface build runs
+    12:15 for the prior session, so session ``dt``'s own partition does not
+    exist yet when the 17:00 canary fires; T-1 is the latest the schedule can
+    have landed.
+    """
     thr = thresholds or DEFAULT_THRESHOLDS
     if thresholds is None or thresholds.atm_pct != atm_pct:
         thr = Thresholds(**{**asdict(thr), "atm_pct": atm_pct})
@@ -884,7 +923,9 @@ def run_drift(
         max_rows=max_rows,
         max_trade_age_min=max_trade_age_min,
     )
-    surface = check_offatm_surface(dt, data_root=data_root, thresholds=thr)
+    if surface_date is None:
+        surface_date = previous_trading_day(dt, data_root)
+    surface = check_offatm_surface(surface_date, data_root=data_root, thresholds=thr)
     report.surface_check = surface.to_dict()
     if surface.failures:
         report.failures.extend(f"surface: {f}" for f in surface.failures)
@@ -1102,7 +1143,11 @@ def main(argv: list[str] | None = None) -> int:
                 min_compare=report.thresholds.get("min_compare"),
             )
         if report.surface_check and report.surface_check.get("skipped"):
-            logger.log("surface_compare_skipped", date=dt.isoformat())
+            logger.log(
+                "surface_compare_skipped",
+                date=dt.isoformat(),
+                surface_date=report.surface_check.get("date"),
+            )
         print(_render(report), file=sys.stderr)
         if not args.dry_run:
             path = _write_report(report, data_root)

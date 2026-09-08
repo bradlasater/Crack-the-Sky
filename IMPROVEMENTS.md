@@ -54,9 +54,15 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   command runs, so a wrapped process that exits 99 is no longer misreported
   as `job_skipped` and swallowed to 0. Contention is flock's `-E 99` on
   that fd; a missing `flock` or an unusable lock file stays nonzero.
-- `marketdata/opra.py:106` vs `ingest/jobs/__init__.py:85` — two OPRA year-pivot
-  decoders disagree on `yy >= 80` (19xx vs 20xx). Unreachable today; hoist one
-  shared decoder before the universe widens.
+- `marketdata/opra.py:106` vs `ingest/jobs/__init__.py:85` — **fixed**: one
+  shared decoder, `expiry_year()` in `marketdata/opra.py`, used by both
+  `parse_opra` and `ingest.jobs.parse_option_ticker`. The convention chosen is
+  `2000 + yy` with no 19xx pivot: everything the codebase reads (vendor flat
+  files from 2020 on, the live-universe REST reference, four years of
+  `option_day_bars` history) holds only 21st-century contracts, and the
+  ingest-side parser already decoded that way, so the term-structure archive
+  built on its output stays valid. A `yy >= 80` suffix is a corrupt ticker,
+  and 2080+ is a less dangerous decode than an expiry decades in the past.
 - `ingest/jobs/ws_minute_bars.py:117` — `contract_universe` uses bare
   `startswith(("O:SPY", "O:SPX"))`, which would admit `O:SPXL`/`O:SPXU` roots.
   Impossible with today's contracts partition; reuse the anchored regex from
@@ -96,12 +102,23 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   call (each higher-order greek re-bumps from scratch). A shared-bump refactor
   could cut the drift canary's dominant cost roughly in half; too invasive for
   the audit.
-- `ingest/jobs/contracts_sync.py:55` — first-ever run for a new underlying
-  reads every historical partition to compute an empty baseline. Short-circuit
-  via `catalog.files_by_underlying` name parsing.
-- `ingest/jobs/trades_watchlist.py:161` — `trades_cursor.json` grows
-  unboundedly; tickers that rotate off the watchlist keep cursors forever.
-  Prune to the current watchlist at save time.
+- `ingest/jobs/contracts_sync.py:55` — **fixed**: `_previous_tickers` now
+  answers "not here" from the filenames before opening any parquet. Clean
+  files are named `{job}-{underlying}-{epoch_ms}.parquet`, so a partition
+  with no file labelled with the underlying cannot hold a baseline for it
+  (via `_latest_files_by_underlying`, which wraps
+  `catalog.files_by_underlying`). A new underlying's first run no longer
+  scans the whole archive to compute an empty set; files whose name carries
+  no underlying label are still read, since their contents are not in the
+  filename.
+- `ingest/jobs/trades_watchlist.py:161` — **fixed**: cursors are pruned to the
+  current watchlist at save time, in the same block that already pruned the
+  backoff state (and with the same `--limit` exemption, since a truncated
+  `tickers` list would wipe state for contracts the smoke test never looked
+  at). A pruned contract that rotates back on re-polls its full history --
+  duplicates, never gaps, because a cursor only moves forward and
+  flat-file-covered days are dropped at write time. The `cursors_saved` event
+  now logs the pruned count.
 - `scripts/backfill.sh` — date payloads can run independently, but each process
   currently performs an unlocked read-modify-write of the shared
   `_meta/flatfile_manifest.json`; make manifest updates concurrency-safe first,
@@ -127,9 +144,12 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   computed without `data_root` (unlike `history_audit`), so a non-standard
   `DATA_ROOT` picks T-1 against the wrong holiday calendar. Pass the settings
   root consistently.
-- `ingest/jobs/history_audit.py:280` — hand-rolled argv parser doesn't accept
-  `--start=X`/`--end=X` equals-forms (dies loudly, not silently). Extend the
-  loop or register the flags via the shared parser.
+- `ingest/jobs/history_audit.py:280` — **fixed**: the hand-rolled loop now
+  accepts `--start=X`/`--end=X` equals-forms alongside the space-separated
+  ones. Done by extending the loop rather than the shared parser, matching
+  the repo convention that jobs peel their own flags before handing the rest
+  to `cli.run_job` (`strip_flag` documents the pattern); the shared parser
+  only knows flags common to every job.
 - `scripts/backfill.sh:60` vs `scripts/prune_raw.sh:98` — inconsistent
   "is this date done" semantics: backfill skips dates with ≥3 manifest entries
   regardless of `rows_kept`, so a 0-rows-kept date is skipped forever. Build a

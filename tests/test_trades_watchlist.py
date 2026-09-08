@@ -385,6 +385,57 @@ def test_state_prunes_tickers_that_left_the_watchlist(monkeypatch, tmp_path) -> 
     assert set(state) == {"O:A"}
 
 
+def test_cursors_prune_tickers_that_left_the_watchlist(monkeypatch, tmp_path) -> None:
+    """trades_cursor.json must shrink when a contract rotates off, or it
+    grows by every ticker ever watched and never lets go."""
+    s = _settings(tmp_path)
+    tape = {"O:A": [_trade(1)], "O:B": [_trade(2)]}
+    _run_slot(monkeypatch, s, tape, ["O:A", "O:B"])
+    assert set(job._load_cursors(s)) == {"O:A", "O:B"}
+
+    _run_slot(monkeypatch, s, tape, ["O:A"])
+    assert job._load_cursors(s) == {"O:A": 1}
+
+
+def test_a_pruned_cursor_repolls_history_but_never_gaps(monkeypatch, tmp_path) -> None:
+    """The cost of pruning: a contract that rotates back on re-fetches from
+    scratch -- duplicates, not gaps, because the cursor only moved forward."""
+    s = _settings(tmp_path)
+    tape = {"O:B": [_trade(2), _trade(3)]}
+    _run_slot(monkeypatch, s, tape, ["O:B"])
+    _run_slot(monkeypatch, s, tape, ["O:A"])  # O:B rotates off, cursor pruned
+    assert job._load_cursors(s) == {}
+
+    res, _polled = _run_slot(monkeypatch, s, tape, ["O:B"])
+    assert res["rows"] == 2, "the re-poll restarted from the whole history"
+    assert job._load_cursors(s) == {"O:B": 3}
+
+
+def test_limited_run_does_not_prune_cursors(monkeypatch, tmp_path) -> None:
+    """--limit truncates `tickers`, so pruning against it would wipe the
+    cursors of every contract the smoke test never looked at."""
+    import argparse
+
+    from ingest.common.logging_utils import JsonlLogger
+
+    s = _settings(tmp_path)
+    tape = {"O:A": [_trade(1)], "O:B": [_trade(2)]}
+    _run_slot(monkeypatch, s, tape, ["O:A", "O:B"])
+    assert set(job._load_cursors(s)) == {"O:A", "O:B"}
+
+    monkeypatch.setattr(job, "_now_et", _midsession)
+    monkeypatch.setattr(
+        job, "compute_watchlist", lambda *a, **k: [{"ticker": "O:A"}, {"ticker": "O:B"}]
+    )
+    monkeypatch.setattr(job, "MassiveClient", lambda *a, **k: _FakeClient(tape))
+    job._main_fn(
+        argparse.Namespace(date="2026-09-04", limit=1, dry_run=False,
+                           force=True, underlying=None),
+        s, JsonlLogger(path=None, echo=False),
+    )
+    assert set(job._load_cursors(s)) == {"O:A", "O:B"}, "a --limit run pruned cursors"
+
+
 def test_failed_polls_are_retried_next_slot_not_treated_as_silence(
     monkeypatch, tmp_path
 ) -> None:

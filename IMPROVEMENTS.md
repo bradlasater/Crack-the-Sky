@@ -95,13 +95,15 @@ conservative audit pass. Grouped by area, roughly highest-value first.
 - `pricing/engine.py:_bump_greeks` — **fixed**: the bumped CRR trees are now
   memoized by their exact argument tuple, so the higher-order greeks reuse the
   first-order bumps instead of re-pricing from scratch (43 → 28 tree
-  evaluations per `greeks()` call, ~1.5× measured wall-time speedup). Outputs
-  are bit-for-bit identical — `crr_price` is a pure function of its scalar
-  inputs and every call site computes bumped arguments with the same
-  expressions — pinned exactly (via `float.hex()` golden values) by
-  `tests/pricing/test_bump_greeks_characterization.py`. The "roughly half"
-  estimate was optimistic: 28 is the floor for the current finite-difference
-  scheme; going lower would change the numerics.
+  evaluations per `greeks()` call, ~1.5× measured wall-time speedup). On one
+  platform the outputs are bit-for-bit identical — `crr_price` is a pure
+  function of its scalar inputs and every call site computes bumped arguments
+  with the same expressions; pinned by
+  `tests/pricing/test_bump_greeks_characterization.py` (golden `float.hex()`
+  values compared at rel=1e-12, since the tree's exp/pow differ by a few ULPs
+  across libm/Python builds — bit-exact goldens are not portable). The
+  "roughly half" estimate was optimistic: 28 is the floor for the current
+  finite-difference scheme; going lower would change the numerics.
 - `ingest/jobs/contracts_sync.py:55` — first-ever run for a new underlying
   reads every historical partition to compute an empty baseline. Short-circuit
   via `catalog.files_by_underlying` name parsing.

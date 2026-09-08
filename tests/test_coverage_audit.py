@@ -323,7 +323,7 @@ def _vol_surface_row(underlying: str) -> dict:
         "forward": 7700.0, "svi_a": 0.0008, "svi_b": 0.02, "svi_rho": -0.4,
         "svi_m": 0.01, "svi_sigma": 0.12, "k_min": -0.05, "k_max": 0.05,
         "n_strikes": 21, "rms_error": 0.0, "min_g": 0.3, "rate": 0.04,
-        "src": "day_bars",
+        "src": "day_bars", "blas_threads": 1,
     }
 
 

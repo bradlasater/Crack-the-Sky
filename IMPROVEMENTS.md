@@ -142,10 +142,12 @@ conservative audit pass. Grouped by area, roughly highest-value first.
 - `tests/conftest.py:93` — the offline guard patches `socket.connect` but not
   `connect_ex`, and would falsely reject AF_UNIX string addresses. Block
   `connect_ex` too and exempt non-IP addresses.
-- `ingest/common/http_client.py` — `paginate` has no guard against a
-  pathological repeated `next_url` (infinite loop); `cli.ping` truncates to
-  10,000 *chars* before UTF-8 encoding, so a non-ASCII body can exceed the
-  Healthchecks 10 KB limit.
+- `ingest/common/http_client.py` — **fixed**: `paginate` stops with a warning
+  when the API re-serves a `next_url` it already followed (a stuck cursor
+  would otherwise page forever), and `cli.ping` now truncates the body after
+  UTF-8 encoding — 10,000 *bytes*, with any half-encoded tail character
+  dropped — so a non-ASCII body can no longer exceed the Healthchecks 10 KB
+  limit.
 
 ## Docs / site
 

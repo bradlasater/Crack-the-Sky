@@ -13,6 +13,7 @@ import pytest
 from ingest.common import landing
 from ingest.common.config import Settings
 from ingest.schemas import SCHEMAS
+from pricing.calendar import CalendarRangeError, SessionCalendar
 from signals.har_rv import (
     HORIZONS,
     MIN_TRAIN_ROWS,
@@ -26,6 +27,26 @@ from signals.har_rv import (
 )
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def _cal(
+    attested: dict[date, bool],
+    *,
+    holidays: frozenset[date] = frozenset(),
+    forward_from: date | None = None,
+    forward_through: date | None = None,
+) -> SessionCalendar:
+    """A SessionCalendar over attested history plus an optional forward window."""
+    through = forward_through
+    if through is None:
+        through = max(holidays) if holidays else date(2026, 12, 31)
+    return SessionCalendar(
+        sessions=attested,
+        holidays=holidays,
+        early_closes=frozenset(),
+        forward_from=forward_from or date(2026, 1, 1),
+        forward_through=through,
+    )
 
 
 def _sessions(n: int, start: date = date(2026, 1, 5)) -> list[date]:
@@ -85,14 +106,65 @@ def test_realized_variances_sorts_and_skips_rows_without_spot() -> None:
 def test_gap_in_the_calendar_voids_the_surrounding_returns() -> None:
     """A missing session is a multi-day move, not a daily one."""
     sessions = _sessions(4)
-    calendar = {d.isoformat(): True for d in sessions}
-    missing = sessions.pop(2)
-    calendar[missing.isoformat()] = True  # it was a session; the row is absent
+    attested = dict.fromkeys(sessions, True)
+    sessions.pop(2)  # it was a session, and attested as one; the row is absent
+    calendar = _cal(attested)
     rows = _spot_rows(sessions, [100.0, 101.0, 103.0])
     series = realized_variances(rows, calendar)
     assert series[1]["rv"] == pytest.approx(math.log(1.01) ** 2)
     # 100 -> 101 is fine, but 101 -> 103 spans the missing session.
     assert series[2]["rv"] is None
+
+
+def test_unaudited_tail_uses_the_holiday_window() -> None:
+    """The attested calendar refreshes weekly; the origin usually sits past it.
+
+    Attested history ends two sessions back, and the last two rows are only
+    covered by the forward holiday window -- adjacency there must still
+    compute, or the daily job emits nothing between Saturday audits.
+    """
+    sessions = _sessions(6)
+    attested = dict.fromkeys(sessions[:4], True)
+    calendar = _cal(
+        attested,
+        forward_from=sessions[4] - timedelta(days=2),
+        forward_through=date(2026, 12, 31),
+    )
+    rows = _spot_rows(sessions, [100.0, 101.0, 102.0, 103.0, 104.0, 105.0])
+    series = realized_variances(rows, calendar)
+    assert all(r["rv"] is not None for r in series[1:])
+    assert series[5]["rv"] == pytest.approx(math.log(105.0 / 104.0) ** 2)
+
+
+def test_unaudited_tail_still_voids_a_holiday_gap() -> None:
+    """The forward window, not blind adjacency, decides the tail."""
+    sessions = _sessions(4)
+    closed = sessions.pop(2)  # holiday: no row, and the window names it
+    calendar = _cal(
+        dict.fromkeys(sessions[:2], True),
+        holidays=frozenset({closed}),
+        forward_from=sessions[2] - timedelta(days=2),
+        forward_through=date(2026, 12, 31),
+    )
+    rows = _spot_rows(sessions, [100.0, 101.0, 103.0])
+    series = realized_variances(rows, calendar)
+    assert series[1]["rv"] == pytest.approx(math.log(1.01) ** 2)
+    assert series[2]["rv"] == pytest.approx(math.log(103.0 / 101.0) ** 2)
+
+
+def test_uncovered_weekday_gap_is_loud() -> None:
+    """A weekday no source attests to raises rather than guessing adjacency."""
+    sessions = _sessions(4)
+    # Attested through session 2, but the forward window stops before the
+    # last pair -- history_audit and holidays_sync are both behind.
+    calendar = _cal(
+        dict.fromkeys(sessions[:2], True),
+        forward_from=sessions[0],
+        forward_through=sessions[1],
+    )
+    rows = _spot_rows(sessions, [100.0, 101.0, 102.0, 103.0])
+    with pytest.raises(CalendarRangeError):
+        realized_variances(rows, calendar)
 
 
 def test_har_features_are_log_window_means() -> None:

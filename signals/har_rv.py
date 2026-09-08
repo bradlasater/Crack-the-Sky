@@ -44,11 +44,18 @@ The origin-``d`` row is computable after ``d``'s close, i.e. it is the
 forecast available on the morning of the next session, the same T-1
 convention as ``spy_spot`` and ``atm_term_structure``.
 
-**Gaps.** ``rv_t`` is only defined between sessions adjacent on the trading
-calendar (``_meta/trading_days.json``; without it, consecutive rows are
-assumed adjacent). A missing session makes the surrounding rv null, and any
-feature or target window containing a null is unusable -- a hole shortens
-the training set rather than fabricating a multi-day "daily" return.
+**Gaps.** ``rv_t`` is only defined between sessions adjacent on the session
+calendar -- :class:`pricing.calendar.SessionCalendar`, the union of attested
+history (``_meta/trading_days.json``) and the forward holiday window. The
+union matters: ``history_audit`` refreshes the attested file only on
+Saturdays, so on most daily runs the origin sits in the unaudited tail,
+which the holiday window (refreshed Sundays) covers. A missing session makes
+the surrounding rv null, and any feature or target window containing a null
+is unusable -- a hole shortens the training set rather than fabricating a
+multi-day "daily" return. When no calendar infrastructure exists at all
+(fresh box, tests) consecutive rows are assumed adjacent; a weekday no
+source attests to raises ``CalendarRangeError`` rather than guessing, the
+calendar module's own convention for "one of the two jobs is behind".
 
 Run: ``python -m signals.har_rv [--date YYYY-MM-DD]`` (default: previous
 trading day). Archive: ``scripts/build_rv_forecast.py``.
@@ -70,6 +77,11 @@ from ingest.common.cli import run_job
 from ingest.common.config import Settings
 from ingest.common.logging_utils import JsonlLogger
 from ingest.jobs import partition_dates, read_partition
+from pricing.calendar import (
+    CalendarSourceError,
+    SessionCalendar,
+    load_session_calendar,
+)
 from signals.spot import DATASET as SPOT_DATASET
 
 JOB = "rv_forecast"
@@ -94,23 +106,21 @@ class RvForecastError(RuntimeError):
 
 def realized_variances(
     rows: Sequence[Mapping[str, Any]],
-    calendar: Mapping[str, bool] | None = None,
+    calendar: SessionCalendar | None = None,
 ) -> list[dict[str, Any]]:
     """``[{date, rv}]`` in session order; rv is the squared log return.
 
     The first row and any row whose previous *calendar* session is absent
     get ``rv=None`` -- across a gap the squared move is a multi-day return,
-    not a daily one. Without a calendar, consecutive rows are assumed to be
-    adjacent sessions.
+    not a daily one. Adjacency is ``sessions_between(prev, cur) == 1``:
+    exactly one session in the half-open interval means ``cur`` is the next
+    session after ``prev``. Without a calendar, consecutive rows are assumed
+    to be adjacent sessions.
     """
     ordered = sorted(
         (r for r in rows if r.get("date") and r.get("spot")),
         key=lambda r: str(r["date"]),
     )
-    session_order: dict[str, str] = {}
-    if calendar:
-        days = sorted(d for d, ok in calendar.items() if ok)
-        session_order = dict(zip(days, days[1:], strict=False))
     out: list[dict[str, Any]] = []
     prev: tuple[str, float] | None = None
     for rec in ordered:
@@ -119,9 +129,14 @@ def realized_variances(
         rv: float | None = None
         if prev is not None and math.isfinite(spot) and spot > 0:
             prev_day, prev_spot = prev
-            adjacent = (
-                session_order.get(prev_day) == day if session_order else True
-            )
+            adjacent = True
+            if calendar is not None:
+                adjacent = (
+                    calendar.sessions_between(
+                        date.fromisoformat(prev_day), date.fromisoformat(day)
+                    )
+                    == 1
+                )
             if adjacent:
                 ret = math.log(spot / prev_spot)
                 rv = ret * ret
@@ -244,9 +259,21 @@ def forecast_rows(
 
 def read_series(
     settings: Settings, on_or_before: date | None = None
-) -> tuple[list[dict[str, Any]], dict[str, bool]]:
-    """Every landed ``spy_spot`` row at or before a date, plus the calendar."""
-    calendar = market_gate.load_calendar(settings.data_root)
+) -> tuple[list[dict[str, Any]], SessionCalendar | None]:
+    """Every landed ``spy_spot`` row at or before a date, plus the calendar.
+
+    The calendar is the session union (attested history + holiday forward
+    window), because the attested file alone lags the newest ``spy_spot``
+    rows between Saturday audits. ``CalendarSourceError`` -- no holiday
+    infrastructure at all, e.g. a fresh box or a test root -- falls back to
+    ``None``, the assume-adjacent behavior. A *partial* calendar stays loud:
+    an adjacency question about a weekday no source covers raises
+    ``CalendarRangeError`` out of :func:`realized_variances`.
+    """
+    try:
+        calendar: SessionCalendar | None = load_session_calendar(settings.data_root)
+    except CalendarSourceError:
+        calendar = None
     rows: list[dict[str, Any]] = []
     for d in partition_dates(settings, SPOT_DATASET):
         if on_or_before is not None and d > on_or_before:

@@ -57,7 +57,20 @@ REQUIRED_NONNULL: dict[str, tuple[str, ...]] = {
     "underlying_minute_bars": ("ticker",),
     "underlying_day_bars": ("ticker",),
     "spy_spot": ("date", "spot", "src"),
-    "rv_forecast": ("date", "horizon", "log_rv_mean", "vol_ann"),
+    # Every rv_forecast field is an intrinsic output of the fit; a null in
+    # any of them means the row was malformed at write, not a legitimate
+    # absence, so all nine are required.
+    "rv_forecast": (
+        "date",
+        "horizon",
+        "log_rv_mean",
+        "log_rv_sd",
+        "rv_daily",
+        "vol_ann",
+        "vol_ann_p10",
+        "vol_ann_p90",
+        "n_train",
+    ),
 }
 
 

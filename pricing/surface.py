@@ -92,12 +92,18 @@ Run: ``python -m pricing.surface [--date YYYY-MM-DD] [--underlying SPX,SPXW]``
 ``coverage_audit`` at 12:30). For the archive, use ``scripts/build_surface.py``.
 :func:`load_surface` / :meth:`Surface.from_rows` read the landed
 ``vol_surface`` parameters back; consumers must not refit from day bars.
+Every landed row stamps two provenance facts beside the parameters:
+``daycount``, the vol-time convention that produced its ``t_years``, and
+``blas_threads``, the BLAS thread pin the fit ran under (null when unpinned)
+-- the optimum moves with the thread count, so a rebuild is diffable and a
+backtest reproducible only while both are recorded.
 """
 
 from __future__ import annotations
 
 import bisect
 import math
+import os
 import sys
 from dataclasses import dataclass
 from datetime import date
@@ -171,6 +177,36 @@ REPAIR_MAX_REL_RMS = 0.5
 
 class SurfaceError(RuntimeError):
     """A session or slice cannot yield a surface: thin chain or solver failure."""
+
+
+def blas_thread_pin() -> int | None:
+    """The BLAS thread count this process is pinned to, or None when unpinned.
+
+    The SVI fit is a least-squares solve whose optimum moves with the thread
+    count (scripts/cronjob.sh has the measurement), so a landed row is only
+    reproducible -- across a rebuild or a hardware change -- if the count it
+    was fit under is recorded with it. Both writers pin: cronjob.sh for the
+    scheduled job, scripts/build_surface.py for the archive rebuild, and both
+    leave a deliberate override in place, so the value here is whatever the
+    fit actually runs under, not a constant. OPENBLAS_NUM_THREADS is the var
+    that reaches the solver on this box; the other BLAS flavours are pinned
+    to the same value alongside it. A run without the pin records null rather
+    than guessing, because an unstamped fit is honestly not reproducible.
+
+    Why reading the environment here is the loaded count, not a stale copy of
+    it: OpenBLAS reads the var once at load, and both writers are fresh
+    processes whose environment is fixed before numpy loads -- cronjob.sh
+    exports the pin in the shell that execs the job, and build_surface.py sets
+    it above the pricing import (tests/test_thread_pin.py pins that ordering
+    and runs the stamp end-to-end in a subprocess). Nothing in the repo
+    mutates these vars in-process afterwards; a caller that did would break
+    the stamp, which is why the contract lives in a test. Querying the loaded
+    backend instead (threadpoolctl) is not available -- it is not a
+    dependency, and ctypes on whatever BLAS numpy happened to load is more
+    fragile than the contract it would replace.
+    """
+    raw = os.environ.get("OPENBLAS_NUM_THREADS")
+    return int(raw) if raw else None
 
 
 class SurfaceArbitrageError(SurfaceError):
@@ -506,6 +542,10 @@ class Slice:
     min_g: float
     rate: float
     daycount: str
+    # BLAS thread pin the fit ran under; None when unpinned. Defaulted so
+    # synthetic in-memory slices need no stamp; landed rows always carry the
+    # column (null is itself the record of an unpinned fit).
+    blas_threads: int | None = None
 
     def total_variance(self, k: float) -> float:
         d = k - self.m
@@ -598,6 +638,13 @@ class Surface:
             require_daycount_stamps(rows, context="vol_surface")
         except DayCountStampError as exc:
             raise SurfaceError(str(exc)) from exc
+        for i, r in enumerate(rows):
+            if "blas_threads" not in r:
+                raise SurfaceError(
+                    f"vol_surface: row {i} has no blas_threads column -- the "
+                    "partition predates the thread-pin stamp and the dataset "
+                    "must be rebuilt (docs/plans/trading-day-calendar.md)"
+                )
         dates = {str(r["date"])[:10] for r in rows}
         underlyings = {str(r["underlying"]) for r in rows}
         if len(dates) != 1 or len(underlyings) != 1:
@@ -640,6 +687,9 @@ def _slice_from_row(row: dict[str, Any]) -> Slice:
         min_g=float(row["min_g"]),
         rate=float(row["rate"]),
         daycount=str(row["daycount"]),
+        blas_threads=(
+            None if row["blas_threads"] is None else int(row["blas_threads"])
+        ),
     )
 
 
@@ -676,7 +726,7 @@ def _expiry_points(
 def _fit_expiry(
     expiry: str, dte: int, T: float, F: float, r: float,
     ks: list[float], ws: list[float],
-    stamp: str,
+    stamp: str, blas_threads: int | None,
     floor: Any = None, cal_grid: np.ndarray | None = None,
 ) -> Slice:
     """Fit one expiry's filtered OTM points and assemble its Slice.
@@ -684,7 +734,10 @@ def _fit_expiry(
     ``floor``/``cal_grid`` chain the calendar constraint from the previously
     fitted slice; see :func:`fit_slice`. ``stamp`` is ``name_for`` of the
     convention that produced ``T`` -- stamped at fit time so a later rebuild
-    of the calendar cannot relabel the row.
+    of the calendar cannot relabel the row. ``blas_threads`` is the thread
+    pin the fit runs under -- stamped for the same reason: the optimum moves
+    with the thread count, so the row is reproducible only if the count is
+    recorded with it.
     """
     fit = fit_slice(ks, ws, floor=floor, cal_grid=cal_grid)
     return Slice(
@@ -692,7 +745,7 @@ def _fit_expiry(
         a=fit.a, b=fit.b, rho=fit.rho, m=fit.m, sigma=fit.sigma,
         k_min=ks[0], k_max=ks[-1], n_strikes=len(ks),
         rms_error=fit.rms_error, min_g=fit.min_g, rate=r,
-        daycount=stamp,
+        daycount=stamp, blas_threads=blas_threads,
     )
 
 
@@ -721,6 +774,10 @@ def build_surfaces(
     if rate_fn is None:
         def rate_fn(as_of: date, T: float) -> float:  # noqa: ANN001
             return rate_for(as_of, T, data_root)
+
+    # One pin for the whole session: every slice in the fit runs under the
+    # same process, and therefore the same BLAS thread count.
+    blas = blas_thread_pin()
 
     surfaces: dict[str, Surface] = {}
     for root in roots:
@@ -778,7 +835,7 @@ def build_surfaces(
         slices: list[Slice] = []
         prev: Slice | None = None
         for expiry, dte, T, F, r, ks, ws, stamp in pending:
-            sl = _fit_expiry(expiry, dte, T, F, r, ks, ws, stamp,
+            sl = _fit_expiry(expiry, dte, T, F, r, ks, ws, stamp, blas,
                              floor=prev, cal_grid=cal_grid)
             prev = sl
             slices.append(sl)
@@ -812,6 +869,7 @@ def rows_from_surfaces(surfaces: dict[str, Surface]) -> list[dict[str, Any]]:
                 "min_g": s.min_g,
                 "rate": s.rate,
                 "src": SRC,
+                "blas_threads": s.blas_threads,
             })
     rows.sort(key=lambda x: (x["underlying"], x["expiration_date"]))
     return rows

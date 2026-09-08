@@ -21,16 +21,26 @@
 # rms_error moved less than 1e-09 -- the optimiser lands elsewhere in an
 # equally good basin. A parameter set that depends on how busy the box was is
 # one the backtester cannot reproduce and a rebuild cannot be diffed against.
-# One thread rather than a fixed larger count: it is deterministic across
-# machines too, and the fits are per-date parallel anyway. Element-wise numpy
-# (the CRR trees in drift_check) does not go through BLAS, so this costs the
-# other jobs nothing. `:=` leaves a deliberate override in place; the units
-# never set it, so scheduled runs always get 1.
-: "${OMP_NUM_THREADS:=1}"
-: "${OPENBLAS_NUM_THREADS:=1}"
-: "${MKL_NUM_THREADS:=1}"
-: "${NUMEXPR_NUM_THREADS:=1}"
-: "${VECLIB_MAXIMUM_THREADS:=1}"
+#
+# Eight rather than one. Reproducibility is what the pin buys and any fixed
+# count buys it, so the value is free to be chosen on solver behaviour -- and
+# 1 was never chosen at all, it was the fallback this line happened to carry.
+# Measured 2026-09-08, rebuilding the whole archive at each count: at 1 thread
+# 27 of the 660 sessions that fit cleanly at 8 instead trip the butterfly or
+# calendar arbitrage guard, and 8 of those 27 land with svi_b at its upper
+# bound of 10 -- the solve hit the boundary rather than finding a fit. Eight
+# keeps those sessions and costs nothing measurable elsewhere. The count is
+# explicit, so OpenBLAS partitions the same way whatever else the box is
+# doing; it is a thread count, not a core count, and does not become
+# machine-dependent on a smaller host. Element-wise numpy (the CRR trees in
+# drift_check) does not go through BLAS, so this costs the other jobs nothing.
+# `:=` leaves a deliberate override in place; the units never set it, so
+# scheduled runs always get 8.
+: "${OMP_NUM_THREADS:=8}"
+: "${OPENBLAS_NUM_THREADS:=8}"
+: "${MKL_NUM_THREADS:=8}"
+: "${NUMEXPR_NUM_THREADS:=8}"
+: "${VECLIB_MAXIMUM_THREADS:=8}"
 export OMP_NUM_THREADS OPENBLAS_NUM_THREADS MKL_NUM_THREADS \
        NUMEXPR_NUM_THREADS VECLIB_MAXIMUM_THREADS
 

@@ -29,9 +29,15 @@ from pathlib import Path
 # its thread count once, when the shared library loads. Same reasoning as
 # scripts/build_surface.py -- the archive rebuild is where an unreproducible
 # fit does the most damage.
+#
+# The count tracks cronjob.sh rather than standing on its own: the scheduled
+# job runs through cronjob.sh, this script is the manual rebuild of the same
+# dataset, and rv_forecast has no blas_threads column to record which of the
+# two produced a row. Two different counts would therefore mix silently --
+# the failure mode vol_surface's stamp exists to make visible.
 for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
              "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
-    os.environ.setdefault(_var, "1")
+    os.environ.setdefault(_var, "8")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 

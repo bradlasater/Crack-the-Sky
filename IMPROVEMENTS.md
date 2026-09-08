@@ -17,10 +17,18 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   be diffed against the existing archive to measure a deliberate change (the
   convention change in `docs/plans/trading-day-calendar.md` hits this
   directly), and the backtester cannot reproduce the inputs a decision was made
-  on. **Pinned going forward** in `scripts/cronjob.sh` (every scheduled job,
-  so the systemd timers and the crontab fallback share one definition) and in
-  `scripts/build_surface.py`, which is run directly and must set it above the
-  `pricing` import because OpenBLAS reads its thread count once, at load.
+  on. **Pinned going forward** at 8 threads in `scripts/cronjob.sh` (every
+  scheduled job, so the systemd timers and the crontab fallback share one
+  definition) and in `scripts/build_surface.py` /
+  `scripts/build_rv_forecast.py`, which are run directly and must set it above
+  the `pricing` / `signals` import because OpenBLAS reads its thread count
+  once, at load; `tests/test_thread_pin.py` asserts the three agree, since
+  `rv_forecast` has no `blas_threads` column and a drift there would mix
+  silently. The count is 8 rather than 1 because any fixed count buys
+  reproducibility, leaving the value free to be chosen on solver behaviour: a
+  full archive rebuild at 1 thread (2026-09-08) lands 650 partitions against
+  660, and 8 of the 27 lost sessions land with `svi_b` at its upper bound --
+  the solve hit the boundary rather than finding a fit.
   **Recorded with the rows**: `vol_surface` gained a `blas_threads` column
   stamped with the pinned count on every row (null when a run was unpinned;
   a deliberate operator override is stamped as-is), so reproducibility no
@@ -31,7 +39,12 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   `docs/plans/trading-day-calendar.md` decision 5 ("Second pass") regenerates
   the archive under the known thread count and the swap makes it readable
   again. Until then the archive is reproducible only from the day the pin
-  landed, and production `vol_surface` raises under the new code.
+  landed, and production `vol_surface` raises under the new code. Worse than
+  first recorded: production's own archive is *itself* unpinned. Re-running the
+  first pass's exact commit today against unchanged inputs does not reproduce
+  it at 1 thread but does at 8 and at 32, so an ambient value in the operator's
+  shell beat both writers' fallback assignment (`setdefault` / `:=`) and no
+  column exists to say what it was.
 - `pricing/from_market.py:200` — `expiry_instant` and `year_fraction` accept a
   session calendar that moves a PM-settled expiry to the 13:00 ET early close,
   but **no production caller passes one yet**, so the default is still the

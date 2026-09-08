@@ -88,7 +88,7 @@
           </tr>
           <tr>
             <td class="job">signals/</td>
-            <td>Derived market series that sit on ingest + pricing reductions. <code>signals.spot</code> writes <code>spy_spot</code> — SPY cash level from the day-bar close, else the shortest-DTE parity proxy.</td>
+            <td>Derived market series that sit on ingest + pricing reductions. <code>signals.spot</code> writes <code>spy_spot</code> — SPY cash level from the day-bar close, else the shortest-DTE parity proxy. <code>signals.har_rv</code> turns that series into <code>rv_forecast</code> — the walk-forward HAR-RV baseline with a lognormal uncertainty band.</td>
           </tr>
           <tr>
             <td class="job">tests/</td>
@@ -104,7 +104,7 @@
           </tr>
           <tr>
             <td class="job">scripts/</td>
-            <td>bootstrap, backfill, backfill_underlying, repair, prune_raw, Healthchecks setup, <code>build_term_structure.py</code> (rebuilds the ATM curve over the archive), <code>build_surface.py</code> (same for the SVI surface), <code>build_spy_spot.py</code> (SPY spot series + overlap calibration). Not a package.</td>
+            <td>bootstrap, backfill, backfill_underlying, repair, prune_raw, Healthchecks setup, <code>build_term_structure.py</code> (rebuilds the ATM curve over the archive), <code>build_surface.py</code> (same for the SVI surface), <code>build_spy_spot.py</code> (SPY spot series + overlap calibration), <code>build_rv_forecast.py</code> (walk-forward HAR-RV over the spot archive). Not a package.</td>
           </tr>
         </tbody>
       </table>

@@ -175,6 +175,28 @@ def test_ping_body_is_truncated(recorder: _Recorder) -> None:
     assert len(data) == 10_000
 
 
+def test_ping_body_truncates_to_10k_bytes_not_chars(recorder: _Recorder) -> None:
+    """Healthchecks caps the body at 10 KB of *bytes*.
+
+    Truncating to 10,000 chars before encoding let a non-ASCII body encode to
+    well past the limit. 6,000 pound signs are 12,000 UTF-8 bytes.
+    """
+    cli.ping("https://hc-ping.com/KEY/x", body="£" * 6_000)
+    (_url, data), = recorder.calls
+    assert len(data) == 10_000
+    data.decode("utf-8")  # must be valid UTF-8: no half-encoded tail
+
+
+def test_ping_body_cut_inside_a_multibyte_char_stays_valid_utf8(
+    recorder: _Recorder,
+) -> None:
+    """A cut that lands mid-sequence must drop the partial character."""
+    cli.ping("https://hc-ping.com/KEY/x", body="A" * 9_999 + "£" * 100)
+    (_url, data), = recorder.calls
+    assert len(data) == 9_999  # the 10,000th byte was half of a '£'
+    assert data.decode("utf-8") == "A" * 9_999
+
+
 # ---------------------------------------------------------------------------
 # Monitoring config must not drift from the schedule
 # ---------------------------------------------------------------------------

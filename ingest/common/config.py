@@ -44,6 +44,22 @@ def _parse_env_file(path: Path) -> dict[str, str]:
     return values
 
 
+def default_data_root(env_path: str | os.PathLike[str] | None = None) -> Path:
+    """DATA_ROOT exactly as ``Settings.load()`` resolves it, without the
+    credential check.
+
+    A job ``main()`` that computes a default ``--date`` runs before
+    ``run_job`` -- and therefore before ``Settings.load()`` -- so a bare
+    ``market_gate.previous_trading_day(today)`` reads only ``os.environ``.
+    A DATA_ROOT that lives solely in .env is then missed, and T-1 is picked
+    against the default root's holiday calendar.
+    """
+    path = Path(env_path) if env_path is not None else Path(".env")
+    file_vals = _parse_env_file(path)
+    value = os.environ.get("DATA_ROOT", file_vals.get("DATA_ROOT", DEFAULT_DATA_ROOT))
+    return Path(value or DEFAULT_DATA_ROOT)
+
+
 @dataclass(frozen=True)
 class Settings:
     """Immutable runtime settings for all ingestion jobs."""

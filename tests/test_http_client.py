@@ -142,3 +142,20 @@ def test_paginate_reappends_api_key_to_next_url(client: MassiveClient) -> None:
     assert second.startswith(next_url.split("?")[0])
     assert "cursor=YXA9MQ" in second
     assert f"apiKey={API_KEY}" in second  # re-appended: API omits it
+
+
+def test_paginate_stops_on_a_repeated_next_url(client: MassiveClient) -> None:
+    """A stuck server-side cursor must not page forever.
+
+    The API re-serving the same next_url is a vendor bug, not a signal to
+    fetch the same page until the rate budget is gone.
+    """
+    stuck = "https://api.polygon.io/v3/trades/O:X?cursor=STUCK"
+    client.session = FakeSession([
+        FakeResponse(200, {"results": [{"a": 1}], "next_url": stuck}),
+        FakeResponse(200, {"results": [{"a": 2}], "next_url": stuck}),
+        FakeResponse(200, {"results": [{"a": 3}], "next_url": stuck}),
+    ])
+    items = list(client.paginate("/v3/trades/O:X"))
+    assert [i["a"] for i in items] == [1, 2]
+    assert len(client.session.calls) == 2  # the repeat is not followed

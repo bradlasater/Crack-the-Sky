@@ -208,3 +208,35 @@ def test_main_defaults_date_to_the_previous_trading_day(monkeypatch) -> None:
                         lambda job, fn, argv: seen.setdefault("argv", argv))
     reconcile.main([])
     assert seen["argv"][0] == "--date"
+
+
+def test_main_default_date_uses_the_configured_data_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A DATA_ROOT that lives only in .env must drive the T-1 default.
+
+    main() computes the default before run_job's Settings.load() exports .env
+    values, so a bare previous_trading_day() reads /data/massive's calendar
+    instead of the configured root's.
+    """
+    from ingest.common import market_gate
+
+    data = tmp_path / "data"
+    meta = data / "_meta"
+    meta.mkdir(parents=True)
+    # Monday 2026-09-07 is closed in this root's calendar; T-1 from Tuesday
+    # 2026-09-08 must skip back to Friday 2026-09-04, not land on the holiday.
+    (meta / "holidays.json").write_text(json.dumps([
+        {"date": "2026-09-07", "exchange": "NYSE",
+         "name": "Labor Day", "status": "closed"}
+    ]), encoding="utf-8")
+    (tmp_path / ".env").write_text(f"DATA_ROOT={data}\n", encoding="utf-8")
+    monkeypatch.delenv("DATA_ROOT", raising=False)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(market_gate, "today_et", lambda: date(2026, 9, 8))
+
+    seen: dict = {}
+    monkeypatch.setattr(reconcile, "run_job",
+                        lambda job, fn, argv: seen.setdefault("argv", argv))
+    reconcile.main([])
+    assert seen["argv"] == ["--date", "2026-09-04"]

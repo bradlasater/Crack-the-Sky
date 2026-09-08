@@ -92,6 +92,29 @@ def test_contract_universe_prefix_filter(tmp_path):
     assert spy_only == ["O:SPY260918C00700000"]
 
 
+def test_contract_universe_rejects_lookalike_roots(tmp_path):
+    """O:SPXL/O:SPXU are Direxion 3x ETFs, not SPX options: a bare
+    ``startswith("O:SPX")`` admits them; the anchored root regex must not."""
+    settings = _settings(tmp_path)
+    today = market_gate.today_et()
+    _write_contracts_partition(
+        settings,
+        ["O:SPX260918C07000000", "O:SPXW260918C07000000",
+         "O:SPXL260918C00050000", "O:SPXU260918P00020000"],
+        today,
+    )
+    tickers = wsjob.select_tickers(settings, today, ["SPX"], None)
+    assert tickers == ["O:SPX260918C07000000", "O:SPXW260918C07000000"]
+
+
+def test_universe_re_escapes_user_supplied_roots():
+    """--underlying is user input: a metacharacter in a root must be matched
+    literally, never as regex. ``SP.X`` unescaped would also match SPX."""
+    pattern = wsjob._universe_re(["SP.X"])
+    assert pattern.match("O:SP.X260918C00700000")
+    assert not pattern.match("O:SPX260918C00700000")
+
+
 def test_select_tickers_limit_prefers_hot(tmp_path):
     settings = _settings(tmp_path)
     today = market_gate.today_et()
@@ -395,7 +418,8 @@ def test_writer_survives_a_write_error(tmp_path, monkeypatch):
 def test_writer_errors_fail_the_run(tmp_path, monkeypatch):
     """A run that loses records to writer errors must report failure even
     when later records land: rows_written > 0 alone used to make the terminal
-    ping green, hiding a partially lost capture."""
+    ping green, hiding a partially lost capture. And the exit code agrees
+    with the /fail ping -- Healthchecks is the alert channel."""
     settings = _settings(tmp_path)
     monkeypatch.setattr(wsjob.Settings, "load", lambda: settings)
     monkeypatch.setattr(wsjob, "select_tickers",
@@ -429,12 +453,61 @@ def test_writer_errors_fail_the_run(tmp_path, monkeypatch):
 
     rc = wsjob.main(["--date", "2026-09-02", "--force", "--duration-minutes", "1"])
 
-    assert rc == 0  # terminal ping carries the failure, as the 0-rows path does
+    assert rc == 1, "a failed capture must exit nonzero, like the /fail ping"
     assert ("/start",) in [(s,) for _, s, _ in pings]
     fails = [body for _, suffix, body in pings if suffix == "/fail"]
     assert fails, "writer errors must fail the run's terminal ping"
     assert "writer" in fails[-1]
     assert not any(suffix == "" for _, suffix, _ in pings), "no green terminal ping"
+
+
+def test_zero_row_capture_exits_nonzero(tmp_path, monkeypatch):
+    """A full capture window with an ACKed subscription and zero rows is a
+    failed run: /fail was already pinged, but the exit code used to stay 0,
+    so cron and Healthchecks disagreed about the same run."""
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(wsjob.Settings, "load", lambda: settings)
+    monkeypatch.setattr(wsjob, "select_tickers", lambda *a, **k: ["O:SPY1"])
+    pings: list[tuple] = []
+    monkeypatch.setattr(
+        wsjob, "ping",
+        lambda url, suffix="", autocreate=False, body=None:
+            pings.append((url, suffix, body)),
+    )
+
+    async def quiet_capture(settings, logger, run_date, deadline, writer, chunks,
+                            liveness_url=None, liveness_autocreate=False):
+        return {"connects": 1, "reconnects": 0, "frames": 1, "events": 0,
+                "distinct_symbols": 0}
+
+    monkeypatch.setattr(wsjob, "_capture", quiet_capture)
+
+    rc = wsjob.main(["--date", "2026-09-02", "--force", "--duration-minutes", "1"])
+
+    assert rc == 1
+    fails = [body for _, suffix, body in pings if suffix == "/fail"]
+    assert fails and "0 rows" in fails[-1]
+    assert not any(suffix == "" for _, suffix, _ in pings), "no green terminal ping"
+
+
+def test_holiday_skip_stays_green(tmp_path, monkeypatch):
+    """A non-trading day is not a failed run: the market gate exits 0 and the
+    terminal ping stays green -- only genuine capture failures go nonzero."""
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(wsjob.Settings, "load", lambda: settings)
+    pings: list[tuple] = []
+    monkeypatch.setattr(
+        wsjob, "ping",
+        lambda url, suffix="", autocreate=False, body=None:
+            pings.append((url, suffix, body)),
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        wsjob.main(["--date", "2026-09-05"])  # a Saturday
+
+    assert excinfo.value.code == 0
+    assert any(suffix == "" for _, suffix, _ in pings), "holiday skip pings green"
+    assert not any(suffix == "/fail" for _, suffix, _ in pings)
 
 
 # ---------------------------------------------------------------------------

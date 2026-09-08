@@ -45,16 +45,26 @@ conservative audit pass. Grouped by area, roughly highest-value first.
 - `ingest/common/cli.py` — **fixed**: reserved keys (`event`, `rows`, `bytes`,
   `job`, `duration_s`) are dropped from the `**extras` merge so a successful
   job cannot crash `job_end` and get reported as `job_error`.
-- `ingest/jobs/ws_minute_bars.py:648` — a 0-row capture pings healthcheck
-  `/fail` but `main` still exits 0. Exit code and monitoring disagree; decide
-  whether cron mail or Healthchecks is the alert channel, then align them.
-- `ingest/jobs/eod_dayaggs_rest.py:91` — non-watchlist mode does one sequential
-  REST call per contract (~100k contracts ≈ 6 h) with no checkpointing; a crash
-  at hour 5 restarts from zero. Options: batch via a snapshot endpoint, or
-  persist partial progress. Needs a runtime-budget decision.
-- `ingest/jobs/grouped_daily.py:76` — an empty `records` on a trading day logs
-  `grouped_empty` and exits 0 (green healthcheck). Consider failing when the
-  response has results but none of the wanted tickers matched.
+- `ingest/jobs/ws_minute_bars.py:648` — **fixed**: Healthchecks is the alert
+  channel and the exit code now agrees with it. A capture that ends with zero
+  rows, or one that lost records to writer errors, pings `/fail` and returns
+  1. Legitimate zero-row situations stay green: a holiday still exits 0 from
+  the market gate, and an already-closed capture window returns 0 before any
+  capture runs.
+- `ingest/jobs/eod_dayaggs_rest.py:91` — **fixed**: partial progress is
+  persisted (endpoint strategy unchanged). The full-universe sweep
+  checkpoints done tickers and counters to `_meta/dayaggs_checkpoint.json`
+  and appends fetched raw bars to `_meta/dayaggs_partial.jsonl` every 500
+  contracts, so a restarted run for the same date resumes where it stopped;
+  both files are removed on completion. Missing/corrupt/stale-date state
+  restarts the sweep — refetching is idempotent, skipping would be a silent
+  gap. The watchlist sweep and dry runs do not checkpoint.
+- `ingest/jobs/grouped_daily.py:76` — **fixed**: when the grouped response
+  has market rows but none of the wanted tickers are among them, the job
+  raises (nonzero exit, `/fail` ping) instead of logging `grouped_empty` and
+  exiting 0. A genuinely empty response (forced holiday run, wrong date)
+  still lands `grouped_empty` and stays green; real holidays never reach
+  `main_fn` because the market gate exits 0 first.
 - `scripts/cronjob.sh` — **fixed**: the lock is taken on fd 9 before the
   command runs, so a wrapped process that exits 99 is no longer misreported
   as `job_skipped` and swallowed to 0. Contention is flock's `-E 99` on
@@ -68,10 +78,10 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   ingest-side parser already decoded that way, so the term-structure archive
   built on its output stays valid. A `yy >= 80` suffix is a corrupt ticker,
   and 2080+ is a less dangerous decode than an expiry decades in the past.
-- `ingest/jobs/ws_minute_bars.py:117` — `contract_universe` uses bare
-  `startswith(("O:SPY", "O:SPX"))`, which would admit `O:SPXL`/`O:SPXU` roots.
-  Impossible with today's contracts partition; reuse the anchored regex from
-  `keep_ticker` if the universe ever widens.
+- `ingest/jobs/ws_minute_bars.py:117` — **fixed**: `contract_universe` matches
+  roots with an anchored OPRA regex (`^O:(ROOT)\d{6}[CP]\d+$`, the same shape
+  as `keep_ticker`'s), so `O:SPXL`/`O:SPXU` can never be admitted. Weekly
+  roots ride with their underlying (`SPX` also admits `SPXW`).
 
 ## Monitoring gaps
 
@@ -133,50 +143,74 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   duplicates, never gaps, because a cursor only moves forward and
   flat-file-covered days are dropped at write time. The `cursors_saved` event
   now logs the pruned count.
-- `scripts/backfill.sh` — date payloads can run independently, but each process
-  currently performs an unlocked read-modify-write of the shared
-  `_meta/flatfile_manifest.json`; make manifest updates concurrency-safe first,
-  then use a 4–8-way parallel backfill (e.g. `xargs -P`, staying inside the
-  S3/rate budget) to reduce multi-year backfill wall time.
-  day-to-day ingest is vendor-rate-bound (40 rps shared bucket), not
-  compute-bound — parallelism only pays for backfills, not the live jobs.
+- `scripts/backfill.sh` — **fixed**: `_update_manifest` in
+  `ingest/jobs/flatfile_pull.py` now serializes its read-modify-write with an
+  `flock` on `_meta/flatfile_manifest.lock` and writes via temp-file rename
+  (the SharedTokenBucket pattern), so concurrent flatfile_pull processes
+  cannot corrupt or lose manifest entries. backfill.sh then runs dates
+  `BACKFILL_WORKERS`-wide in parallel (`xargs -P`, default 4, 1 = the old
+  serial loop); a low-disk worker exits 255, which stops xargs from launching
+  further dates (in-flight pulls finish their current date, then the run
+  aborts with the usual resume message).
+  Day-to-day ingest stays serial: it is vendor-rate-bound (40 rps shared
+  bucket), not compute-bound — parallelism only pays for backfills.
 
 ## Robustness / consistency
 
-- `ingest/common/market_gate.py:36` — the holiday cache is keyed by path with
-  no mtime check; a session-long process keeps a stale calendar if
-  `holidays_sync` rewrites the file mid-run. Fail-open by design, so low
-  urgency; add mtime invalidation.
-- `ingest/common/landing.py:212` — `quarantine_prior` uses `Path.replace`,
-  overwriting a same-named quarantined file. Rare; collision-nudge the target.
-- `ingest/jobs/coverage_audit.py:120` + `deploy/crontab:57` — on 13:00
-  early-close days the cron cadence still runs to 16:30, so ~178 post-close
-  sweeps read as "stray" and the 13:32–16:30 window is unchecked. Decide which
-  side owns early closes: crontab stops early, or the audit treats the full
-  window as canonical.
-- `ingest/jobs/coverage_audit.py:536` / `reconcile.py:138` — default T-1 is
-  computed without `data_root` (unlike `history_audit`), so a non-standard
-  `DATA_ROOT` picks T-1 against the wrong holiday calendar. Pass the settings
-  root consistently.
+- `ingest/common/market_gate.py:36` — **fixed**: the holiday cache now carries
+  the mtime it was read at and reloads when the file changes, so a
+  session-long process picks up a mid-run `holidays_sync` rewrite. A missing
+  file still caches as empty (fail-open) and starts answering the moment the
+  file appears.
+- `ingest/common/landing.py:212` — **fixed**: `quarantine_prior` now nudges
+  the stamp token forward when the quarantine target name is already taken,
+  so a second refilter/reconcile of one partition no longer overwrites the
+  earlier quarantined file. Same shape-preserving nudge as
+  `_unique_clean_path` (readers parse the final `-` token as an integer
+  stamp).
+- `ingest/jobs/coverage_audit.py:120` + `deploy/crontab:57` — **fixed**:
+  owner decision was that the audit owns early closes, so the crontab stays
+  as installed. The canonical sweep window already ended at the actual
+  session close via `market_gate.market_close_et`; what misread was the
+  classification — `_classify_stamps` now puts the post-close cadence firings
+  (13:33–16:24 on a 13:00 close, up to the crontab's hard stop) in their own
+  `post_close` bucket: accounted for in the check data, never counted towards
+  the ratio, never required (a sweep job that learns to stop at the early
+  close must not fail the day it ships), and no longer reported as ~178
+  "stray" sweeps. Layering: the audit keeps reading `_meta/holidays.json`
+  through `market_gate` rather than importing `pricing.calendar` — the repo's
+  import direction is pricing → ingest (`pricing.calendar` itself unions
+  those same files via `market_gate`), and ingesting pricing would invert it
+  for zero new information.
+- `ingest/jobs/coverage_audit.py:536` / `reconcile.py:138` — **fixed**: both
+  jobs now compute the T-1 default against `config.default_data_root()`, a
+  new helper that resolves `DATA_ROOT` exactly as `Settings.load()` does
+  (environment, then .env) without the credential check. `main()` runs before
+  `run_job`'s `Settings.load()`, so a `DATA_ROOT` that lives only in .env was
+  previously invisible and T-1 was picked against `/data/massive`'s holiday
+  calendar — the same root `history_audit` already passes explicitly.
 - `ingest/jobs/history_audit.py:280` — **fixed**: the hand-rolled loop now
   accepts `--start=X`/`--end=X` equals-forms alongside the space-separated
   ones. Done by extending the loop rather than the shared parser, matching
   the repo convention that jobs peel their own flags before handing the rest
   to `cli.run_job` (`strip_flag` documents the pattern); the shared parser
   only knows flags common to every job.
-- `scripts/backfill.sh:60` vs `scripts/prune_raw.sh:98` — inconsistent
-  "is this date done" semantics: backfill skips dates with ≥3 manifest entries
-  regardless of `rows_kept`, so a 0-rows-kept date is skipped forever. Build a
-  rows_kept-aware index in backfill like prune does.
+- `scripts/backfill.sh:60` vs `scripts/prune_raw.sh:98` — **fixed**: backfill
+  now builds the same rows_kept-aware manifest index prune does
+  (`dataset|date`, kept only when `rows_kept > 0`) and calls a date done only
+  when all three datasets have rows kept, so a 0-rows-kept date is re-pulled
+  instead of skipped forever. Pinned by tests/test_backfill.py.
 - `tests/conftest.py:93` — **fixed**: the offline guard now patches
   `connect_ex` alongside `connect`, and the host check only applies to
   `AF_INET`/`AF_INET6` sockets, so AF_UNIX path addresses (local by
   construction) are no longer misread as outbound hosts. Covered by
   `tests/test_offline_guard.py`.
-- `ingest/common/http_client.py` — `paginate` has no guard against a
-  pathological repeated `next_url` (infinite loop); `cli.ping` truncates to
-  10,000 *chars* before UTF-8 encoding, so a non-ASCII body can exceed the
-  Healthchecks 10 KB limit.
+- `ingest/common/http_client.py` — **fixed**: `paginate` stops with a warning
+  when the API re-serves a `next_url` it already followed (a stuck cursor
+  would otherwise page forever), and `cli.ping` now truncates the body after
+  UTF-8 encoding — 10,000 *bytes*, with any half-encoded tail character
+  dropped — so a non-ASCII body can no longer exceed the Healthchecks 10 KB
+  limit.
 
 ## Docs / site
 

@@ -221,15 +221,19 @@ def test_cached_matches_uncached_bit_for_bit(case: tuple) -> None:
 
 # The golden sanity check can only cover outputs whose fixed values are
 # portable across libm/NumPy builds. Price and the first-order greeks
-# qualify (both CI runners matched them at rel=1e-9). The higher-order
-# bump ratios do not: they divide a last-bit price difference by h² or h³
-# (gamma: hS² ≈ 3.5e-3; volga/ultima: hs² ≈ 3.4e-10, an amplification of
-# ~3e9), so 1-ULP exp/pow differences become larger than any formula-level
-# signal. On the CI 3.11/3.12 runners gamma moved by up to 0.76 relative
-# (case0's gamma is a 1e-11 tree-noise value) and vanna by 3.8e-8 — no
-# fixed tolerance is both portable and meaningful for them. Their
-# characterization is carried by the two platform-independent tests here;
-# their golden values stay in GOLDEN below as the historical record.
+# qualify: on the CI 3.11/3.12 runners every name up to rho_dividend
+# matched at rel=1e-9 (the per-case loop stopped at gamma, so those seven
+# are what CI actually observed; elasticity is delta*S/price and inherits
+# their stability). The higher-order bump ratios do not qualify: they
+# divide a last-bit price difference by h² or h³ (gamma: hS² ≈ 3.5e-3;
+# volga/ultima: hs² ≈ 3.4e-10, an amplification of ~3e9), so 1-ULP exp/pow
+# differences become larger than any formula-level signal. On the same
+# runners gamma moved by up to 0.76 relative (case0's gamma is a 1e-11
+# tree-noise value) and vanna by 3.8e-8 — no fixed tolerance is both
+# portable and meaningful for them. They stay characterized by
+# test_cached_matches_uncached_bit_for_bit, which is exact and covers every
+# output on any build; their golden values stay in GOLDEN below as the
+# historical record.
 STABLE_GOLDEN_NAMES = (
     "price",
     "delta",

@@ -356,13 +356,21 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger):
         list(pool.map(work, due))
 
     # Contracts that have rolled off the watchlist must not accumulate in the
-    # state file forever. Skipped entirely under --limit: `tickers` was
-    # truncated above, so pruning against it would delete the backoff state
-    # for every contract the limited run never looked at, and the next real
-    # run would poll all of them at once.
+    # state files forever -- backoff state and cursors alike, or
+    # trades_cursor.json grows by every ticker ever watched and never shrinks.
+    # Pruning a cursor costs one full-history re-poll if the contract rotates
+    # back on (duplicates, never gaps: the cursor only moves forward, and
+    # flat-file-covered days are dropped below), which is the right price for
+    # a bounded file. Both prunes are skipped entirely under --limit: `tickers`
+    # was truncated above, so pruning against it would delete the state for
+    # every contract the limited run never looked at, and the next real run
+    # would poll all of them at once.
+    pruned_cursors: set[str] = set()
     if args.limit is None:
         keep = set(tickers)
         poll_state = {t: v for t, v in poll_state.items() if t in keep}
+        pruned_cursors = set(cursors) - keep
+        cursors = {t: v for t, v in cursors.items() if t in keep}
 
     for err in errors[:20]:
         logger.log("ticker_error", **err)
@@ -436,7 +444,8 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger):
             )
         _save_cursors(settings, cursors)
         _save_poll_state(settings, run_date, run_index, poll_state)
-        logger.log("cursors_saved", tickers=len(cursors))
+        logger.log("cursors_saved", tickers=len(cursors),
+                   pruned=len(pruned_cursors))
     return {
         "rows": len(records),
         "tickers": len(tickers),

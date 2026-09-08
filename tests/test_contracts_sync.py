@@ -102,6 +102,44 @@ def test_first_ever_run_has_an_empty_baseline(tmp_path) -> None:
     assert _previous_tickers(settings, "contracts", TODAY, "VIX") == set()
 
 
+def test_first_ever_run_does_not_read_the_history(tmp_path, monkeypatch) -> None:
+    """The short-circuit: filenames answer "not here" without opening parquet.
+
+    Clean files are named ``{job}-{underlying}-{epoch_ms}.parquet``, so a
+    partition with no file labelled VIX cannot hold a VIX baseline. Reading
+    every historical partition anyway is what made a new underlying's first
+    run scan the whole archive to compute an empty set.
+    """
+    settings = _settings(tmp_path)
+    for day in (date(2026, 8, 31), YESTERDAY, TODAY):
+        _land(tmp_path, day, "SPY", ["O:SPY1"])
+        _land(tmp_path, day, "SPX", ["O:SPX1"])
+
+    def _boom(*a, **k):
+        raise AssertionError("read a partition the filenames ruled out")
+
+    monkeypatch.setattr(contracts_sync, "latest_clean_records", _boom)
+    assert _previous_tickers(settings, "contracts", TODAY, "VIX") == set()
+
+
+def test_unlabelled_files_are_still_read(tmp_path) -> None:
+    """The short-circuit only fires when the name proves absence.
+
+    A file named ``{job}-{epoch_ms}.parquet`` (no underlying in the name)
+    says nothing about its contents, so it is read as before rather than
+    silently skipped.
+    """
+    settings = _settings(tmp_path)
+    _land(tmp_path, YESTERDAY, "VIX", ["O:VIX1"])
+    # Rename to the label-less shape: contracts_sync-1756...parquet.
+    part = tmp_path / "clean" / "contracts" / f"dt={YESTERDAY.isoformat()}"
+    labelled = next(part.glob("*.parquet"))
+    _stamp = labelled.stem.rsplit("-", 1)[-1]
+    labelled.rename(part / f"contracts_sync-{_stamp}.parquet")
+
+    assert _previous_tickers(settings, "contracts", TODAY, "VIX") == {"O:VIX1"}
+
+
 def test_baseline_ignores_partitions_after_the_run_date(tmp_path) -> None:
     settings = _settings(tmp_path)
     _land(tmp_path, YESTERDAY, "SPX", ["O:SPX1"])

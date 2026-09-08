@@ -25,11 +25,13 @@ from ingest.common.config import Settings
 from ingest.common.http_client import MassiveClient
 from ingest.common.logging_utils import JsonlLogger
 from ingest.jobs import (
+    _latest_files_by_underlying,
     latest_clean_records,
     parse_underlyings,
     partition_dates,
     run_date_from_args,
     strip_flag,
+    underlying_root,
 )
 
 JOB = "contracts_sync"
@@ -55,6 +57,17 @@ def _previous_tickers(
     """
     for dt in reversed(partition_dates(settings, dataset)):
         if dt > run_date:
+            continue
+        # Answer from the filenames before touching parquet: clean files are
+        # named ``{job}-{underlying}-{epoch_ms}.parquet`` (catalog's stamp
+        # parsing), so a partition with no file labelled with this underlying
+        # cannot hold a baseline for it. Without the short-circuit the
+        # first-ever run for a new underlying reads every historical
+        # partition just to compute an empty set. Files whose name carries no
+        # underlying label (``other``) still have to be read -- their
+        # contents are not in the filename.
+        files, other = _latest_files_by_underlying(settings, dataset, dt)
+        if underlying_root(underlying) not in files and not other:
             continue
         tickers = {
             r["ticker"]

@@ -33,6 +33,7 @@ DATASETS = [
     "atm_term_structure",
     "vol_surface",
     "spy_spot",
+    "rv_forecast",
     "decision_log",
     "dividends",
     "splits",
@@ -242,6 +243,23 @@ def test_spy_spot_schema_roundtrip() -> None:
     table = check_records("spy_spot", records)
     assert table["src"].to_pylist() == ["bars"]
     assert table["spot"].to_pylist()[0] == pytest.approx(765.16)
+
+
+def test_rv_forecast_schema_roundtrip() -> None:
+    records = [{
+        "date": "2026-09-04",
+        "horizon": 21,
+        "log_rv_mean": -8.9,
+        "log_rv_sd": 0.42,
+        "rv_daily": 1.5e-4,
+        "vol_ann": 0.194,
+        "vol_ann_p10": 0.117,
+        "vol_ann_p90": 0.331,
+        "n_train": 700,
+    }]
+    table = check_records("rv_forecast", records)
+    assert table["horizon"].to_pylist() == [21]
+    assert table["vol_ann_p10"].to_pylist()[0] < table["vol_ann"].to_pylist()[0]
 
 
 def test_decision_log_schema_roundtrip() -> None:

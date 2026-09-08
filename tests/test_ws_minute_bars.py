@@ -107,6 +107,14 @@ def test_contract_universe_rejects_lookalike_roots(tmp_path):
     assert tickers == ["O:SPX260918C07000000", "O:SPXW260918C07000000"]
 
 
+def test_universe_re_escapes_user_supplied_roots():
+    """--underlying is user input: a metacharacter in a root must be matched
+    literally, never as regex. ``SP.X`` unescaped would also match SPX."""
+    pattern = wsjob._universe_re(["SP.X"])
+    assert pattern.match("O:SP.X260918C00700000")
+    assert not pattern.match("O:SPX260918C00700000")
+
+
 def test_select_tickers_limit_prefers_hot(tmp_path):
     settings = _settings(tmp_path)
     today = market_gate.today_et()

@@ -105,7 +105,9 @@ def _universe_re(underlyings: list[str]) -> re.Pattern[str]:
     Same shape as ``keep_ticker``'s regex: the root is delimited by the six
     expiry digits, so ``O:SPX`` matching cannot bleed into ``O:SPXL``/``O:SPXU``
     (Direxion 3x ETFs) the way a bare ``startswith`` would. Weekly roots ride
-    with their underlying -- ``SPX`` also admits ``SPXW``.
+    with their underlying -- ``SPX`` also admits ``SPXW``. Roots are
+    regex-escaped: they come from the ``--underlying`` CLI, and a stray
+    metacharacter must widen nothing.
     """
     roots: list[str] = []
     for u in underlyings:
@@ -115,7 +117,7 @@ def _universe_re(underlyings: list[str]) -> re.Pattern[str]:
                 roots.append(r)
     if not roots:
         roots = [underlying_root(u) for u in underlyings]
-    alternation = "|".join(sorted(roots, key=len, reverse=True))
+    alternation = "|".join(re.escape(r) for r in sorted(roots, key=len, reverse=True))
     return re.compile(r"^O:(" + alternation + r")\d{6}[CP]\d+$")
 
 

@@ -8,8 +8,9 @@ twice, which is enough to make a rebuild undiffable and the backtester's inputs
 unreproducible.
 
 These tests pin the mechanism rather than the numerics: the value has to reach
-the job's own process, and in the archive rebuild it has to be set before
-OpenBLAS loads.
+the job's own process, in the archive rebuild it has to be set before OpenBLAS
+loads, and the value stamped on landed ``vol_surface`` rows
+(``blas_threads``) has to be the one the job actually ran under.
 """
 
 from __future__ import annotations
@@ -84,3 +85,32 @@ def test_build_surface_pins_before_numpy_can_load() -> None:
     )
     for var in THREAD_VARS:
         assert var in src
+
+
+PIN_STAMP_PROBE = (
+    f"import sys;sys.path.insert(0, {str(REPO)!r});"
+    "from pricing.surface import blas_thread_pin;print(blas_thread_pin())"
+)
+
+
+def test_cronjob_pin_is_what_gets_stamped_on_rows() -> None:
+    """Every vol_surface row stamps ``blas_threads``; the stamp is fiction if
+    the value recorded is not the one the scheduled job runs under."""
+    env = {k: v for k, v in os.environ.items() if k not in THREAD_VARS}
+    out = subprocess.run(
+        ["bash", str(CRONJOB), "pintest", sys.executable, "-c", PIN_STAMP_PROBE],
+        capture_output=True, text=True, env=env, timeout=60, check=True,
+    ).stdout.strip()
+    assert out == "1"
+
+
+def test_a_deliberate_override_is_what_gets_stamped() -> None:
+    """cronjob.sh leaves an operator's override in place; the stamp records
+    the count the fit actually ran under, not the scheduled default."""
+    env = {k: v for k, v in os.environ.items() if k not in THREAD_VARS}
+    env["OPENBLAS_NUM_THREADS"] = "4"
+    out = subprocess.run(
+        ["bash", str(CRONJOB), "pintest", sys.executable, "-c", PIN_STAMP_PROBE],
+        capture_output=True, text=True, env=env, timeout=60, check=True,
+    ).stdout.strip()
+    assert out == "4"

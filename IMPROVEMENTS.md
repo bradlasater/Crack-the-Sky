@@ -21,12 +21,17 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   so the systemd timers and the crontab fallback share one definition) and in
   `scripts/build_surface.py`, which is run directly and must set it above the
   `pricing` import because OpenBLAS reads its thread count once, at load.
-  What remains: every `vol_surface` partition landed before this was built
-  unpinned, so the archive is only reproducible from the rebuild onward —
-  the staging rebuild in `docs/plans/trading-day-calendar.md` decision 5 is
-  what regenerates it under a known thread count. Recording the pinned value
-  with the rows would also be needed for reproducibility to survive a hardware
-  change; not done.
+  **Recorded with the rows**: `vol_surface` gained a `blas_threads` column
+  stamped with the pinned count on every row (null when a run was unpinned;
+  a deliberate operator override is stamped as-is), so reproducibility no
+  longer depends on remembering what the box was. `atm_term_structure` is not
+  stamped — no BLAS underneath, so there is no count to record. What remains:
+  the schema is fail-loud on a missing column, so the stamp only exists on
+  partitions written by the new code — the staging rebuild in
+  `docs/plans/trading-day-calendar.md` decision 5 ("Second pass") regenerates
+  the archive under the known thread count and the swap makes it readable
+  again. Until then the archive is reproducible only from the day the pin
+  landed, and production `vol_surface` raises under the new code.
 - `pricing/from_market.py:200` — `expiry_instant` and `year_fraction` accept a
   session calendar that moves a PM-settled expiry to the 13:00 ET early close,
   but **no production caller passes one yet**, so the default is still the
@@ -77,10 +82,11 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   unit now also gets `OnFailure=massive-alert@massive-prune`. Re-run
   `scripts/setup_healthchecks.py` on the box so the check is created with
   the monthly schedule; an auto-created check would default to daily.
-- `pricing/drift_check.py:811` — `date.fromisoformat(args.date)` runs before
-  the logger and `/start` ping, so a malformed `--date` dies with a bare
-  traceback and no Healthchecks signal. Decide: argparse `type=` validation
-  (exit 2 to cron mail) or logging against a fallback date.
+- `pricing/drift_check.py:811` — **fixed**: `--date` now validates through an
+  argparse `type=` converter, so a malformed date exits 2 with a usage error
+  on stderr (cron mail) before the logger or any ping exists. Chosen over
+  logging against a fallback date: the run never starts, so there is nothing
+  to log against, and exit 2 is distinct from the canary's exit-1 FAIL path.
 - `ingest/jobs/snapshot_sweep.py` — **fixed**: chains now fail independently.
   One bad chain is recorded and the rest still land; the run fails only when
   every chain does. Previously a single failure discarded the chains that had

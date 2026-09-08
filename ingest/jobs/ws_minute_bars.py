@@ -42,6 +42,7 @@ import gzip
 import json
 import queue
 import random
+import re
 import sys
 import threading
 import time
@@ -56,11 +57,17 @@ from ingest.common import market_gate
 from ingest.common.cli import build_parser, healthcheck_url, ping
 from ingest.common.config import Settings
 from ingest.common.logging_utils import JsonlLogger, get_run_logger
-from ingest.jobs import latest_contracts, latest_spy_price, parse_underlyings
+from ingest.jobs import (
+    OPTION_ROOTS,
+    latest_contracts,
+    latest_spy_price,
+    parse_underlyings,
+    underlying_root,
+)
 
 JOB = "ws_minute_bars"
 DATASET = "option_minute_bars_ws"
-DEFAULT_UNDERLYINGS = ["SPY", "SPX"]  # SPXW contracts share the O:SPX prefix
+DEFAULT_UNDERLYINGS = ["SPY", "SPX"]  # SPXW is SPX's weekly root, admitted with it
 SUBSCRIBE_CHUNK_SIZE = 3000  # tickers per subscribe message (<< 1MB limit)
 WINDOW_START = dtime(9, 25)  # ET
 HEARTBEAT_TIMEOUT_S = 90
@@ -92,12 +99,26 @@ AM_FIELDS = ("sym", "v", "av", "op", "vw", "o", "c", "h", "l", "a", "z", "s", "e
 # Contract universe / subscription batching
 # ---------------------------------------------------------------------------
 
-def _ticker_prefix(underlying: str) -> str:
-    """OPRA ticker prefix for an underlying (``I:SPX``/``SPX`` -> ``O:SPX``)."""
-    u = underlying.strip().upper()
-    if u.startswith("I:"):
-        u = u[2:]
-    return f"O:{u}"
+def _universe_re(underlyings: list[str]) -> re.Pattern[str]:
+    """Anchored OPRA match for the underlyings' contract roots.
+
+    Same shape as ``keep_ticker``'s regex: the root is delimited by the six
+    expiry digits, so ``O:SPX`` matching cannot bleed into ``O:SPXL``/``O:SPXU``
+    (Direxion 3x ETFs) the way a bare ``startswith`` would. Weekly roots ride
+    with their underlying -- ``SPX`` also admits ``SPXW``. Roots are
+    regex-escaped: they come from the ``--underlying`` CLI, and a stray
+    metacharacter must widen nothing.
+    """
+    roots: list[str] = []
+    for u in underlyings:
+        root = underlying_root(u)
+        for r in (root, root + "W"):
+            if r in OPTION_ROOTS and r not in roots:
+                roots.append(r)
+    if not roots:
+        roots = [underlying_root(u) for u in underlyings]
+    alternation = "|".join(re.escape(r) for r in sorted(roots, key=len, reverse=True))
+    return re.compile(r"^O:(" + alternation + r")\d{6}[CP]\d+$")
 
 
 def contract_universe(
@@ -115,12 +136,12 @@ def contract_universe(
             "no clean 'contracts' partition found at or before "
             f"{run_date}; run contracts_sync first"
         )
-    prefixes = tuple(_ticker_prefix(u) for u in underlyings)
+    pattern = _universe_re(underlyings)
     seen: set[str] = set()
     out: list[dict[str, Any]] = []
     for rec in contracts:
         ticker = rec.get("ticker")
-        if not ticker or not str(ticker).startswith(prefixes) or ticker in seen:
+        if not ticker or not pattern.match(str(ticker)) or ticker in seen:
             continue
         seen.add(ticker)
         out.append(rec)
@@ -643,14 +664,19 @@ def main(argv: list[str] | None = None) -> int:
         # success: the subscription ACKed and nothing arrived. So is any
         # record lost to a writer error: with later records landing, a green
         # ping would make a partially lost capture indistinguishable from a
-        # clean run.
+        # clean run. Healthchecks is the alert channel, and the exit code
+        # agrees with it: both failure paths ping /fail AND return nonzero.
+        # Legitimate zero-row situations stay green above: a holiday exits 0
+        # from the market gate, and an already-closed window returns 0 before
+        # any capture runs.
         if writer.rows_written == 0:
             settle(False, f"captured 0 rows in {duration_s}s; stats={stats}")
-        elif writer.errors:
+            return 1
+        if writer.errors:
             settle(False, f"lost {writer.errors} record(s) to writer errors; "
                           f"rows={writer.rows_written} in {duration_s}s; stats={stats}")
-        else:
-            settle(True, f"ok: rows={writer.rows_written} in {duration_s}s; stats={stats}")
+            return 1
+        settle(True, f"ok: rows={writer.rows_written} in {duration_s}s; stats={stats}")
         return 0
     except _FatalAuth as exc:
         logger.log("job_error", job=JOB, error=str(exc))

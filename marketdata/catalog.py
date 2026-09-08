@@ -20,7 +20,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-from ingest.schemas import SCHEMAS
+from ingest.schemas import APPEND_ONLY_DATASETS, SCHEMAS
 
 # Datasets written more than once a day: whole-partition reads double-count.
 ASOF_DATASETS: frozenset[str] = frozenset(
@@ -255,7 +255,15 @@ def read_asof(
     ``asof_ns=None`` means the latest file per underlying in that partition.
     Absence (no file at or before the instant) is an error, as is any file
     whose name carries no epoch-ms stamp.
+
+    Append-only datasets (``decision_log``) are refused: last-file-wins would
+    hide earlier events. Read the whole partition instead.
     """
+    if dataset in APPEND_ONLY_DATASETS:
+        raise CatalogError(
+            f"{dataset} is append-only event history; use read_partition "
+            "(as-of last-file-wins would hide earlier events)"
+        )
     root = _data_root(data_root)
     part = _partition_dir(root, dataset, dt)
     by_underlying, unstamped = files_by_underlying(dataset, dt, root, asof_ns)

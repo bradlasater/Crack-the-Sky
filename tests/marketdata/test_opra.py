@@ -10,6 +10,7 @@ from marketdata.opra import (
     ALLOWED_ROOTS,
     MULTIPLIER,
     OPRAParseError,
+    expiry_year,
     parse_opra,
     ticker_root,
 )
@@ -97,3 +98,31 @@ def test_quotes_from_snapshot_rows_accepts_a_pyarrow_table() -> None:
     from_table = quotes_from_snapshot_rows(table)
     assert len(from_rows) == len(from_table) == 1
     assert from_rows[0].contract.ticker == from_table[0].contract.ticker
+
+
+# ---------------------------------------------------------------------------
+# The two-digit year: one decoder, no 19xx pivot
+# ---------------------------------------------------------------------------
+
+def test_expiry_year_is_always_20xx() -> None:
+    """The feed holds no 20th-century contracts, so there is no pivot."""
+    assert expiry_year(26) == 2026
+    assert expiry_year(80) == 2080
+    assert expiry_year(99) == 2099
+    assert expiry_year(0) == 2000
+
+
+def test_parse_opra_decodes_yy_above_79_as_20xx() -> None:
+    """No live listing expires in 2080, so this is a corrupt ticker -- but it
+    must decode the same way on every path, not 1980 here and 2080 there."""
+    assert parse_opra("O:SPY850118C00100000").expiry == date(2085, 1, 18)
+
+
+def test_both_parsers_agree_on_the_year() -> None:
+    """The divergence this guards against: ingest's parser said 20xx while
+    marketdata's said 19xx for the same suffix."""
+    from ingest.jobs import parse_option_ticker
+
+    ticker = "O:SPXW850118C05000000"
+    assert parse_option_ticker(ticker)["expiration_date"] == \
+        parse_opra(ticker).expiry.isoformat() == "2085-01-18"

@@ -111,9 +111,14 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   scans the whole archive to compute an empty set; files whose name carries
   no underlying label are still read, since their contents are not in the
   filename.
-- `ingest/jobs/trades_watchlist.py:161` — `trades_cursor.json` grows
-  unboundedly; tickers that rotate off the watchlist keep cursors forever.
-  Prune to the current watchlist at save time.
+- `ingest/jobs/trades_watchlist.py:161` — **fixed**: cursors are pruned to the
+  current watchlist at save time, in the same block that already pruned the
+  backoff state (and with the same `--limit` exemption, since a truncated
+  `tickers` list would wipe state for contracts the smoke test never looked
+  at). A pruned contract that rotates back on re-polls its full history --
+  duplicates, never gaps, because a cursor only moves forward and
+  flat-file-covered days are dropped at write time. The `cursors_saved` event
+  now logs the pruned count.
 - `scripts/backfill.sh` — date payloads can run independently, but each process
   currently performs an unlocked read-modify-write of the shared
   `_meta/flatfile_manifest.json`; make manifest updates concurrency-safe first,

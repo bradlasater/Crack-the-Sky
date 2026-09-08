@@ -102,13 +102,15 @@ conservative audit pass. Grouped by area, roughly highest-value first.
 - `ingest/jobs/trades_watchlist.py:161` — `trades_cursor.json` grows
   unboundedly; tickers that rotate off the watchlist keep cursors forever.
   Prune to the current watchlist at save time.
-- `scripts/backfill.sh` — date payloads can run independently, but each process
-  currently performs an unlocked read-modify-write of the shared
-  `_meta/flatfile_manifest.json`; make manifest updates concurrency-safe first,
-  then use a 4–8-way parallel backfill (e.g. `xargs -P`, staying inside the
-  S3/rate budget) to reduce multi-year backfill wall time.
-  day-to-day ingest is vendor-rate-bound (40 rps shared bucket), not
-  compute-bound — parallelism only pays for backfills, not the live jobs.
+- `scripts/backfill.sh` — **fixed**: `_update_manifest` in
+  `ingest/jobs/flatfile_pull.py` now serializes its read-modify-write with an
+  `flock` on `_meta/flatfile_manifest.lock` and writes via temp-file rename
+  (the SharedTokenBucket pattern), so concurrent flatfile_pull processes
+  cannot corrupt or lose manifest entries. backfill.sh then runs dates
+  `BACKFILL_WORKERS`-wide in parallel (`xargs -P`, default 4, 1 = the old
+  serial loop); a low-disk worker exits 255, which stops xargs immediately.
+  Day-to-day ingest stays serial: it is vendor-rate-bound (40 rps shared
+  bucket), not compute-bound — parallelism only pays for backfills.
 
 ## Robustness / consistency
 
@@ -130,10 +132,11 @@ conservative audit pass. Grouped by area, roughly highest-value first.
 - `ingest/jobs/history_audit.py:280` — hand-rolled argv parser doesn't accept
   `--start=X`/`--end=X` equals-forms (dies loudly, not silently). Extend the
   loop or register the flags via the shared parser.
-- `scripts/backfill.sh:60` vs `scripts/prune_raw.sh:98` — inconsistent
-  "is this date done" semantics: backfill skips dates with ≥3 manifest entries
-  regardless of `rows_kept`, so a 0-rows-kept date is skipped forever. Build a
-  rows_kept-aware index in backfill like prune does.
+- `scripts/backfill.sh:60` vs `scripts/prune_raw.sh:98` — **fixed**: backfill
+  now builds the same rows_kept-aware manifest index prune does
+  (`dataset|date`, kept only when `rows_kept > 0`) and calls a date done only
+  when all three datasets have rows kept, so a 0-rows-kept date is re-pulled
+  instead of skipped forever. Pinned by tests/test_backfill.py.
 - `tests/conftest.py:93` — the offline guard patches `socket.connect` but not
   `connect_ex`, and would falsely reject AF_UNIX string addresses. Block
   `connect_ex` too and exempt non-IP addresses.

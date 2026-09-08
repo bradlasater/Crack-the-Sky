@@ -1,16 +1,26 @@
 #!/usr/bin/env bash
 # backfill.sh START_DATE END_DATE — loop flatfile_pull over a date range.
 #
-# Resume-safe: dates already recorded in _meta/flatfile_manifest.json are
-# skipped, so this can be killed and restarted freely. Weekends/holidays are
-# skipped by the job's market gate (quiet exit 0). Dates outside the plan's
-# history window log flatfile_not_entitled and are skipped, not fatal.
+# Resume-safe: a date is "done" once the manifest records all three datasets
+# for it with rows_kept > 0 (the same rows_kept-aware index prune_raw.sh
+# builds), so this can be killed and restarted freely. A date whose entries
+# all parsed to zero rows is NOT done and is re-pulled, not skipped forever.
+# Weekends/holidays are skipped by the job's market gate (quiet exit 0).
+# Dates outside the plan's history window log flatfile_not_entitled and are
+# skipped, not fatal.
 #
 # Runs NEWEST-FIRST by default. If the run is interrupted you keep the recent
 # history, which is what a 5-45 day horizon model actually needs.
 #
+# Dates are independent, so the pull runs BACKFILL_WORKERS-wide in parallel
+# (default 4; 1 restores the old serial loop). Manifest writes are
+# flock-serialized inside flatfile_pull, so concurrent workers cannot corrupt
+# _meta/flatfile_manifest.json. Parallelism belongs here, not in the live
+# jobs: day-to-day ingest is vendor-rate-bound (40 rps shared bucket), only
+# backfills are compute/wait-bound.
+#
 #   bash scripts/backfill.sh 2022-08-15 2026-08-27
-#   MIN_FREE_GB=150 BACKFILL_ORDER=oldest bash scripts/backfill.sh ...
+#   MIN_FREE_GB=150 BACKFILL_ORDER=oldest BACKFILL_WORKERS=8 bash scripts/backfill.sh ...
 #
 # Do not run this in a terminal you will close:
 #   systemd-run --user --unit=massive-backfill \
@@ -33,12 +43,19 @@ for v in "$START" "$END"; do
         echo "[backfill] invalid date: $v (want YYYY-MM-DD)" >&2; exit 2; }
 done
 
-PY="venv/bin/python"
+PY="${BACKFILL_PY:-venv/bin/python}"
 SLEEP_BETWEEN_DAYS="${BACKFILL_SLEEP_S:-2}"
 MIN_FREE_GB="${MIN_FREE_GB:-100}"
 ORDER="${BACKFILL_ORDER:-newest}"
+WORKERS="${BACKFILL_WORKERS:-4}"
+case "$WORKERS" in
+    ''|*[!0-9]*)
+        echo "[backfill] BACKFILL_WORKERS must be a positive integer (got '$WORKERS')" >&2
+        exit 2
+        ;;
+esac
 
-DATA_ROOT="$(grep -E '^DATA_ROOT=' .env 2>/dev/null | cut -d= -f2 || true)"
+DATA_ROOT="${DATA_ROOT:-$(grep -E '^DATA_ROOT=' .env 2>/dev/null | cut -d= -f2 || true)}"
 DATA_ROOT="${DATA_ROOT:-/data/massive}"
 MANIFEST="$DATA_ROOT/_meta/flatfile_manifest.json"
 
@@ -64,10 +81,35 @@ fi
 # the clear low-space message instead of dying on an empty string comparison.
 free_gb() { df -BG --output=avail "$DATA_ROOT" 2>/dev/null | tail -1 | tr -dc '0-9' || true; }
 
+# The manifest is read ONCE into a rows_kept-aware index, exactly as
+# prune_raw.sh builds it: dataset|date, kept only when rows_kept > 0. The old
+# check counted entries regardless of rows_kept, so a date whose three files
+# parsed to zero SPY/SPX rows was treated as done and skipped forever.
+MANIFEST_INDEX="$(mktemp)"
+trap 'rm -f "$MANIFEST_INDEX"' EXIT
+if [ -f "$MANIFEST" ]; then
+    python3 - "$MANIFEST" > "$MANIFEST_INDEX" <<'PY'
+import json, sys
+try:
+    rows = json.load(open(sys.argv[1]))
+except Exception:
+    rows = []
+seen = set()
+for e in rows:
+    if not isinstance(e, dict):
+        continue
+    if (e.get("rows_kept") or 0) > 0 and e.get("dataset") and e.get("date"):
+        seen.add(f"{e['dataset']}|{e['date']}")
+print("\n".join(sorted(seen)))
+PY
+fi
+
 manifest_has_date() {
-    # True when the manifest already has entries for all 3 datasets on $1.
-    [ -f "$MANIFEST" ] || return 1
-    [ "$(grep -c "\"date\": \"$1\"" "$MANIFEST" || true)" -ge 3 ]
+    # True when the index has all 3 datasets for $1 with rows actually kept.
+    [ -s "$MANIFEST_INDEX" ] || return 1
+    for ds in trades_v1 minute_aggs_v1 day_aggs_v1; do
+        grep -qxF "$ds|$1" "$MANIFEST_INDEX" || return 1
+    done
 }
 
 # Build the date list in the requested order.
@@ -81,25 +123,54 @@ if [ "$ORDER" = "newest" ]; then
     mapfile -t dates < <(printf '%s\n' "${dates[@]}" | sort -r)
 fi
 
+# Filter out dates already done; the manifest is only appended to during the
+# run, so a date skipped here cannot become unfinished mid-run.
+todo=()
+for d in ${dates[@]+"${dates[@]}"}; do
+    manifest_has_date "$d" || todo+=("$d")
+done
+
 total=${#dates[@]}
 avail="$(free_gb)"; avail="${avail:-0}"
-echo "[backfill] $total dates, $ORDER-first, min free ${MIN_FREE_GB}GB, ${avail}GB available"
+echo "[backfill] $total dates, $ORDER-first, $((total - ${#todo[@]})) already done, ${#todo[@]} to pull, workers $WORKERS, min free ${MIN_FREE_GB}GB, ${avail}GB available"
 
-i=0
-for d in "${dates[@]}"; do
-    i=$((i + 1))
+if [ "${#todo[@]}" -eq 0 ]; then
+    echo "[backfill] done ($START .. $END, $ORDER-first)"
+    exit 0
+fi
+
+run_one() {
+    # Pull one date. A per-date failure is logged and swallowed so one bad
+    # date never sinks the batch; only the low-disk abort propagates (255,
+    # which also stops xargs immediately).
+    d="$1"
     avail="$(free_gb)"; avail="${avail:-0}"
     if [ "$avail" -lt "$MIN_FREE_GB" ]; then
         echo "[backfill] ABORT: only ${avail}GB free on $DATA_ROOT (min ${MIN_FREE_GB}GB)" >&2
         echo "[backfill] resume with the same command once space is reclaimed" >&2
-        exit 1
+        return 255
     fi
-    if manifest_has_date "$d"; then
-        continue
-    fi
-    echo "[backfill] ($i/$total) $d  [${avail}GB free]"
+    echo "[backfill] $d  [${avail}GB free]"
     "$PY" -m ingest.jobs.flatfile_pull --date "$d" || \
         echo "[backfill] $d flatfile_pull exited $? — continuing"
     sleep "$SLEEP_BETWEEN_DAYS"
-done
+}
+
+if [ "$WORKERS" -le 1 ]; then
+    i=0
+    for d in ${todo[@]+"${todo[@]}"}; do
+        i=$((i + 1))
+        echo "[backfill] ($i/${#todo[@]})"
+        run_one "$d" || exit 1
+    done
+else
+    export -f run_one free_gb
+    export DATA_ROOT MIN_FREE_GB PY SLEEP_BETWEEN_DAYS
+    rc=0
+    printf '%s\n' "${todo[@]}" | xargs -r -P "$WORKERS" -n 1 bash -c 'run_one "$1"' _ || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "[backfill] aborted (worker exit $rc); resume with the same command" >&2
+        exit 1
+    fi
+fi
 echo "[backfill] done ($START .. $END, $ORDER-first)"

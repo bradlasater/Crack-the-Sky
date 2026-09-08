@@ -102,9 +102,15 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   call (each higher-order greek re-bumps from scratch). A shared-bump refactor
   could cut the drift canary's dominant cost roughly in half; too invasive for
   the audit.
-- `ingest/jobs/contracts_sync.py:55` — first-ever run for a new underlying
-  reads every historical partition to compute an empty baseline. Short-circuit
-  via `catalog.files_by_underlying` name parsing.
+- `ingest/jobs/contracts_sync.py:55` — **fixed**: `_previous_tickers` now
+  answers "not here" from the filenames before opening any parquet. Clean
+  files are named `{job}-{underlying}-{epoch_ms}.parquet`, so a partition
+  with no file labelled with the underlying cannot hold a baseline for it
+  (via `_latest_files_by_underlying`, which wraps
+  `catalog.files_by_underlying`). A new underlying's first run no longer
+  scans the whole archive to compute an empty set; files whose name carries
+  no underlying label are still read, since their contents are not in the
+  filename.
 - `ingest/jobs/trades_watchlist.py:161` — `trades_cursor.json` grows
   unboundedly; tickers that rotate off the watchlist keep cursors forever.
   Prune to the current watchlist at save time.

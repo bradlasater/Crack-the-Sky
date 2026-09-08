@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -12,9 +12,11 @@ import pytest
 
 from ingest.common import landing
 from pricing import drift_check as drift_mod
+from pricing import surface as sf
 from pricing.bsm import price as bsm_price
 from pricing.bsm import raw_greeks
 from pricing.conventions import CALENDAR_DAYS_PER_YEAR
+from pricing.daycount import ACT_365
 from pricing.drift_check import (
     DEFAULT_THRESHOLDS,
     VENDOR_THETA_TO_YEAR,
@@ -39,6 +41,16 @@ from tests.pricing.test_from_market_chain import (
     _spxw_last,
     _spxw_snap,
     _write,
+)
+from tests.pricing.test_surface import (
+    FAR,
+    MID,
+    NEAR,
+    T_FAR,
+    T_MID,
+    T_NEAR,
+    _flat_rate,
+    _svi_bars,
 )
 
 LOOSE = Thresholds(min_compare=1, fail_frac=0.25, iv_median_abs=0.04, atm_pct=0.05)
@@ -695,3 +707,210 @@ def test_cli_max_trade_age_flag(tmp_path: Path) -> None:
     assert payload["status"] == "PASS"
     assert payload["max_trade_age_min"] == 30.0
     assert payload["counts"]["stale"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Off-ATM surface consumer
+# ---------------------------------------------------------------------------
+#
+# The canary reads the landed vol_surface SVI params back and round-trips a
+# fixed log-moneyness grid through the engine (price off the slice vol in the
+# forward measure, invert back with pricing.iv.implied_vol). Only a missing
+# partition directory is a skip; data that exists but cannot be reproduced is
+# a FAIL. The checked session is the previous trading day: the scheduled
+# surface build lands session S's smile the next morning at 12:15, before the
+# 17:00 canary for S+1.
+
+SURFACE_PREV = date(2026, 8, 27)  # previous trading day before DT (Fri 2026-08-28)
+
+
+def _land_surface(tmp_path: Path, poison_a: float | None = None, d: date = DT) -> None:
+    """Fit the synthetic three-expiry smile and land it under tmp_path."""
+    from ingest.common.config import Settings
+
+    bars = (_svi_bars(NEAR, T_NEAR) + _svi_bars(MID, T_MID) + _svi_bars(FAR, T_FAR))
+    surfaces = sf.build_surfaces(bars, d, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)
+    rows = sf.rows_from_surfaces(surfaces)
+    if poison_a is not None:
+        rows = [dict(r, svi_a=poison_a) for r in rows]
+    settings = Settings(massive_api_key="k", data_root=tmp_path, log_root=tmp_path / "logs")
+    sf.write_rows(settings, d, rows)
+
+
+def test_canary_checks_the_previous_trading_days_surface(tmp_path: Path) -> None:
+    """The 12:15 surface build fits T-1, so the 17:00 canary must look at T-1."""
+    from ingest.common.market_gate import previous_trading_day
+
+    assert previous_trading_day(DT, tmp_path) == SURFACE_PREV
+    _null_vendor_warehouse(tmp_path)
+    _land_surface(tmp_path, d=SURFACE_PREV)
+    report = run_drift(
+        DT, r=R, data_root=tmp_path, asof_ns=ASOF_NS, roots=("SPXW",),
+        crr_steps=21, max_rows=50, uninvertible="skip", thresholds=LOOSE,
+    )
+    assert report.status == "PASS"
+    assert report.surface_check is not None
+    assert report.surface_check["date"] == SURFACE_PREV.isoformat()
+    assert report.surface_check["skipped"] is False
+    assert report.surface_check["points"] == 4
+    assert f"surface {SURFACE_PREV.isoformat()} max_|Δσ|" in drift_mod._render(report)
+
+
+def test_canary_date_own_surface_partition_is_not_read(tmp_path: Path) -> None:
+    """A partition for the canary date itself cannot exist yet on the schedule."""
+    _null_vendor_warehouse(tmp_path)
+    _land_surface(tmp_path, d=DT)
+    report = run_drift(
+        DT, r=R, data_root=tmp_path, asof_ns=ASOF_NS, roots=("SPXW",),
+        crr_steps=21, max_rows=50, uninvertible="skip", thresholds=LOOSE,
+    )
+    assert report.status == "PASS"
+    assert report.surface_check["skipped"] is True
+    assert report.surface_check["date"] == SURFACE_PREV.isoformat()
+
+
+def test_offatm_surface_round_trips_through_the_engine(tmp_path: Path) -> None:
+    _land_surface(tmp_path)
+    result = drift_mod.check_offatm_surface(DT, data_root=tmp_path)
+    assert result.skipped is False
+    assert result.failures == []
+    # The DTE targets pick the 28d and 112d slices; the ±0.10 grid points lie
+    # outside the fixture's quoted strikes, so each slice contributes ±0.05.
+    assert result.roots == ["SPXW"]
+    assert result.slices == 2
+    assert result.points == 4
+    assert result.max_abs_vol is not None
+    assert result.max_abs_vol < DEFAULT_THRESHOLDS.surface_vol_abs
+
+
+def test_offatm_surface_missing_partition_skips(tmp_path: Path) -> None:
+    result = drift_mod.check_offatm_surface(DT, data_root=tmp_path)
+    assert result.skipped is True
+    assert result.failures == []
+    assert result.points == 0
+
+
+def test_offatm_surface_empty_partition_dir_fails(tmp_path: Path) -> None:
+    """An existing-but-empty dt= directory is an interrupted write, not a skip."""
+    (tmp_path / "clean" / "vol_surface" / f"dt={DT.isoformat()}").mkdir(parents=True)
+    result = drift_mod.check_offatm_surface(DT, data_root=tmp_path)
+    assert result.skipped is False
+    assert any("no parquet" in f for f in result.failures)
+
+
+def test_offatm_surface_partition_without_surface_roots_fails(tmp_path: Path) -> None:
+    from ingest.common.config import Settings
+
+    settings = Settings(massive_api_key="k", data_root=tmp_path, log_root=tmp_path / "logs")
+    sf.write_rows(settings, DT, [
+        dict(r, underlying="SPY")
+        for r in sf.rows_from_surfaces(
+            sf.build_surfaces(_svi_bars(NEAR, T_NEAR), DT, roots=("SPXW",),
+                              rate_fn=_flat_rate, daycount=ACT_365))
+    ])
+    result = drift_mod.check_offatm_surface(DT, data_root=tmp_path)
+    assert result.skipped is False
+    assert any("no" in f and "rows" in f for f in result.failures)
+
+
+def test_offatm_surface_misplaced_partition_rows_fail(tmp_path: Path) -> None:
+    """Rows dated for another session under this dt= must not answer as T."""
+    from ingest.common.config import Settings
+
+    bars = _svi_bars(NEAR, T_NEAR)
+    surfaces = sf.build_surfaces(bars, DT, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)
+    settings = Settings(massive_api_key="k", data_root=tmp_path, log_root=tmp_path / "logs")
+    sf.write_rows(settings, DT, [dict(r, date="2020-01-02")
+                                 for r in sf.rows_from_surfaces(surfaces)])
+    result = drift_mod.check_offatm_surface(DT, data_root=tmp_path)
+    assert result.skipped is False
+    assert any("have date=" in f for f in result.failures)
+    assert result.points == 0
+
+
+def test_offatm_surface_malformed_rows_fail_without_raising(tmp_path: Path) -> None:
+    """A landed file missing a schema column is corrupt data, not a crash."""
+    import pyarrow.parquet as pq
+
+    bars = _svi_bars(NEAR, T_NEAR)
+    surfaces = sf.build_surfaces(bars, DT, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)
+    rows = [{k: v for k, v in r.items() if k != "svi_rho"}
+            for r in sf.rows_from_surfaces(surfaces)]
+    part = tmp_path / "clean" / "vol_surface" / f"dt={DT.isoformat()}"
+    part.mkdir(parents=True)
+    pq.write_table(pa.Table.from_pylist(rows), part / "part-0.parquet")
+    result = drift_mod.check_offatm_surface(DT, data_root=tmp_path)
+    assert result.skipped is False
+    assert any("KeyError" in f and "svi_rho" in f for f in result.failures)
+
+
+def test_offatm_surface_poisoned_params_fail_loud(tmp_path: Path) -> None:
+    """Negative total variance at the grid is landed data the engine cannot price."""
+    _land_surface(tmp_path, poison_a=-0.01)
+    result = drift_mod.check_offatm_surface(DT, data_root=tmp_path)
+    assert result.skipped is False
+    assert result.points == 0
+    assert result.failures
+    assert all("not evaluable" in f for f in result.failures)
+
+
+def test_offatm_surface_fail_trips_the_canary(tmp_path: Path) -> None:
+    _null_vendor_warehouse(tmp_path)
+    _land_surface(tmp_path, poison_a=-0.01, d=SURFACE_PREV)
+    rc = main([*_CLI, "--data-root", str(tmp_path)])
+    assert rc == 1
+    payload = json.loads(
+        landing.meta_path("drift_check.json", data_root=tmp_path).read_text(encoding="utf-8")
+    )
+    assert payload["status"] == "FAIL"
+    assert any(f.startswith("surface:") for f in payload["failures"])
+    assert payload["surface_check"]["date"] == SURFACE_PREV.isoformat()
+    assert payload["surface_check"]["failures"]
+
+
+def test_offatm_surface_skip_still_passes_and_logs(tmp_path: Path, monkeypatch) -> None:
+    """No surface build on the box: skip, not FAIL, and say so in the run log."""
+    _null_vendor_warehouse(tmp_path)
+    events: list[tuple[str, dict]] = []
+
+    class _Logger:
+        def log(self, event, **fields):
+            events.append((event, fields))
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(drift_mod, "get_run_logger", lambda *a, **k: _Logger())
+    rc = main([*_CLI, "--data-root", str(tmp_path)])
+    assert rc == 0
+    skip_events = [f for e, f in events if e == "surface_compare_skipped"]
+    assert skip_events and skip_events[0]["surface_date"] == SURFACE_PREV.isoformat(), events
+    payload = json.loads(
+        landing.meta_path("drift_check.json", data_root=tmp_path).read_text(encoding="utf-8")
+    )
+    assert payload["status"] == "PASS"
+    assert payload["surface_check"]["skipped"] is True
+
+
+def test_default_thresholds_pin_the_surface_band() -> None:
+    assert DEFAULT_THRESHOLDS.surface_vol_abs == 1e-4
+    assert drift_mod.SURFACE_K_GRID == (-0.10, -0.05, 0.05, 0.10)
+    assert drift_mod.SURFACE_TARGET_DTE == (30, 90)
+
+
+# ---------------------------------------------------------------------------
+# --date validation (monitoring gap: argparse exit 2, not a bare traceback)
+# ---------------------------------------------------------------------------
+
+def test_malformed_date_exits_2_before_any_run(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--date", "not-a-date", "--data-root", str(tmp_path)])
+    assert excinfo.value.code == 2
+    # No report stub, no half-run: argparse rejected it before the job started.
+    assert not landing.meta_path("drift_check.json", data_root=tmp_path).exists()
+
+
+def test_valid_date_still_parses(tmp_path: Path) -> None:
+    _null_vendor_warehouse(tmp_path)
+    rc = main([*_CLI, "--data-root", str(tmp_path)])
+    assert rc == 0

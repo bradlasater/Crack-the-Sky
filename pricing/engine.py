@@ -238,7 +238,9 @@ def _bump_greeks(
     # tests/pricing/test_bump_greeks_characterization.py pins that identity
     # by comparing this path against _use_cache=False in the same process;
     # the fixed golden constants there are only a tolerance-based sanity
-    # check, because exp/pow are not bit-stable across libm/NumPy builds.
+    # check on price and the first-order greeks, because exp/pow are not
+    # bit-stable across libm/NumPy builds (and the higher-order bump ratios
+    # amplify those last-bit differences past any fixed tolerance).
     cache: dict[tuple[float, ...], float] = {}
 
     def v(

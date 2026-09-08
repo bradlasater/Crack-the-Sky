@@ -54,9 +54,15 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   command runs, so a wrapped process that exits 99 is no longer misreported
   as `job_skipped` and swallowed to 0. Contention is flock's `-E 99` on
   that fd; a missing `flock` or an unusable lock file stays nonzero.
-- `marketdata/opra.py:106` vs `ingest/jobs/__init__.py:85` — two OPRA year-pivot
-  decoders disagree on `yy >= 80` (19xx vs 20xx). Unreachable today; hoist one
-  shared decoder before the universe widens.
+- `marketdata/opra.py:106` vs `ingest/jobs/__init__.py:85` — **fixed**: one
+  shared decoder, `expiry_year()` in `marketdata/opra.py`, used by both
+  `parse_opra` and `ingest.jobs.parse_option_ticker`. The convention chosen is
+  `2000 + yy` with no 19xx pivot: everything the codebase reads (vendor flat
+  files from 2020 on, the live-universe REST reference, four years of
+  `option_day_bars` history) holds only 21st-century contracts, and the
+  ingest-side parser already decoded that way, so the term-structure archive
+  built on its output stays valid. A `yy >= 80` suffix is a corrupt ticker,
+  and 2080+ is a less dangerous decode than an expiry decades in the past.
 - `ingest/jobs/ws_minute_bars.py:117` — `contract_universe` uses bare
   `startswith(("O:SPY", "O:SPX"))`, which would admit `O:SPXL`/`O:SPXU` roots.
   Impossible with today's contracts partition; reuse the anchored regex from

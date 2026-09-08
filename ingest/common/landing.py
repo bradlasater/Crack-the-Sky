@@ -24,6 +24,14 @@ from typing import Any
 from ingest import schemas
 
 
+def _schema(dataset: str) -> Any:
+    if dataset not in schemas.SCHEMAS:
+        raise ValueError(
+            f"unknown dataset {dataset!r}; known: {sorted(schemas.SCHEMAS)}"
+        )
+    return schemas.SCHEMAS[dataset]
+
+
 def _data_root(data_root: str | os.PathLike[str] | None = None) -> Path:
     if data_root is not None:
         return Path(data_root)
@@ -130,7 +138,7 @@ def write_clean(
         )
     import pyarrow.parquet as pq
 
-    schema = schemas.SCHEMAS[dataset]
+    schema = _schema(dataset)
     projected = [
         {field.name: rec.get(field.name) for field in schema} for rec in records
     ]
@@ -159,7 +167,7 @@ def write_clean_table(
     """
     import pyarrow.parquet as pq
 
-    schema = schemas.SCHEMAS[dataset]
+    schema = _schema(dataset)
     if not table.schema.equals(schema):
         raise ValueError(
             f"table schema does not match SCHEMAS[{dataset!r}]:\n"
@@ -232,7 +240,14 @@ def quarantine_prior(
     first and writing second would leave the partition with no data at all if
     the write failed -- during a long refilter, disk exhaustion does exactly
     that, and the loop would move on to the next date none the wiser.
+
+    Append-only datasets (``decision_log``) refuse this path: moving the prior
+    file would overwrite the decision history the warehouse is required to keep.
     """
+    if dataset in schemas.APPEND_ONLY_DATASETS:
+        raise ValueError(
+            f"{dataset} is append-only; quarantine_prior would overwrite history"
+        )
     day = dt.isoformat() if isinstance(dt, date) else str(dt)
     root = _data_root(data_root)
     sources = only if only is not None else clean_files(dataset, day, job, data_root)

@@ -196,3 +196,25 @@ def test_greeks_bit_exact(case: tuple, golden: dict[str, str]) -> None:
     for name in GREEK_NAMES:
         got = float.hex(float(getattr(cat, name)))
         assert got == golden[name], f"{name}: got {got}, golden {golden[name]}"
+
+
+def test_bumped_trees_are_reused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shared-bump cache caps tree evaluations at the 28 unique bumps.
+
+    Pre-refactor each higher-order greek re-bumped from scratch: 43
+    evaluations per greeks() call. If this count climbs again, the drift
+    canary's dominant cost climbs with it.
+    """
+    import pricing.engine as engine
+
+    calls = 0
+    real_crr_price = engine.crr_price
+
+    def counting(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_crr_price(*args, **kwargs)
+
+    monkeypatch.setattr(engine, "crr_price", counting)
+    AMER.greeks(592.31, 590.0, 32 / 365, 0.043, 0.185, "call", q=0.013, conventions=CONV)
+    assert calls == 28

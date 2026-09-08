@@ -28,6 +28,7 @@ raw-only paths keep working; :func:`ingest.common.landing.write_clean` and
 from __future__ import annotations
 
 import json
+from datetime import date
 from typing import Any
 
 try:  # import-guarded: schemas must be importable without pyarrow installed
@@ -339,6 +340,28 @@ def _build_schemas() -> dict[str, Any]:
         pa.field("n_train", pa.int64()),           # complete training rows in the fit
     ]
 
+    # One row per decision event (entry / exit / roll / no-trade). Append-only:
+    # never quarantine, never as-of (last file would hide earlier events).
+    # Nested inputs / signal values / extra version pins are JSON objects,
+    # same encoding as additional_underlyings. The strategy engine does not
+    # exist yet; the backtester is the first intended writer.
+    decision_log_fields = [
+        pa.field("decision_id", pa.string()),      # caller-supplied identity
+        pa.field("session_date", pa.string()),     # trading session YYYY-MM-DD
+        pa.field("asof_ns", pa.int64()),           # decision instant, ns epoch
+        pa.field("src", pa.string()),              # 'backtest' | 'paper' | 'live'
+        pa.field("job", pa.string()),              # writer name; also in filename
+        pa.field("code_version", pa.string()),     # ingest.__version__
+        pa.field("underlying", pa.string()),       # OPRA root; null until a book
+        pa.field("structure", pa.string()),        # e.g. put_credit_spread
+        pa.field("expiration_date", pa.string()),
+        pa.field("gate", pa.string()),             # entry | exit | roll | no-trade
+        pa.field("rationale", pa.string()),
+        pa.field("inputs", pa.string()),           # JSON object
+        pa.field("signals", pa.string()),          # JSON object (signal values)
+        pa.field("versions", pa.string()),         # JSON object of extra pins
+    ]
+
     contracts_schema = pa.schema(contract_fields)
     return {
         "forwards": pa.schema(forward_fields),
@@ -346,6 +369,7 @@ def _build_schemas() -> dict[str, Any]:
         "vol_surface": pa.schema(vol_surface_fields),
         "spy_spot": pa.schema(spy_spot_fields),
         "rv_forecast": pa.schema(rv_forecast_fields),
+        "decision_log": pa.schema(decision_log_fields),
         "contracts": contracts_schema,
         "contracts_expired": contracts_schema,  # same schema as contracts
         "option_snapshots": pa.schema(snapshot_fields),
@@ -365,10 +389,112 @@ def _build_schemas() -> dict[str, Any]:
 # Empty when pyarrow is unavailable; landing.write_clean fails loudly instead.
 SCHEMAS: dict[str, Any] = _build_schemas() if pa is not None else {}
 
+# Event history, not a snapshot of current state. ``landing.quarantine_prior``
+# and ``catalog.read_asof`` both refuse these: last-file-wins would overwrite
+# the decision record the warehouse is required to keep.
+APPEND_ONLY_DATASETS: frozenset[str] = frozenset({"decision_log"})
+
+# Closed vocabularies on decision_log.src / .gate. Unknown values fail loud
+# in :func:`decision_record` rather than landing a row the backtester cannot
+# query later.
+DECISION_SOURCES: frozenset[str] = frozenset({"backtest", "paper", "live"})
+DECISION_GATES: frozenset[str] = frozenset({"entry", "exit", "roll", "no-trade"})
+
 
 # ---------------------------------------------------------------------------
 # Mapping helpers (fixture -> schema record); shared by jobs and tests.
 # ---------------------------------------------------------------------------
+
+def _require_text(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"decision_log.{field} is required")
+    return value
+
+
+def _json_object(value: Any, field: str) -> str:
+    """Encode a JSON object the way ``additional_underlyings`` is stored."""
+    if not isinstance(value, dict):
+        raise ValueError(
+            f"decision_log.{field} must be a JSON object (dict), "
+            f"got {type(value).__name__}"
+        )
+    try:
+        return json.dumps(value)
+    except TypeError as exc:
+        raise ValueError(
+            f"decision_log.{field} is not JSON-serializable: {exc}"
+        ) from exc
+
+
+def decision_record(
+    *,
+    decision_id: str,
+    session_date: date | str,
+    asof_ns: int,
+    src: str,
+    job: str,
+    gate: str,
+    rationale: str,
+    inputs: dict[str, Any],
+    signals: dict[str, Any],
+    versions: dict[str, Any] | None = None,
+    code_version: str | None = None,
+    underlying: str | None = None,
+    structure: str | None = None,
+    expiration_date: str | None = None,
+) -> dict[str, Any]:
+    """Build one ``decision_log`` record covering every schema field.
+
+    Nested ``inputs`` / ``signals`` / ``versions`` are JSON-encoded objects.
+    ``code_version`` defaults to ``ingest.__version__``. Optional book fields
+    (``underlying``, ``structure``, ``expiration_date``) stay null until a
+    strategy exists to fill them.
+    """
+    if isinstance(session_date, date):
+        day = session_date.isoformat()
+    elif isinstance(session_date, str):
+        try:
+            date.fromisoformat(session_date)
+        except ValueError as exc:
+            raise ValueError(
+                f"decision_log.session_date must be YYYY-MM-DD, got {session_date!r}"
+            ) from exc
+        day = session_date
+    else:
+        raise ValueError("decision_log.session_date must be a date or YYYY-MM-DD string")
+    if isinstance(asof_ns, bool) or not isinstance(asof_ns, int):
+        raise ValueError("decision_log.asof_ns must be an int (ns epoch)")
+    src = _require_text(src, "src")
+    if src not in DECISION_SOURCES:
+        raise ValueError(
+            f"decision_log.src={src!r} is not one of {sorted(DECISION_SOURCES)}"
+        )
+    gate = _require_text(gate, "gate")
+    if gate not in DECISION_GATES:
+        raise ValueError(
+            f"decision_log.gate={gate!r} is not one of {sorted(DECISION_GATES)}"
+        )
+    if code_version is None:
+        from ingest import __version__ as ingest_version
+
+        code_version = ingest_version
+    return {
+        "decision_id": _require_text(decision_id, "decision_id"),
+        "session_date": day,
+        "asof_ns": asof_ns,
+        "src": src,
+        "job": _require_text(job, "job"),
+        "code_version": _require_text(code_version, "code_version"),
+        "underlying": underlying,
+        "structure": structure,
+        "expiration_date": expiration_date,
+        "gate": gate,
+        "rationale": _require_text(rationale, "rationale"),
+        "inputs": _json_object(inputs, "inputs"),
+        "signals": _json_object(signals, "signals"),
+        "versions": _json_object({} if versions is None else versions, "versions"),
+    }
+
 
 def flatten_snapshot(result: dict[str, Any]) -> dict[str, Any]:
     """Flatten one ``/v3/snapshot/options`` result into an option_snapshots record.
@@ -443,6 +569,10 @@ def contract_record(result: dict[str, Any]) -> dict[str, Any]:
 
 __all__ = [
     "SCHEMAS",
+    "APPEND_ONLY_DATASETS",
+    "DECISION_SOURCES",
+    "DECISION_GATES",
+    "decision_record",
     "flatten_snapshot",
     "contract_record",
     "pa",

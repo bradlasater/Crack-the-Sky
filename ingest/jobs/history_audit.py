@@ -270,17 +270,24 @@ def main(argv: list[str] | None = None) -> int:
     rest: list[str] = []
     i = 0
     while i < len(argv):
-        if argv[i] == "--start" and i + 1 < len(argv):
+        a = argv[i]
+        if a == "--start" and i + 1 < len(argv):
             start = argv[i + 1]
             i += 2
-        elif argv[i] == "--end" and i + 1 < len(argv):
+        elif a.startswith("--start="):
+            start = a.split("=", 1)[1]
+            i += 1
+        elif a == "--end" and i + 1 < len(argv):
             end = argv[i + 1]
             i += 2
-        elif argv[i] == "--offline":
+        elif a.startswith("--end="):
+            end = a.split("=", 1)[1]
+            i += 1
+        elif a == "--offline":
             offline = True
             i += 1
         else:
-            rest.append(argv[i])
+            rest.append(a)
             i += 1
 
     # run_job gates on the run date, which for this job is incidental -- the

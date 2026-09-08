@@ -71,6 +71,19 @@ REQUIRED_NONNULL: dict[str, tuple[str, ...]] = {
         "vol_ann_p90",
         "n_train",
     ),
+    "decision_log": (
+        "decision_id",
+        "session_date",
+        "asof_ns",
+        "src",
+        "job",
+        "code_version",
+        "gate",
+        "rationale",
+        "inputs",
+        "signals",
+        "versions",
+    ),
 }
 
 

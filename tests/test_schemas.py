@@ -34,6 +34,7 @@ DATASETS = [
     "vol_surface",
     "spy_spot",
     "rv_forecast",
+    "decision_log",
     "dividends",
     "splits",
 ]
@@ -259,6 +260,29 @@ def test_rv_forecast_schema_roundtrip() -> None:
     table = check_records("rv_forecast", records)
     assert table["horizon"].to_pylist() == [21]
     assert table["vol_ann_p10"].to_pylist()[0] < table["vol_ann"].to_pylist()[0]
+
+
+def test_decision_log_schema_roundtrip() -> None:
+    rec = schemas.decision_record(
+        decision_id="bt-1",
+        session_date="2026-09-02",
+        asof_ns=1_757_000_000_000_000_000,
+        src="backtest",
+        job="backtester",
+        gate="no-trade",
+        rationale="schema pin",
+        inputs={"spot": 765.16},
+        signals={"vrp": 0.01},
+        versions={"har_rv": "unbuilt"},
+    )
+    table = check_records("decision_log", [rec])
+    row = {k: v[0] for k, v in table.to_pydict().items()}
+    assert row["decision_id"] == "bt-1"
+    assert row["gate"] == "no-trade"
+    assert json.loads(row["inputs"]) == {"spot": 765.16}
+    assert json.loads(row["signals"]) == {"vrp": 0.01}
+    assert json.loads(row["versions"]) == {"har_rv": "unbuilt"}
+    assert {"decision_log"} == schemas.APPEND_ONLY_DATASETS
 
 
 def test_src_column_on_bars_and_trades() -> None:

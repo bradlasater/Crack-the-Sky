@@ -4,13 +4,41 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Crack the Sky — 404, page not found</title>
+  <script>
+    // A server-level 404 is served at the *requested* URL, so for a deep
+    // miss (/foo/bar/baz) the relative paths below (site.css, assets/,
+    // index.html) resolve against the missing directory and 404 too.
+    // When that is how we got here — any http(s) URL that is not this
+    // page's own — anchor everything at the site root, which under GitHub
+    // Pages conventions is /<repo>/ (Pages is not enabled yet; the user
+    // site redirects to the bradlasater.com custom domain). Opened
+    // directly — file:// docs/404.html or the real /404.html — the
+    // relative paths already work and no base is inserted. The exemption
+    // names the canonical 404 URLs exactly: a deep miss that happens to
+    // end in /404.html (e.g. /Crack-the-Sky/missing/404.html) is still a
+    // fallback served at the requested path and needs the base.
+    if (location.protocol.startsWith("http") && !/^\/(Crack-the-Sky\/)?404\.html$/.test(location.pathname)) {
+      const base = document.createElement("base");
+      base.href = "/Crack-the-Sky/";
+      document.head.appendChild(base);
+    }
+  </script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;family=Newsreader:opsz,wght@6..72,500;6..72,600&amp;display=swap" rel="stylesheet">
   <link rel="stylesheet" href="site.css">
 </head>
 <body id="top">
-  <a class="skip" href="#main">Skip to content</a>
+  <!-- The static href is the no-JS fallback (no <base> is inserted on the
+       canonical 404, so it stays on this document). With JS, the handler
+       below repoints it at the current location's own #main fragment:
+       "404.html#main" would resolve against the inserted <base> on a deep
+       404 and navigate away, losing the requested URL. -->
+  <a class="skip" href="404.html#main">Skip to content</a>
+  <script>
+    document.querySelector("a.skip").href =
+      location.pathname + location.search + "#main";
+  </script>
   <main class="errpage" id="main">
     <div class="err-card">
       <div class="kicker">Crack the Sky · error 404</div>

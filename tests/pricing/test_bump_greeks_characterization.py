@@ -1,0 +1,292 @@
+"""Characterization tests for AmericanCRR.greeks().
+
+The bump-and-revalue suite in ``pricing.engine._bump_greeks`` feeds the drift
+canary, so the shared-bump performance refactor was only allowed to land if
+every output float stayed identical. Two pins:
+
+* ``test_cached_matches_uncached_bit_for_bit`` — the characterization
+  proper. The cached path must produce bit-identical output to the same
+  computation with the cache disabled (``_use_cache=False``), in the same
+  process. crr_price is deterministic, so exact equality is the right bar
+  and holds on any CPU/OS/NumPy build.
+* ``test_greeks_golden_values`` — a tolerance-based sanity check against
+  fixed values captured from the pre-refactor implementation on 2026-09-07
+  (43 tree evaluations per greeks() call). Only the price and first-order
+  greeks are pinned (rel=1e-8): the higher-order bump ratios divide
+  last-bit exp/pow differences by h²/h³, so their fixed constants are not
+  portable across libm/NumPy builds at any meaningful tolerance. See
+  STABLE_GOLDEN_NAMES below.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from pricing.conventions import GreeksConventions
+from pricing.engine import AmericanCRR
+
+CONV = GreeksConventions(
+    vega_unit="per_1.00",
+    theta_unit="per_year",
+    delta_kind="spot",
+    gamma_kind="spot",
+)
+AMER = AmericanCRR(n_steps=401)
+
+# (S, K, T, r, sigma, call_put, q) — SPY-flavoured representative contracts,
+# plus a q=0 ATM put (early-exercise premium) and a deep-OTM zero-price put
+# (elasticity's copysign(inf) branch).
+CASES = [
+    (592.31, 590.0, 32 / 365, 0.043, 0.185, "call", 0.013),  # ATM call
+    (592.31, 590.0, 32 / 365, 0.043, 0.185, "put", 0.013),  # ATM put
+    (592.31, 500.0, 7 / 365, 0.043, 0.22, "put", 0.013),  # short OTM put
+    (592.31, 650.0, 180 / 365, 0.043, 0.19, "call", 0.013),  # long OTM call
+    (592.31, 550.0, 1.0, 0.043, 0.20, "call", 0.013),  # 1y ITM call
+    (100.0, 100.0, 0.5, 0.05, 0.20, "put", 0.0),  # q=0 ATM put
+    (592.31, 300.0, 3 / 365, 0.043, 0.30, "put", 0.013),  # zero-price branch
+]
+
+GOLDEN: list[dict[str, str]] = [
+    {
+        "price": "0x1.dd0882aa61b94p+3",
+        "delta": "0x1.234af8cae8829p-1",
+        "dual_delta": "-0x1.177f31898129fp-1",
+        "vega": "0x1.140cb75d43ab6p+6",
+        "theta": "-0x1.4855bca5b1e27p+6",
+        "rho": "0x1.ba6eb332a5387p+4",
+        "rho_dividend": "-0x1.cf57ed8711f37p+4",
+        "gamma": "-0x1.761c924163ca0p-37",
+        "dual_gamma": "-0x1.1f4615ea60edap-41",
+        "vanna": "-0x1.66a42c18b4544p-5",
+        "volga": "0x1.9102eceba2ad3p+1",
+        "charm": "-0x1.4aae5736651b2p-3",
+        "veta": "-0x1.86761af8e3b74p+8",
+        "vera": "-0x1.0330930862045p+4",
+        "speed": "-0x1.2cc4d1deb013cp-38",
+        "zomma": "-0x1.172e00885bab3p-22",
+        "color": "0x1.5510b7125fbc8p-21",
+        "ultima": "-0x1.bb4626f6bd97bp+5",
+        "elasticity": "0x1.69af4f069efd1p+4",
+    },
+    {
+        "price": "0x1.64b94597498c6p+3",
+        "delta": "-0x1.be3c9bf5b66c2p-2",
+        "dual_delta": "0x1.d354e438149c9p-2",
+        "vega": "0x1.140d33bf25eb5p+6",
+        "theta": "-0x1.074e212a68118p+6",
+        "rho": "-0x1.41c6a71cc1788p+4",
+        "rho_dividend": "0x1.3624b6c7edc68p+4",
+        "gamma": "0x1.4b4a087eab640p-9",
+        "dual_gamma": "0x1.4de60ddfcfebfp-9",
+        "vanna": "-0x1.2748ab7de16afp-5",
+        "volga": "0x1.5d62da48e8a91p+1",
+        "charm": "-0x1.ba2e28b5d64d0p-4",
+        "veta": "-0x1.876397af335a4p+8",
+        "vera": "-0x1.9d237a29a21bbp+3",
+        "speed": "0x1.3a54fd771b83ep-7",
+        "zomma": "0x1.0893c1452c2fdp-4",
+        "color": "0x1.4515530efccf6p-1",
+        "ultima": "-0x1.9f37f296d604ep+5",
+        "elasticity": "-0x1.72782f0f67a87p+4",
+    },
+    {
+        "price": "0x1.d060c612fba7ap-26",
+        "delta": "-0x1.feadb4c570c9ap-28",
+        "dual_delta": "0x1.30566790dc9b8p-27",
+        "vega": "0x1.daac017cf6d3dp-19",
+        "theta": "-0x1.51b3477f491e3p-16",
+        "rho": "-0x1.ade9566138247p-24",
+        "rho_dividend": "0x1.abb749500d61bp-24",
+        "gamma": "0x1.4e58315ad3567p-41",
+        "dual_gamma": "0x1.d524238bffffep-41",
+        "vanna": "-0x1.1807c1a917617p-30",
+        "volga": "0x1.cc2c4b84c7d6fp-19",
+        "charm": "-0x1.3a995266a9be3p-25",
+        "veta": "-0x1.8697bca8ad0a3p-14",
+        "vera": "-0x1.a186adcc81107p-17",
+        "speed": "-0x1.1dba419abb824p-33",
+        "zomma": "0x1.9d2cf0d349672p-28",
+        "color": "-0x1.312f18aa60e73p-25",
+        "ultima": "-0x1.d5d4c3a0683eap-8",
+        "elasticity": "-0x1.45aed59f0b718p+7",
+    },
+    {
+        "price": "0x1.c2f399ec5b38dp+3",
+        "delta": "0x1.324f6a9a54ae6p-2",
+        "dual_delta": "-0x1.00ec5e8bbd227p-2",
+        "vega": "0x1.1fdd79979e4d5p+7",
+        "theta": "-0x1.039ba38e9c2ddp+5",
+        "rho": "0x1.429f80e21098cp+6",
+        "rho_dividend": "-0x1.5e6be3cbcba9fp+6",
+        "gamma": "-0x1.f2d0c301da62ap-39",
+        "dual_gamma": "-0x1.d95f6e94731fcp-39",
+        "vanna": "-0x1.49a2f3b945cbfp-4",
+        "volga": "-0x1.bc7d7265a52b3p+6",
+        "charm": "-0x1.decc3f212ec76p-5",
+        "veta": "-0x1.16ed3d70ca74bp+7",
+        "vera": "0x1.143f20dcc257ep+8",
+        "speed": "-0x1.9d8ea092321aep-35",
+        "zomma": "0x1.1e23cd7cdd997p-23",
+        "color": "0x1.60c75568569cap-27",
+        "ultima": "0x1.a3f8b58152a35p+10",
+        "elasticity": "0x1.92540fb39e6dcp+3",
+    },
+    {
+        "price": "0x1.3c14a87fbc47fp+6",
+        "delta": "0x1.7701d4b3ca647p-1",
+        "dual_delta": "-0x1.4a4b7a09dc974p-1",
+        "vega": "0x1.7cc32871d5e27p+7",
+        "theta": "-0x1.c7d300d645600p+4",
+        "rho": "0x1.5d4078d700673p+8",
+        "rho_dividend": "-0x1.ac45a2ef0a29fp+8",
+        "gamma": "0x1.1d0994010f13dp-38",
+        "dual_gamma": "-0x1.4a9419637021ep-35",
+        "vanna": "-0x1.46c7dcaa66dc1p-4",
+        "volga": "0x1.d63113c3047ffp+6",
+        "charm": "-0x1.f18435e0e9600p-6",
+        "veta": "-0x1.5b0810873cb80p+6",
+        "vera": "-0x1.2741057f89740p+9",
+        "speed": "-0x1.77f606565c187p-32",
+        "zomma": "0x1.46330e1896392p-22",
+        "color": "0x0.0p+0",
+        "ultima": "-0x1.d52e24e0a667fp+10",
+        "elasticity": "0x1.5f5de28666dcap+2",
+    },
+    {
+        "price": "0x1.2a2a06d76f120p+2",
+        "delta": "-0x1.ba05bbaefa7a0p-2",
+        "dual_delta": "0x1.e9ba8948b2800p-2",
+        "vega": "0x1.b443226a35b61p+4",
+        "theta": "-0x1.e3a473fc62940p+1",
+        "rho": "-0x1.0bfe5ed453fc8p+4",
+        "rho_dividend": "0x1.eaebc40d3c627p+3",
+        "gamma": "0x1.069bb8b9ea000p-7",
+        "dual_gamma": "0x1.0699274840000p-7",
+        "vanna": "-0x1.b10243aa5cfffp-6",
+        "volga": "0x1.841d4698127ffp-1",
+        "charm": "-0x1.c8e4864cf6000p-5",
+        "veta": "-0x1.a7691dd52be80p+4",
+        "vera": "-0x1.31d362fce6f40p+3",
+        "speed": "0x1.fe1092878f000p-5",
+        "zomma": "-0x1.0256b16b41700p+1",
+        "color": "-0x1.5fb2d17a96000p-2",
+        "ultima": "-0x1.32dd9ad8796ffp+5",
+        "elasticity": "-0x1.287ef9049a790p+3",
+    },
+    {
+        "price": "0x0.0p+0",
+        "delta": "0x0.0p+0",
+        "dual_delta": "0x0.0p+0",
+        "vega": "0x0.0p+0",
+        "theta": "0x0.0p+0",
+        "rho": "0x0.0p+0",
+        "rho_dividend": "0x0.0p+0",
+        "gamma": "0x0.0p+0",
+        "dual_gamma": "0x0.0p+0",
+        "vanna": "0x0.0p+0",
+        "volga": "0x0.0p+0",
+        "charm": "0x0.0p+0",
+        "veta": "0x0.0p+0",
+        "vera": "0x0.0p+0",
+        "speed": "0x0.0p+0",
+        "zomma": "0x0.0p+0",
+        "color": "0x0.0p+0",
+        "ultima": "0x0.0p+0",
+        "elasticity": "-inf",
+    },
+]
+
+
+@pytest.mark.parametrize("case", CASES)
+def test_cached_matches_uncached_bit_for_bit(case: tuple) -> None:
+    """The shared-bump cache must not move a single bit.
+
+    crr_price is a pure function of its scalar inputs, so within one process
+    the cached path and the from-scratch reference must agree exactly — any
+    difference means the cache reused a tree whose bump was not identical.
+    """
+    import pricing.engine as engine
+
+    S, K, T, r, sig, cp, q = case
+    args = (S, K, T, r, sig, q, cp, AMER.n_steps)
+    cached = engine._bump_greeks(*args)
+    reference = engine._bump_greeks(*args, _use_cache=False)
+    assert set(cached) == set(reference)
+    for name, got in cached.items():
+        want = reference[name]
+        assert got == want or (got != got and want != want), (
+            f"{name}: cached {float.hex(got)} != uncached {float.hex(want)}"
+        )
+
+
+# The golden sanity check can only cover outputs whose fixed values are
+# portable across libm/NumPy builds. Price and the first-order greeks
+# qualify: on the CI 3.11/3.12 runners every name up to rho_dividend
+# matched at rel=1e-9 (the per-case loop stopped at gamma, so those seven
+# are what CI actually observed; elasticity is delta*S/price and inherits
+# their stability). The higher-order bump ratios do not qualify: they
+# divide a last-bit price difference by h² or h³ (gamma: hS² ≈ 3.5e-3;
+# volga/ultima: hs² ≈ 3.4e-10, an amplification of ~3e9), so 1-ULP exp/pow
+# differences become larger than any formula-level signal. On the same
+# runners gamma moved by up to 0.76 relative (case0's gamma is a 1e-11
+# tree-noise value) and vanna by 3.8e-8 — no fixed tolerance is both
+# portable and meaningful for them. They stay characterized by
+# test_cached_matches_uncached_bit_for_bit, which is exact and covers every
+# output on any build; their golden values stay in GOLDEN below as the
+# historical record.
+STABLE_GOLDEN_NAMES = (
+    "price",
+    "delta",
+    "dual_delta",
+    "vega",
+    "theta",
+    "rho",
+    "rho_dividend",
+    "elasticity",
+)
+
+
+@pytest.mark.parametrize("case,golden", zip(CASES, GOLDEN, strict=True))
+def test_greeks_golden_values(case: tuple, golden: dict[str, str]) -> None:
+    """Golden values pin the stable outputs to within 1e-8 relative.
+
+    The golden hex strings were captured on CPython 3.14; the CRR tree's
+    exp/pow differ by a few ULPs across libm/NumPy builds (observed: under
+    1e-9 relative on the first-order outputs across the CI 3.11/3.12
+    runners, after theta's 1/hT ≈ 1e5 amplification). rel=1e-8 leaves an
+    order of magnitude of headroom over that drift while still catching a
+    formula-level change, which moves a greek by ~1e-4. The bit-exact
+    characterization guarantee lives in
+    ``test_cached_matches_uncached_bit_for_bit`` above. Exact zeros and the
+    -inf elasticity branch stay pinned exactly (abs=0).
+    """
+    S, K, T, r, sig, cp, q = case
+    cat = AMER.greeks(S, K, T, r, sig, cp, q=q, conventions=CONV)
+    for name in STABLE_GOLDEN_NAMES:
+        got = float(getattr(cat, name))
+        want = float.fromhex(golden[name])
+        assert got == pytest.approx(want, rel=1e-8, abs=0.0), (
+            f"{name}: got {float.hex(got)}, golden {golden[name]}"
+        )
+
+
+def test_bumped_trees_are_reused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shared-bump cache caps tree evaluations at the 28 unique bumps.
+
+    Pre-refactor each higher-order greek re-bumped from scratch: 43
+    evaluations per greeks() call. If this count climbs again, the drift
+    canary's dominant cost climbs with it.
+    """
+    import pricing.engine as engine
+
+    calls = 0
+    real_crr_price = engine.crr_price
+
+    def counting(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_crr_price(*args, **kwargs)
+
+    monkeypatch.setattr(engine, "crr_price", counting)
+    AMER.greeks(592.31, 590.0, 32 / 365, 0.043, 0.185, "call", q=0.013, conventions=CONV)
+    assert calls == 28

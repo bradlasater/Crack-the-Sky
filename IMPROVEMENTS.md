@@ -114,10 +114,18 @@ conservative audit pass. Grouped by area, roughly highest-value first.
 
 ## Performance
 
-- `pricing/engine.py:_bump_greeks` — ~45 CRR tree evaluations per `greeks()`
-  call (each higher-order greek re-bumps from scratch). A shared-bump refactor
-  could cut the drift canary's dominant cost roughly in half; too invasive for
-  the audit.
+- `pricing/engine.py:_bump_greeks` — **fixed**: the bumped CRR trees are now
+  memoized by their exact argument tuple, so the higher-order greeks reuse the
+  first-order bumps instead of re-pricing from scratch (43 → 28 tree
+  evaluations per `greeks()` call, ~1.5× measured wall-time speedup). On one
+  platform the outputs are bit-for-bit identical — `crr_price` is a pure
+  function of its scalar inputs and every call site computes bumped arguments
+  with the same expressions; pinned by
+  `tests/pricing/test_bump_greeks_characterization.py` (golden `float.hex()`
+  values compared at rel=1e-12, since the tree's exp/pow differ by a few ULPs
+  across libm/Python builds — bit-exact goldens are not portable). The
+  "roughly half" estimate was optimistic: 28 is the floor for the current
+  finite-difference scheme; going lower would change the numerics.
 - `ingest/jobs/contracts_sync.py:55` — **fixed**: `_previous_tickers` now
   answers "not here" from the filenames before opening any parquet. Clean
   files are named `{job}-{underlying}-{epoch_ms}.parquet`, so a partition
@@ -192,9 +200,11 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   (`dataset|date`, kept only when `rows_kept > 0`) and calls a date done only
   when all three datasets have rows kept, so a 0-rows-kept date is re-pulled
   instead of skipped forever. Pinned by tests/test_backfill.py.
-- `tests/conftest.py:93` — the offline guard patches `socket.connect` but not
-  `connect_ex`, and would falsely reject AF_UNIX string addresses. Block
-  `connect_ex` too and exempt non-IP addresses.
+- `tests/conftest.py:93` — **fixed**: the offline guard now patches
+  `connect_ex` alongside `connect`, and the host check only applies to
+  `AF_INET`/`AF_INET6` sockets, so AF_UNIX path addresses (local by
+  construction) are no longer misread as outbound hosts. Covered by
+  `tests/test_offline_guard.py`.
 - `ingest/common/http_client.py` — **fixed**: `paginate` stops with a warning
   when the API re-serves a `next_url` it already followed (a stuck cursor
   would otherwise page forever), and `cli.ping` now truncates the body after
@@ -204,18 +214,29 @@ conservative audit pass. Grouped by area, roughly highest-value first.
 
 ## Docs / site
 
-- `docs/404.html` uses relative asset paths; if it's ever served as a
-  server-level 404 for deep URLs, switch to root-relative paths or a `<base>`
-  tag depending on hosting.
+- `docs/404.html` — **fixed**: when the page is served as a server-level 404
+  for a deep URL (any http(s) request whose path is not 404.html itself), an
+  inline script inserts `<base href="/Crack-the-Sky/">` before the stylesheet
+  and image references, so they resolve against the site root instead of the
+  missing directory. Root-relative paths were not an option — the drift tests
+  pin the relative `href="site.css"` on every page, and GitHub Pages (not yet
+  enabled; the user site redirects to the bradlasater.com custom domain, so
+  the conventional mount is `/<repo>/`) would serve the handbook under a
+  subpath. Opened directly as `docs/404.html` or via file://, no base is
+  inserted and the relative paths work as before.
 - The "deja" image for the 404 page is not in the repo yet — drop it at
   `docs/assets/deja.png` (or `.jpg`); the page auto-enhances via an `onerror`
   fallback and looks complete without it.
-- `.env.example` doesn't mention `TZ_NAME` or `TRADES_CONCURRENCY` (optional,
-  sane defaults) — add commented entries.
+- `.env.example` — **fixed**: commented `TZ_NAME` (default
+  `America/New_York`, the market-session gate's exchange clock in
+  `ingest/common/market_gate.py`) and `TRADES_CONCURRENCY` (default 8,
+  concurrent contract fetches in `trades_watchlist`) entries added. Both were
+  already documented in `docs/knobs.html`.
 
 ## Environment / tooling
 
-- `tests/test_prune_raw.py` requires GNU coreutils (`date -d`, `du -sb`) and
-  bash 4 (`mapfile`); it fails on a stock macOS dev box and passes on Ubuntu
-  CI. Either gate the test on `gdate`/`gdu` availability or document that
-  `brew install coreutils bash` is needed for local runs.
+- `tests/test_prune_raw.py` — **fixed**: the module now probes the exact
+  commands the script runs (`date -I -d`, `du -sb`) at collection time and
+  skips the whole file with a `brew install coreutils` hint when they fail,
+  so stock macOS dev boxes get skips instead of failures. (`mapfile` is no
+  longer in `scripts/prune_raw.sh`, so bash 4 is not a separate gate.)

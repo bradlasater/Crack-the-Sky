@@ -198,6 +198,39 @@ def test_crontab_loads_healthchecks_from_dotenv(tmp_path: Path) -> None:
     assert f"https://hc.example.internal/ping/KEY/{slug}?create=1" in lines[1]
 
 
+def test_crontab_loads_tuning_vars_from_dotenv(tmp_path: Path) -> None:
+    """TZ_NAME/TRADES_CONCURRENCY are read at module import, so cron must
+    export them from .env before the command starts (systemd does it via
+    EnvironmentFile). Set-but-empty in the real environment still wins."""
+    job = _job_name()
+    wrapper_root = tmp_path / "wrap"
+    scripts = wrapper_root / "scripts"
+    scripts.mkdir(parents=True)
+    shutil.copy(CRONJOB, scripts / "cronjob.sh")
+    (wrapper_root / ".env").write_text(
+        "TZ_NAME=Europe/London\nTRADES_CONCURRENCY=16\n"
+    )
+    env = os.environ.copy()
+    env.pop("TZ_NAME", None)
+    env.pop("TRADES_CONCURRENCY", None)
+    result = subprocess.run(
+        [
+            "bash",
+            str(scripts / "cronjob.sh"),
+            job,
+            "bash",
+            "-c",
+            'printf "%s %s\\n" "$TZ_NAME" "$TRADES_CONCURRENCY"',
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "Europe/London 16"
+
+
 def test_bash_c_does_not_ping(tmp_path: Path) -> None:
     """`bash -c` is how tests take the lock, not a scheduled shell job."""
     job = _job_name()

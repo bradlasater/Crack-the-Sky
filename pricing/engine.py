@@ -223,8 +223,25 @@ def _bump_greeks(
     q: float,
     call_put: CallPut,
     n_steps: int,
+    *,
+    _use_cache: bool = True,
 ) -> dict[str, float]:
     """Raw (per 1.00, per year, spot) Greeks via CRR bump-and-revalue."""
+
+    # The higher-order greeks below re-bump parameters the first-order suite
+    # already priced: color/charm/veta reprice theta's T-hT tree, speed
+    # reprices delta's S±hS pair, zomma reprices vanna's four corners, and
+    # so on. crr_price is a pure function of its scalar inputs and every call
+    # site computes bumped arguments with the same expressions, so caching by
+    # the exact argument tuple reuses those trees bit-for-bit: 43 → 28 tree
+    # evaluations per call, identical outputs.
+    # tests/pricing/test_bump_greeks_characterization.py pins that identity
+    # by comparing this path against _use_cache=False in the same process;
+    # the fixed golden constants there are only a tolerance-based sanity
+    # check on price and the first-order greeks, because exp/pow are not
+    # bit-stable across libm/NumPy builds (and the higher-order bump ratios
+    # amplify those last-bit differences past any fixed tolerance).
+    cache: dict[tuple[float, ...], float] = {}
 
     def v(
         S_=S,
@@ -234,7 +251,18 @@ def _bump_greeks(
         sig=sigma,
         q_=q,
     ) -> float:
-        return crr_price(S_, K_, T_, r_, sig, call_put, q=q_, n_steps=n_steps, american=True)
+        if not _use_cache:
+            # Uncached reference for the characterization test: recompute
+            # every bumped tree from scratch, as the pre-refactor code did.
+            return crr_price(
+                S_, K_, T_, r_, sig, call_put, q=q_, n_steps=n_steps, american=True
+            )
+        key = (S_, K_, T_, r_, sig, q_)
+        if key not in cache:
+            cache[key] = crr_price(
+                S_, K_, T_, r_, sig, call_put, q=q_, n_steps=n_steps, american=True
+            )
+        return cache[key]
 
     px = v()
     hS = max(1e-4 * S, 1e-6)

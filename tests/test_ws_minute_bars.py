@@ -92,6 +92,21 @@ def test_contract_universe_prefix_filter(tmp_path):
     assert spy_only == ["O:SPY260918C00700000"]
 
 
+def test_contract_universe_rejects_lookalike_roots(tmp_path):
+    """O:SPXL/O:SPXU are Direxion 3x ETFs, not SPX options: a bare
+    ``startswith("O:SPX")`` admits them; the anchored root regex must not."""
+    settings = _settings(tmp_path)
+    today = market_gate.today_et()
+    _write_contracts_partition(
+        settings,
+        ["O:SPX260918C07000000", "O:SPXW260918C07000000",
+         "O:SPXL260918C00050000", "O:SPXU260918P00020000"],
+        today,
+    )
+    tickers = wsjob.select_tickers(settings, today, ["SPX"], None)
+    assert tickers == ["O:SPX260918C07000000", "O:SPXW260918C07000000"]
+
+
 def test_select_tickers_limit_prefers_hot(tmp_path):
     settings = _settings(tmp_path)
     today = market_gate.today_et()

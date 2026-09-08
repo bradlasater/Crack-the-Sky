@@ -4,12 +4,19 @@ Build plan for `PLAN.md` Week 1 item 2. Written 2026-09-06 against `main` at
 `8c4a422`. Scope: make time-to-expiry trading-day aware, before the HAR-RV
 forecast (item 4) and the event replay (item 7) bake ACT/365 in deeper.
 
-Status: **steps 1–3 landed in code; production `clean/` swap still pending.**
-`pricing/calendar.py` and `pricing/daycount.py` ship the session calendar,
-the hybrid, and `DEFAULT_DAYCOUNT` as the hybrid. Landed `atm_term_structure`
-and `vol_surface` rows stamp `daycount` (`bus/252` or `act/365`). The archive
-rebuilds into a staging `DATA_ROOT` (decision 5(b)); production readers keep
-the ACT/365 archive until the subtree swap.
+Status: **steps 1–3 landed and the daycount swap is done; the `blas_threads`
+recut is landed in code, and its staging rebuild + swap is the remaining owner
+operation.** Production `clean/atm_term_structure` and `clean/vol_surface`
+were swapped to the stamped hybrid archive on 2026-09-07; the pre-swap ACT/365
+trees are retained as `clean/atm_term_structure.act365` and
+`clean/vol_surface.act365`. Since then `vol_surface` rows also stamp
+`blas_threads` (finding 7 — the fit is reproducible only while the pinned
+thread count is recorded with the row). The schema is fail-loud on a missing
+column, so every production `vol_surface` partition is unreadable under the
+new code until the decision-5 procedure runs a second time for the recut —
+see "Second pass" under decision 5. `atm_term_structure` needs no second pass:
+it is a scalar Brent inversion with no BLAS underneath, so there is no thread
+count to record.
 
 Three things had already cleared before this cutover: the BLAS thread pin
 (finding 7) makes the archive reproducible enough to diff a rebuild against,
@@ -282,6 +289,113 @@ blocks the default flip.
    5. Deploy the branch (or merge to `main` and pull) so scheduled jobs write
       the new schema. Start the timers. Keep the `.act365` trees until a
       week of jobs and a `coverage_audit` look healthy, then delete.
+
+   **Executed 2026-09-07** for the daycount schema, exactly as above.
+
+   **Second pass — the `blas_threads` recut (owner operation, pending).**
+   `vol_surface` gained a `blas_threads` column (the pinned BLAS thread count
+   the fit ran under; null when unpinned). Because
+   `catalog.validate_arrow_schema` is fail-loud on missing *and* extra columns
+   (finding 6), the new code and the current production tree disagree in both
+   directions: new code against the old tree raises on the missing column, old
+   code against the new tree raises on the extra one. Code and tree must move
+   together, same as the first pass. Only `vol_surface` is affected —
+   `atm_term_structure` has no BLAS under it and its schema is unchanged.
+
+   Checklist:
+
+   1. Merge the branch; the staging rebuild may run off any checkout carrying
+      it. The staging root `/data/massive-hybrid-staging` is already wired:
+      input datasets symlinked from `/data/massive`, `_meta` symlinked (so the
+      hybrid prices on the box calendar), `clean/` local. Rebuild the whole
+      archive — the script pins BLAS threads itself, above the numpy import:
+
+      ```
+      cd <checkout on the merged commit>
+      DATA_ROOT=/data/massive-hybrid-staging \
+        venv/bin/python scripts/build_surface.py --force
+      ```
+
+      (To parallelise, run several workers bounded by disjoint
+      `--start`/`--end` windows; every row stamps `blas_threads` = 1 either
+      way. Do **not** override the thread vars for speed — the stamp would
+      honestly record a count the backtester then has to match.)
+   2. Verify staging *before* touching production: every partition carries
+      `blas_threads`, all values are 1 and non-null, `daycount` stamps are
+      `bus/252`/`act/365` only, and a catalog read plus a `load_surface`
+      round-trip succeed:
+
+      ```
+      DATA_ROOT=/data/massive-hybrid-staging venv/bin/python - <<'EOF'
+      from datetime import date
+      from marketdata.catalog import list_partitions, read_partition
+      root = "/data/massive-hybrid-staging"
+      parts = list_partitions("vol_surface", data_root=root)
+      print(len(parts), "partitions,", parts[0], "->", parts[-1])
+      t = read_partition("vol_surface", parts[-1], data_root=root)
+      bt = t.column("blas_threads").to_pylist()
+      assert bt and all(v == 1 for v in bt), "unpinned or misstamped rows"
+      assert set(t.column("daycount").to_pylist()) <= {"bus/252", "act/365"}
+      from ingest.common.config import Settings
+      from pricing.surface import load_surface
+      s = Settings(massive_api_key="check", data_root=root)
+      print(load_surface(s, parts[-1], "SPXW"))
+      EOF
+      ```
+
+      Also diff partition coverage against production
+      (`comm -3 <(ls /data/massive/clean/vol_surface) <(ls staging/...)`):
+      the first pass showed sessions legitimately differing both ways
+      (arb-guard skips and empty sessions), so eyeball the list rather than
+      asserting equality.
+   3. Pick a window where no scheduled job can fire mid-swap. The jobs that
+      touch `vol_surface` are `surface` (Tue–Sat 12:15 ET) and
+      `coverage_audit` (12:30 ET) — stop their timers:
+
+      ```
+      systemctl --user stop massive-surface.timer massive-coverage-audit.timer
+      ```
+
+      (`term_structure` 12:00 and `spy_spot` 12:05 do not read `vol_surface`;
+      the monthly `prune`, 1st 03:15 ET, touches only `raw/`. Neither
+      constrains this swap, but do not run it inside Tue–Sat 12:00–12:30
+      regardless — a mid-window surprise is how the first pass's rules were
+      written.)
+   4. Rename, one dataset only — the rest of `clean/` stays in production:
+
+      ```
+      mv /data/massive/clean/vol_surface \
+         /data/massive/clean/vol_surface.pre-blas-stamp
+      mv /data/massive-hybrid-staging/clean/vol_surface \
+         /data/massive/clean/vol_surface
+      ```
+   5. Deploy the merged commit to the checkout the timers run from (old code
+      writing into the new tree would land old-schema parquets and trip the
+      fail-loud schema on the next read). Verify, then restart:
+
+      ```
+      venv/bin/python -m marketdata.validate --dataset vol_surface \
+          --date <latest session>
+      systemctl --user start massive-surface.timer massive-coverage-audit.timer
+      ```
+
+      Watch the next scheduled `surface` and `coverage_audit` runs (or run
+      `python -m ingest.jobs.coverage_audit` by hand once) and their
+      Healthchecks checks.
+   6. Rollback is the reverse rename, and the code must go back with it —
+      the two disagree in both directions:
+
+      ```
+      systemctl --user stop massive-surface.timer massive-coverage-audit.timer
+      mv /data/massive/clean/vol_surface \
+         /data/massive/clean/vol_surface.failed-swap
+      mv /data/massive/clean/vol_surface.pre-blas-stamp \
+         /data/massive/clean/vol_surface
+      # roll the checkout back, then start the timers
+      ```
+   7. Keep `vol_surface.pre-blas-stamp` (and the `.act365` trees from the
+      first pass) until a week of jobs and a `coverage_audit` look healthy,
+      then delete.
 
 6. **Half days.**
    `holidays.json` carries 4 `early-close` records (13:00 ET) alongside 20

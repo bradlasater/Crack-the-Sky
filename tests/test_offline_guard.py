@@ -8,7 +8,6 @@ falsely rejecting local sockets.
 
 from __future__ import annotations
 
-import errno
 import socket
 from pathlib import Path
 
@@ -34,10 +33,21 @@ def test_connect_ex_to_public_ip_is_blocked() -> None:
 
 
 def test_localhost_connect_ex_passes_the_guard() -> None:
-    """Loopback is allowed through; nothing listens, so we get ECONNREFUSED."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        err = s.connect_ex(("127.0.0.1", 1))
-    assert err == errno.ECONNREFUSED
+    """Loopback is allowed through; bind a listener so the connect succeeds.
+
+    Pointing at port 1 assumed nothing listens there and that the OS answers
+    exactly ECONNREFUSED — both vary with the machine or sandbox policy, so
+    a box could fail this test without the guard being broken. Binding port
+    0 gets a guaranteed-free loopback port and makes the allowed path
+    deterministic: connect_ex returns 0.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        port = server.getsockname()[1]
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            err = s.connect_ex(("127.0.0.1", port))
+    assert err == 0
 
 
 def test_unix_socket_path_is_not_misread_as_a_host(tmp_path: Path) -> None:

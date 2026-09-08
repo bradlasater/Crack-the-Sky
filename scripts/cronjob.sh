@@ -58,21 +58,22 @@ if [ "${1:-}" = "bash" ]; then
   esac
 fi
 
-_load_hc_env() {
+_load_env() {
   # Crontab does not source .env; systemd EnvironmentFile does. Fill only
   # variables that are unset. Empty-but-set must win so tests cannot leak a
-  # real ping against production.
+  # real ping against production. TZ_NAME/TRADES_CONCURRENCY ride along
+  # because the jobs read them from os.environ at module import
+  # (ingest/common/market_gate.py, ingest/jobs/trades_watchlist.py): without
+  # this, a value set in .env would apply under systemd but silently not
+  # under cron.
   local envf line key val
   envf="$REPO_ROOT/.env"
   [ -f "$envf" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
-      HEALTHCHECKS_PING_KEY=*|HEALTHCHECKS_BASE=*)
+      HEALTHCHECKS_PING_KEY=*|HEALTHCHECKS_BASE=*|TZ_NAME=*|TRADES_CONCURRENCY=*)
         key="${line%%=*}"
-        if [ "$key" = "HEALTHCHECKS_PING_KEY" ] && [ -n "${HEALTHCHECKS_PING_KEY+x}" ]; then
-          continue
-        fi
-        if [ "$key" = "HEALTHCHECKS_BASE" ] && [ -n "${HEALTHCHECKS_BASE+x}" ]; then
+        if [ -n "${!key+x}" ]; then
           continue
         fi
         val="${line#*=}"
@@ -126,8 +127,11 @@ if [ "$flock_rc" -ne 0 ]; then
   exit "$flock_rc"
 fi
 
+# Env loading runs for every job, not just shell jobs: the tuning variables
+# must reach the Python command below, and a skipped run exits before this.
+_load_env
+
 if [ "$_is_shell_job" -eq 1 ]; then
-  _load_hc_env
   _hc_ping "/start"
 fi
 

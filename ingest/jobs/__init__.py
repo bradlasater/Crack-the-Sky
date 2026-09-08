@@ -30,6 +30,7 @@ from ingest.common import market_gate
 from ingest.common.config import Settings
 from ingest.common.logging_utils import JsonlLogger
 from marketdata import catalog
+from marketdata.opra import expiry_year
 
 # Watchlist parameters: expiration 7-45 days out, strike within +/-15% of
 # that underlying's own reference price, and some sign of life (traded today
@@ -82,7 +83,10 @@ def parse_option_ticker(ticker: str) -> dict[str, Any] | None:
         return None
     root, yy, mm, dd, kind, strike = m.groups()
     try:
-        expiry = date(2000 + int(yy), int(mm), int(dd))
+        # One shared decoder for the two-digit year (marketdata.opra is the
+        # home of OPRA symbology); see expiry_year for why there is no 19xx
+        # pivot.
+        expiry = date(expiry_year(int(yy)), int(mm), int(dd))
     except ValueError:  # a malformed date is not a contract we can use
         return None
     return {

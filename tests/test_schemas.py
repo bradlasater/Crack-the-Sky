@@ -244,34 +244,27 @@ def test_spy_spot_schema_roundtrip() -> None:
     assert table["spot"].to_pylist()[0] == pytest.approx(765.16)
 
 
-def test_decision_record_schema_roundtrip() -> None:
-    """The builder covers every schema field; nested payloads are JSON objects."""
-    from ingest import __version__
-
+def test_decision_log_schema_roundtrip() -> None:
     rec = schemas.decision_record(
-        decision_id="bt-0001",
-        session_date="2026-09-04",
-        asof_ns=1_788_000_000_000_000_000,
+        decision_id="bt-1",
+        session_date="2026-09-02",
+        asof_ns=1_757_000_000_000_000_000,
         src="backtest",
-        job="backtest_v0",
-        gate="entry",
-        rationale="vrp spread above threshold",
-        inputs={"dte": 21, "spot": 765.16},
-        signals={"vrp": 0.012},
-        versions={"surface": "abc123"},
+        job="backtester",
+        gate="no-trade",
+        rationale="schema pin",
+        inputs={"spot": 765.16},
+        signals={"vrp": 0.01},
+        versions={"har_rv": "unbuilt"},
     )
     table = check_records("decision_log", [rec])
     row = {k: v[0] for k, v in table.to_pydict().items()}
-    assert row["session_date"] == "2026-09-04"
-    assert row["asof_ns"] == 1_788_000_000_000_000_000
-    assert row["code_version"] == __version__
-    assert json.loads(row["inputs"]) == {"dte": 21, "spot": 765.16}
-    assert json.loads(row["signals"]) == {"vrp": 0.012}
-    assert json.loads(row["versions"]) == {"surface": "abc123"}
-    # Book fields stay null until a strategy exists to fill them.
-    assert row["underlying"] is None
-    assert row["structure"] is None
-    assert row["expiration_date"] is None
+    assert row["decision_id"] == "bt-1"
+    assert row["gate"] == "no-trade"
+    assert json.loads(row["inputs"]) == {"spot": 765.16}
+    assert json.loads(row["signals"]) == {"vrp": 0.01}
+    assert json.loads(row["versions"]) == {"har_rv": "unbuilt"}
+    assert {"decision_log"} == schemas.APPEND_ONLY_DATASETS
 
 
 def test_src_column_on_bars_and_trades() -> None:

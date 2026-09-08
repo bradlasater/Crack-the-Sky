@@ -399,7 +399,12 @@ def _json_object(value: Any, field: str) -> str:
             f"decision_log.{field} must be a JSON object (dict), "
             f"got {type(value).__name__}"
         )
-    return json.dumps(value)
+    try:
+        return json.dumps(value)
+    except TypeError as exc:
+        raise ValueError(
+            f"decision_log.{field} is not JSON-serializable: {exc}"
+        ) from exc
 
 
 def decision_record(

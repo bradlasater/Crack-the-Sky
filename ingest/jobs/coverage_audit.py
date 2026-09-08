@@ -201,10 +201,14 @@ def _classify_stamps(
             out["window"].append(ms)
         elif abs(at - preopen_at) <= SINGLETON_TOLERANCE:
             out["preopen"].append(ms)
+        elif early_close and end_et < at <= cadence_end:
+            # Before the EOD tolerance: the real EOD sweep runs at 16:35,
+            # after cadence_end, so on an early close the still-firing
+            # cadence (16:25-16:30) reaches the tolerance window first and
+            # would otherwise stand in for a missing EOD run.
+            out["post_close"].append(ms)
         elif abs(at - eod_at) <= SINGLETON_TOLERANCE:
             out["eod"].append(ms)
-        elif early_close and end_et < at <= cadence_end:
-            out["post_close"].append(ms)
         else:
             out["stray"].append(ms)
     return {k: sorted(v) for k, v in out.items()}

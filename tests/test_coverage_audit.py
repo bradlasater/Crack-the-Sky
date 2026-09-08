@@ -158,12 +158,12 @@ def test_early_close_day_passes_with_post_close_cadence(tmp_path: Path) -> None:
         spy = checks["snapshots[SPY]"]
         assert spy.status == audit.PASS
         assert spy.data["stray"] == 0
-        # 13:31/13:32 land inside the write grace; 13:33..16:24 are post_close;
-        # 16:25..16:30 fall in the EOD singleton's tolerance, with the 16:35
-        # singleton itself.
+        # 13:31/13:32 land inside the write grace; 13:33..16:30 are post_close
+        # (the bounded cadence outranks the EOD tolerance, so 16:25-16:30 do
+        # not count as the EOD singleton); only the 16:35 firing itself is eod.
         assert spy.data["sweeps"] == 243
-        assert spy.data["post_close"] == 172
-        assert spy.data["eod"] == 7
+        assert spy.data["post_close"] == 178
+        assert spy.data["eod"] == 1
         assert checks["snapshots_preopen"].status == audit.PASS
         assert checks["snapshots_eod"].status == audit.PASS
     finally:
@@ -188,6 +188,33 @@ def test_early_close_window_still_fails_when_the_session_is_missing(
                 (part / f"snapshot_sweep-{root}-{base + i * 60_000}.parquet").unlink()
         checks = {c.name: c for c in audit.check_snapshots(_settings(tmp_path), EARLY_DATE)}
         assert checks["snapshots[SPY]"].status == audit.FAIL
+    finally:
+        market_gate._holiday_cache.clear()
+
+
+def test_missing_eod_run_on_early_close_still_fails(tmp_path: Path) -> None:
+    """The still-firing cadence must not stand in for a missing EOD sweep.
+
+    On an early close the cadence keeps firing to 16:30, and 16:25-16:30 fall
+    inside the EOD singleton's 16:35 +/-10-minute tolerance. Classified as
+    ``eod`` they would keep ``snapshots_eod`` green on a day the 16:35 run
+    never landed; they are the bounded post-close cadence instead.
+    """
+    from ingest.common import market_gate
+    market_gate._holiday_cache.clear()
+    _mark_early_close(tmp_path)
+    try:
+        part = _land_early_close_day(tmp_path)
+        for root in ("SPY", "I:SPX", "VIX"):
+            (part / f"snapshot_sweep-eod-{root}-"
+                     f"{_ms(EARLY_DATE, 16, 35)}.parquet").unlink()
+        checks = {c.name: c for c in audit.check_snapshots(_settings(tmp_path), EARLY_DATE)}
+        spy = checks["snapshots[SPY]"]
+        assert spy.status == audit.PASS
+        assert spy.data["eod"] == 0
+        assert spy.data["post_close"] == 178
+        assert checks["snapshots_eod"].status == audit.FAIL
+        assert checks["snapshots_eod"].data["missing"] == ["SPY", "SPX", "VIX"]
     finally:
         market_gate._holiday_cache.clear()
 

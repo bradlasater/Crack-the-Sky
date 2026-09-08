@@ -195,8 +195,8 @@ def clean_files(
     return sorted(part.glob(f"{job}-*.parquet"))
 
 
-def _unique_quarantine_path(dest: Path, name: str) -> Path:
-    """A path under ``dest`` for ``name`` that no file already occupies.
+def _quarantine_candidates(dest: Path, name: str) -> Iterable[Path]:
+    """Destination paths under ``dest`` for ``name``, first-free-first.
 
     Quarantining the same partition twice (a second refilter, or a reconcile
     rerun) produces same-named sources, and ``Path.replace`` would silently
@@ -204,19 +204,21 @@ def _unique_quarantine_path(dest: Path, name: str) -> Path:
     to keep recoverable. The stamp token is nudged forward rather than given
     a ``-2`` suffix, for the same reason ``_unique_clean_path`` does: readers
     parse the final ``-``-separated token as an integer stamp.
+
+    Callers must claim each candidate atomically (``quarantine_prior`` uses
+    ``os.link``): an exists-check followed by a rename is a TOCTOU pair, and
+    two processes can pick the same free candidate -- different jobs flock on
+    different files but can touch the same partition.
     """
-    target = dest / name
-    if not target.exists():
-        return target
+    yield dest / name
     stem, dot, suffix = name.partition(".")
     prefix, sep, stamp = stem.rpartition("-")
     base = int(stamp) if sep and stamp.isdigit() else None
     n = 1
-    while target.exists():
+    while True:
         bumped = f"{prefix}-{base + n}" if base is not None else f"{stem}-{n}"
-        target = dest / (bumped + dot + suffix) if dot else dest / bumped
+        yield dest / (bumped + dot + suffix) if dot else dest / bumped
         n += 1
-    return target
 
 
 def quarantine_prior(
@@ -257,9 +259,20 @@ def quarantine_prior(
         if not path.is_file():
             continue
         dest.mkdir(parents=True, exist_ok=True)
-        target = _unique_quarantine_path(dest, path.name)
-        path.replace(target)
-        moved.append(target)
+        # Claim the target with an atomic hard link, retrying the next
+        # candidate on FileExistsError, and unlink the source only once the
+        # link has landed -- a check-then-rename pair would let a concurrent
+        # quarantine overwrite the file this one just placed. Source and
+        # destination both live under DATA_ROOT, so they share a filesystem
+        # and hard links are always available.
+        for target in _quarantine_candidates(dest, path.name):
+            try:
+                os.link(path, target)
+            except FileExistsError:
+                continue
+            path.unlink()
+            moved.append(target)
+            break
     return moved
 
 

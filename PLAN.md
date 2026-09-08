@@ -38,7 +38,7 @@ entitlement or owner decision before code helps).
 | Diagram box | Status | Reality |
 |---|---|---|
 | Feature engineering | **partial** | ATM term structure (`pricing/term_structure.py`), SVI slice params (`pricing/surface.py`), continuous spot series (`signals/spot.py`). No RV features, no feature pipeline, no regimes/event flags. |
-| Forecasting (HAR-RV baseline, distributions) | **missing** | The next real build item. `signals/spot.py` was written expressly to feed it (Stage 1.1 Roll-debias decision already measured: do not debias). |
+| Forecasting (HAR-RV baseline, distributions) | **built** | `signals/har_rv.py` — walk-forward HAR-RV (1/5/22-session cascade, fit in logs) on the `spy_spot` series, no Roll debias per the measured Stage 1.1 call. One row per (origin, horizon) at 3/5/10/21/32 sessions (≈4–45 calendar days, the 5–45 DTE book), carrying the full lognormal forecast distribution (`log_rv_mean`/`log_rv_sd`) plus an 80% annualised-vol band. Daily T-1 entry `python -m signals.har_rv`; archive rebuild `scripts/build_rv_forecast.py`. |
 | Pricing / surface analytics | **built** | Own IV (European + American/CRR), parity forwards, raw-SVI surface with butterfly *and* calendar arbitrage repaired inside the fit (`SurfaceArbitrageError` otherwise). Gaps on record: SPY smile (American under a European fit path), VIX surface, **no scheduled surface job**, drift_check's off-ATM consumer. |
 | Signal / strategy engine | **missing** | No candidate structures, no entry/exit/roll/no-trade rules, no edge-net-of-costs. |
 

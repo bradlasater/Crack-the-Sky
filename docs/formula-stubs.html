@@ -48,6 +48,7 @@
             <li><a href="formula-stubs.html#formula-year-fraction">Year fraction</a></li>
             <li><a href="formula-stubs.html#formula-vendor-units">Vendor unit align</a></li>
             <li><a href="formula-stubs.html#formula-svi">Raw SVI</a></li>
+            <li><a href="formula-stubs.html#formula-har-rv">HAR-RV</a></li>
           </ol>
         </li>
         <li><a href="knobs.html">Documented knobs</a></li>
@@ -86,6 +87,9 @@
       </div>
       <div class="stub" id="formula-svi">
         <strong>Raw SVI</strong> — <code>pricing.surface</code>. Gatheral <code>w(k) = a + b(ρ(k−m) + √((k−m)² + σ²))</code>, fit in <code>w0</code> so <code>w ≥ 0</code> is a box bound. Butterfly <code>g(k) ≥ 0</code> and calendar (total variance non-decreasing in T) repaired inside the fit; <code>Surface.vol(K, T)</code> interpolates linearly in total variance.
+      </div>
+      <div class="stub" id="formula-har-rv">
+        <strong>HAR-RV</strong> — <code>signals.har_rv</code>. Corsi cascade in logs off <code>spy_spot</code>: <code>rv_t = (ln S_t − ln S_{t−1})²</code> (no Roll debias — the Stage 1.1 measurement), regressing <code>log mean(rv_{t+1..t+h})</code> on <code>[1, log rv_t, log mean(rv_{t−4..t}), log mean(rv_{t−21..t})]</code>, expanding walk-forward so the fit at t trains only on targets that ended at or before t. The band is the origin's own in-sample residual sd, read lognormally: <code>rv_daily = exp(μ + σ²/2)</code>, <code>vol_ann = √(252 · rv_daily)</code>, p10/p90 at <code>μ ∓ 1.2816σ</code>.
       </div>
 
       <footer>

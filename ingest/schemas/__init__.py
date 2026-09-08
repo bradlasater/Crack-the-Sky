@@ -321,12 +321,31 @@ def _build_schemas() -> dict[str, Any]:
         pa.field("resid", pa.float64()),           # proxy - actual; null off overlap
     ]
 
+    # One row per (date, horizon): a walk-forward HAR-RV forecast off
+    # spy_spot. Derived like atm_term_structure, so it stores the fit's whole
+    # lognormal distribution (log_rv_mean/log_rv_sd), the annualised point
+    # forecast and its 80% band, and the training-row count -- not just a
+    # vol number. horizon is in sessions: 3/5/10/21/32 ~= 4-45 calendar days,
+    # the 5-45 DTE book.
+    rv_forecast_fields = [
+        pa.field("date", pa.string()),             # forecast origin session
+        pa.field("horizon", pa.int64()),           # sessions ahead
+        pa.field("log_rv_mean", pa.float64()),     # E[log mean daily rv] over horizon
+        pa.field("log_rv_sd", pa.float64()),       # in-sample residual sd, log space
+        pa.field("rv_daily", pa.float64()),        # E[mean daily rv], lognormal mean
+        pa.field("vol_ann", pa.float64()),         # sqrt(252 * rv_daily)
+        pa.field("vol_ann_p10", pa.float64()),     # 80% band, annualised vol
+        pa.field("vol_ann_p90", pa.float64()),
+        pa.field("n_train", pa.int64()),           # complete training rows in the fit
+    ]
+
     contracts_schema = pa.schema(contract_fields)
     return {
         "forwards": pa.schema(forward_fields),
         "atm_term_structure": pa.schema(atm_term_structure_fields),
         "vol_surface": pa.schema(vol_surface_fields),
         "spy_spot": pa.schema(spy_spot_fields),
+        "rv_forecast": pa.schema(rv_forecast_fields),
         "contracts": contracts_schema,
         "contracts_expired": contracts_schema,  # same schema as contracts
         "option_snapshots": pa.schema(snapshot_fields),

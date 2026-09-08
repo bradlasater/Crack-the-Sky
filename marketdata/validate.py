@@ -57,6 +57,7 @@ REQUIRED_NONNULL: dict[str, tuple[str, ...]] = {
     "underlying_minute_bars": ("ticker",),
     "underlying_day_bars": ("ticker",),
     "spy_spot": ("date", "spot", "src"),
+    "rv_forecast": ("date", "horizon", "log_rv_mean", "vol_ann"),
 }
 
 

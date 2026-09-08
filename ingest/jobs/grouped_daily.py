@@ -59,12 +59,11 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger, keep_all: bool):
     results = body.get("results") or []
 
     wanted = set(parse_underlyings(args.underlying, TICKERS))
-    records = [
+    matched = [
         _bar_record(b) for b in results
         if keep_all or str(b.get("T") or "") in wanted
     ]
-    if args.limit is not None:
-        records = records[: args.limit]
+    records = matched[: args.limit] if args.limit is not None else matched
 
     logger.log(
         "grouped_loaded",
@@ -73,9 +72,19 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger, keep_all: bool):
         kept=len(records),
         tickers=sorted(wanted) if not keep_all else "all",
     )
+    if not matched and results:
+        # The market traded (the response has rows) but none of the wanted
+        # tickers are in it: the date, the ticker list, or the feed itself is
+        # wrong. Fail loudly -- a green empty run is indistinguishable from a
+        # holiday and hides the breakage.
+        raise RuntimeError(
+            f"grouped feed returned {len(results)} market rows for {run_date} "
+            f"but none of the wanted tickers {sorted(wanted)} were among them"
+        )
     if not records:
-        # An empty result on a trading day means the date was wrong or the
-        # market was closed; surface it rather than writing an empty file.
+        # A genuinely empty response on a trading day means the date was
+        # wrong or the market was closed; surface it rather than writing an
+        # empty file. The market gate keeps real holidays out entirely.
         logger.log("grouped_empty", run_date=run_date.isoformat())
         return {"rows": 0}
 

@@ -30,7 +30,7 @@ entitlement or owner decision before code helps).
 |---|---|---|
 | Ingestion / capture | **built** | systemd timers via `deploy/`, typed reads in `marketdata/`, immutable parquet raw. |
 | Validation / QC gate | **partial** | Fail-loud schema validation (`marketdata/validate.py`), `coverage_audit`, flat-file reconciliation. Missing: *market-level* QC — staleness, crossed markets, bad prints — and a gate that blocks downstream consumers. |
-| Warehouse / event store | **partial** | Parquet raw/clean under `DATA_ROOT`. **Decision logs do not exist** — the diagram's "do not overwrite decision history" has no schema yet. Cheap to add now, expensive to retrofit. |
+| Warehouse / event store | **partial** | Parquet raw/clean under `DATA_ROOT`. Append-only `decision_log` schema is in `ingest.schemas`; `quarantine_prior` and `read_asof` refuse it so last-file-wins cannot hide events. No live writer yet — the backtester (week 2) lands first. |
 | Reference data | **built** | Contracts (incl. expired), dividends, rates (Treasury to 1962), holidays. Trading-day calendar is consumed on the day-bar path (hybrid vol time, stamped per row); the live path is still ACT/365. |
 
 ### Analytics / decision
@@ -58,7 +58,7 @@ entitlement or owner decision before code helps).
 | Backtesting / event replay | **missing** | No replay engine. The site's public credibility claim (pre-registered evaluation, walk-forward, purged validation) currently rests on tooling that does not exist. |
 | Model evaluation / attribution | **missing** | Nothing. |
 | Research sandbox | **partial** | `scripts/build_*.py` + the docs habit function as one, informally. |
-| Governance / audit / dashboards | **partial** | Handbook docs + Healthchecks dashboards. No decision logs, model versions, or run reports. |
+| Governance / audit / dashboards | **partial** | Handbook docs + Healthchecks dashboards. Decision-log schema exists (append-only); no model versions or run reports, and nothing writes rows yet. |
 
 ## Scope discrepancies to resolve (owner decisions)
 
@@ -90,10 +90,10 @@ job or a script, not just a module.
 2. **Adopt the trading-day calendar** in `pricing/` (decision 4 above).
    Day-bar path: hybrid default, per-row stamp (step 3). Live path still
    ACT/365 (step 4). Production `clean/` swap is the remaining cutover.
-3. **Decision-log schema.** Define the append-only decision record (inputs,
-   signal values, gate outcome, rationale, versions) in the warehouse even
-   before the strategy engine emits real ones — the backtester in week 2
-   will write them first.
+3. **Decision-log schema.** Landed: append-only `decision_log` in
+   `ingest.schemas`, writer `ingest.common.decision_log.write_decisions`.
+   The backtester in week 2 writes first; nothing overwrites history
+   (`quarantine_prior` / `read_asof` refuse the dataset).
 4. **Baseline RV forecast.** HAR-RV on the `signals/spot` series,
    horizon-matched to the 5–45 DTE book, with an uncertainty band — the
    diagram is explicit: a distribution, not a point estimate. Honor the

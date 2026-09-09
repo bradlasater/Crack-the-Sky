@@ -22,9 +22,8 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   definition) and in `scripts/build_surface.py` /
   `scripts/build_rv_forecast.py`, which are run directly and must set it above
   the `pricing` / `signals` import because OpenBLAS reads its thread count
-  once, at load; `tests/test_thread_pin.py` asserts the three agree, since
-  `rv_forecast` has no `blas_threads` column and a drift there would mix
-  silently. The count is 8 rather than 1 because any fixed count buys
+  once, at load; `tests/test_thread_pin.py` asserts the three agree at the
+  source level. The count is 8 rather than 1 because any fixed count buys
   reproducibility, leaving the value free to be chosen on solver behaviour: a
   full archive rebuild at 1 thread (2026-09-08) lands 650 partitions against
   660, and 8 of the 27 lost sessions land with `svi_b` at its upper bound --
@@ -45,6 +44,27 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   it at 1 thread but does at 8 and at 32, so an ambient value in the operator's
   shell beat both writers' fallback assignment (`setdefault` / `:=`) and no
   column exists to say what it was.
+- `signals/har_rv.py` + `ingest/schemas/__init__.py` — **`rv_forecast` is not
+  drift-proof.** `scripts/build_rv_forecast.py` pins BLAS threads to 8, but the
+  writer `docs/data-flow.html` documents for the daily row —
+  `python -m signals.har_rv`, run by hand — applies no pin, and there is no
+  `har_rv` entry in `deploy/crontab` or `deploy/schedule.json` and no unit on
+  the box, so nothing routes it through `scripts/cronjob.sh`. The daily row is
+  therefore fit at whatever the operator's shell carried (32 on this box) while
+  a rebuild lands 8, and unlike `vol_surface` the schema has no `blas_threads`
+  column, so the mix is invisible. Closing it needs both halves: the daily
+  writer through a pinned entry point (a scheduled job, or the pin inside the
+  module above the numpy import), and a stamp on the schema — which makes it a
+  rebuild-and-swap like `vol_surface`'s, not an in-place change.
+- `scripts/cronjob.sh` + `deploy/ansible/templates/massive-job.service.j2:31` —
+  the BLAS pin is a fallback (`: "${VAR:=8}"`), and the unit imports the
+  operator's environment (`EnvironmentFile=-%h/crack-the-sky/.env`), so a
+  thread variable added to `.env` would silently retune every scheduled fit and
+  the source would still read 8. Deliberate as far as it goes — the override is
+  a feature and `blas_threads` stamps whatever actually ran — but it is the
+  same mechanism that left production's archive unpinned, and it is unstamped
+  for every dataset except `vol_surface`. `.env` carries no thread variable
+  today; this is a latent hole, not a live one.
 - `pricing/from_market.py:200` — `expiry_instant` and `year_fraction` accept a
   session calendar that moves a PM-settled expiry to the 13:00 ET early close,
   but **no production caller passes one yet**, so the default is still the

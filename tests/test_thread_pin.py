@@ -15,11 +15,15 @@ of the 660 sessions that fit cleanly at 8, and 8 of those 27 landed with
 a fit. ``scripts/cronjob.sh`` carries the full measurement.
 
 These tests pin the mechanism rather than the numerics: the value has to reach
-the job's own process, it has to be the same value in every writer (the
-scheduled job and the two manual archive rebuilds append to the same datasets),
-in the archive rebuild it has to be set before OpenBLAS loads, and the value
-stamped on landed ``vol_surface`` rows (``blas_threads``) has to be the one the
-job actually ran under.
+the job's own process, it has to be the same value in every writer that sets
+one, in the archive rebuild it has to be set before OpenBLAS loads, and the
+value stamped on landed ``vol_surface`` rows (``blas_threads``) has to be the
+one the job actually ran under.
+
+What they deliberately do not assert: that a writer cannot run at some other
+count. ``setdefault`` and ``:=`` both yield to an inherited value, which is the
+override ``blas_threads`` exists to record. They check the source-level
+agreement of the three writers, not their runtime environment.
 """
 
 from __future__ import annotations
@@ -104,10 +108,14 @@ def test_build_surface_pins_before_numpy_can_load() -> None:
 @pytest.mark.parametrize("script", [BUILD_SURFACE, BUILD_RV])
 def test_manual_rebuilds_pin_the_same_count_as_the_scheduled_job(script: Path) -> None:
     """Three writers set this independently -- cronjob.sh for every scheduled
-    job, and the two archive rebuild scripts that are run by hand. They append
-    to the same datasets, so a count that drifts apart between them mixes two
-    non-comparable fits into one archive. ``rv_forecast`` has no
-    ``blas_threads`` column, so there it would mix silently.
+    job, and the two archive rebuild scripts that are run by hand -- so the
+    value can drift apart in the source without anything noticing.
+
+    For ``vol_surface`` that would mix two non-comparable fits into one
+    archive, visibly, because every row stamps the count it ran under. For
+    ``rv_forecast`` there is no stamp and no scheduled writer to agree with at
+    all (see scripts/build_rv_forecast.py); this only keeps the repo's own two
+    values from diverging.
     """
     src = script.read_text()
     values = set(re.findall(r'os\.environ\.setdefault\(_var, "(\d+)"\)', src))

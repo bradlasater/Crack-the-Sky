@@ -29,9 +29,20 @@ from pathlib import Path
 # its thread count once, when the shared library loads. Same reasoning as
 # scripts/build_surface.py -- the archive rebuild is where an unreproducible
 # fit does the most damage.
+#
+# The count matches cronjob.sh's so the repo has one BLAS pin rather than two,
+# but be clear about what that does and does not buy here. Unlike vol_surface,
+# rv_forecast has no scheduled writer to agree with: there is no har_rv entry
+# in deploy/crontab or deploy/schedule.json and no unit on the box, and
+# docs/data-flow.html documents the daily writer as `python -m signals.har_rv`
+# run by hand, which applies no pin at all. So this script is pinned and that
+# path is not, rv_forecast has no blas_threads column to tell the two apart,
+# and the dataset is therefore not drift-proof -- only self-consistent across
+# rebuilds. Logged in IMPROVEMENTS.md; closing it needs the daily writer routed
+# through a pinned entry point and a stamp on the schema.
 for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
              "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
-    os.environ.setdefault(_var, "1")
+    os.environ.setdefault(_var, "8")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 

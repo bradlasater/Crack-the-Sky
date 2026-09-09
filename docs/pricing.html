@@ -173,15 +173,19 @@
           <code>vol_surface</code>. Read back with <code>load_surface</code> /
           <code>Surface.from_rows</code> — do not refit from day bars. No VIX surface:
           those options are on the VX future, a different modelling question.
-          BLAS threads are pinned to 1 by <code>scripts/cronjob.sh</code> and
+          BLAS threads are pinned to 8 by <code>scripts/cronjob.sh</code> and
           <code>scripts/build_surface.py</code>: the fit is a constrained
-          least-squares solve, and at 8 threads instead of 1 it lands elsewhere
-          in an equally good basin — 397 of 720 values moved on 2026-09-04,
-          <code>svi_rho</code> by up to 2.24e-03 relative, with
-          <code>rms_error</code> moving less than 1e-09. Parameters that depend
-          on how busy the box was cannot be diffed across a rebuild or
-          reproduced by a backtest. The ATM curve is unaffected (scalar Brent,
-          no BLAS).
+          least-squares solve, and at a different thread count it lands elsewhere
+          in an equally good basin — 397 of 720 values moved between 1 and 8
+          threads on 2026-09-04, <code>svi_rho</code> by up to 2.24e-03 relative,
+          with <code>rms_error</code> moving less than 1e-09. Parameters that
+          depend on how busy the box was cannot be diffed across a rebuild or
+          reproduced by a backtest. Any fixed count buys that, so the value is
+          chosen on solver behaviour: at 1 thread, 27 of the 660 sessions that
+          fit cleanly at 8 instead trip an arbitrage guard, 8 of them with
+          <code>svi_b</code> against its upper bound. Every landed row stamps
+          the count it ran under in <code>blas_threads</code>. The ATM curve is
+          unaffected (scalar Brent, no BLAS).
         </dd>
       </dl>
 

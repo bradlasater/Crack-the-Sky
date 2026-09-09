@@ -7,15 +7,29 @@ equally good basin, so the fit is not wrong -- it is just not the same numbers
 twice, which is enough to make a rebuild undiffable and the backtester's inputs
 unreproducible.
 
+The count is 8. Reproducibility is what the pin buys and any fixed count buys
+it, so the value is chosen on solver behaviour: rebuilding the archive at 1
+thread on 2026-09-08 tripped the butterfly or calendar arbitrage guard on 27
+of the 660 sessions that fit cleanly at 8, and 8 of those 27 landed with
+``svi_b`` at its upper bound -- the solve hit the boundary instead of finding
+a fit. ``scripts/cronjob.sh`` carries the full measurement.
+
 These tests pin the mechanism rather than the numerics: the value has to reach
-the job's own process, in the archive rebuild it has to be set before OpenBLAS
-loads, and the value stamped on landed ``vol_surface`` rows
-(``blas_threads``) has to be the one the job actually ran under.
+the job's own process, it has to be the same value in every writer that sets
+one, in the archive rebuild it has to be set before OpenBLAS loads, and the
+value stamped on landed ``vol_surface`` rows (``blas_threads``) has to be the
+one the job actually ran under.
+
+What they deliberately do not assert: that a writer cannot run at some other
+count. ``setdefault`` and ``:=`` both yield to an inherited value, which is the
+override ``blas_threads`` exists to record. They check the source-level
+agreement of the three writers, not their runtime environment.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -25,6 +39,10 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 CRONJOB = REPO / "scripts" / "cronjob.sh"
 BUILD_SURFACE = REPO / "scripts" / "build_surface.py"
+BUILD_RV = REPO / "scripts" / "build_rv_forecast.py"
+
+# The one number every writer has to agree on.
+PIN = "8"
 
 THREAD_VARS = (
     "OMP_NUM_THREADS",
@@ -55,12 +73,12 @@ def test_cronjob_pins_every_thread_var(var: str) -> None:
     """Every scheduled job runs through cronjob.sh, so the pin belongs there
     rather than in one unit -- it covers the systemd timers and the crontab
     fallback with one definition."""
-    assert _run_under_cronjob()[var] == "1"
+    assert _run_under_cronjob()[var] == PIN
 
 
 def test_cronjob_leaves_a_deliberate_override_alone() -> None:
     """``:=`` not ``=``. The units never set these, so scheduled runs always
-    get 1; an operator benchmarking by hand keeps their choice."""
+    get the pin; an operator benchmarking by hand keeps their choice."""
     assert _run_under_cronjob({"OMP_NUM_THREADS": "4"})["OMP_NUM_THREADS"] == "4"
 
 
@@ -87,6 +105,32 @@ def test_build_surface_pins_before_numpy_can_load() -> None:
         assert var in src
 
 
+@pytest.mark.parametrize("script", [BUILD_SURFACE, BUILD_RV])
+def test_manual_rebuilds_pin_the_same_count_as_the_scheduled_job(script: Path) -> None:
+    """Three writers set this independently -- cronjob.sh for every scheduled
+    job, and the two archive rebuild scripts that are run by hand -- so the
+    value can drift apart in the source without anything noticing.
+
+    For ``vol_surface`` that would mix two non-comparable fits into one
+    archive, visibly, because every row stamps the count it ran under. For
+    ``rv_forecast`` there is no stamp and no scheduled writer to agree with at
+    all (see scripts/build_rv_forecast.py); this only keeps the repo's own two
+    values from diverging.
+    """
+    src = script.read_text()
+    values = set(re.findall(r'os\.environ\.setdefault\(_var, "(\d+)"\)', src))
+    assert values == {PIN}, f"{script.name} pins {values or 'nothing'}, expected {PIN}"
+
+
+def test_cronjob_and_the_rebuild_scripts_do_not_disagree() -> None:
+    """The bash side of the same contract, read from the file rather than run,
+    so a mismatch is named here instead of surfacing as an undiffable archive.
+    """
+    shell = CRONJOB.read_text()
+    values = set(re.findall(r':\s*"\$\{[A-Z_]+:=(\d+)\}"', shell))
+    assert values == {PIN}, f"cronjob.sh pins {values or 'nothing'}, expected {PIN}"
+
+
 PIN_STAMP_PROBE = (
     f"import sys;sys.path.insert(0, {str(REPO)!r});"
     "from pricing.surface import blas_thread_pin;print(blas_thread_pin())"
@@ -101,7 +145,7 @@ def test_cronjob_pin_is_what_gets_stamped_on_rows() -> None:
         ["bash", str(CRONJOB), "pintest", sys.executable, "-c", PIN_STAMP_PROBE],
         capture_output=True, text=True, env=env, timeout=60, check=True,
     ).stdout.strip()
-    assert out == "1"
+    assert out == PIN
 
 
 def test_a_deliberate_override_is_what_gets_stamped() -> None:

@@ -294,6 +294,29 @@ blocks the default flip.
    **Executed 2026-09-07** for the daycount schema, exactly as above.
 
    **Second pass — the `blas_threads` recut (owner operation, pending).**
+
+   **The count moved from 1 to 8 (2026-09-08), and production's existing
+   archive turns out to be unpinned.** The first pass ran with the pin already
+   in the code, yet re-running that exact commit (`1365e37`) today against
+   unchanged inputs does not reproduce it: 27 of its 660 sessions now trip a
+   butterfly or calendar arbitrage guard. Running the same commit at 8 and at
+   32 threads reproduces production; only 1 thread fails. Both writers set the
+   pin with a fallback (`setdefault` in Python, `:=` in bash), so an ambient
+   value in the operator's shell wins silently, and the pre-stamp archive
+   carries no column to say which count it ran under -- which is the whole
+   argument for the stamp, arriving one pass late.
+
+   Given that, the value was re-chosen rather than inherited. Reproducibility
+   is what the pin buys and any fixed count buys it, so the count is free to be
+   picked on solver behaviour: at 1 thread a full archive rebuild lands 650
+   partitions against 660, losing 27 and gaining 17, and 8 of the 27 lost show
+   `svi_b` at its upper bound of 10 -- the solve hit the boundary rather than
+   finding a fit. One thread was never argued for on numerical grounds; it was
+   the fallback the line happened to carry. The pin is now 8 in
+   `scripts/cronjob.sh`, `scripts/build_surface.py` and
+   `scripts/build_rv_forecast.py`, with `tests/test_thread_pin.py` asserting
+   all three agree -- `rv_forecast` has no `blas_threads` column, so a drift
+   between its rebuild script and the scheduled job would mix silently.
    `vol_surface` gained a `blas_threads` column (the pinned BLAS thread count
    the fit ran under; null when unpinned). Because
    `catalog.validate_arrow_schema` is fail-loud on missing *and* extra columns
@@ -318,13 +341,13 @@ blocks the default flip.
       ```
 
       (To parallelise, run several workers bounded by disjoint
-      `--start`/`--end` windows; every row stamps `blas_threads` = 1 either
+      `--start`/`--end` windows; every row stamps `blas_threads` = 8 either
       way. Do **not** override the thread vars for speed — the stamp would
       honestly record a count the backtester then has to match.)
    2. Verify staging *before* touching production: **every** partition —
       `read_partition` is itself the schema check (fail-loud on a missing or
       extra column), so iterating the whole list is what proves no partial or
-      mixed rebuild slips through — carries `blas_threads` with all values 1
+      mixed rebuild slips through — carries `blas_threads` with all values 8
       and non-null, `daycount` stamps are `bus/252`/`act/365` only, and a
       `load_surface` round-trip succeeds on the latest partition:
 
@@ -337,7 +360,7 @@ blocks the default flip.
       for i, p in enumerate(parts, 1):
           t = read_partition("vol_surface", p, data_root=root)  # schema gate
           bt = t.column("blas_threads").to_pylist()
-          assert bt and all(v == 1 for v in bt), f"{p}: unpinned/misstamped rows"
+          assert bt and all(v == 8 for v in bt), f"{p}: unpinned/misstamped rows"
           assert set(t.column("daycount").to_pylist()) <= {"bus/252", "act/365"}, p
           if i % 100 == 0:
               print(i, "/", len(parts), flush=True)

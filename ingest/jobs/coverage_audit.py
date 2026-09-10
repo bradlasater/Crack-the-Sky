@@ -77,10 +77,10 @@ MAX_SWEEP_GAP_S = 180
 # So: the cadence numbers below are computed over the continuous window only,
 # and the two deliberate singletons are asserted separately.
 #
-# Early closes are the audit's to own (owner decision 2026-09; the crontab
-# stays as installed). Cron cannot express the NYSE calendar, so on a 13:00
-# close the cadence lines keep firing to 16:30 and those sweeps land in the
-# same partition. sweep_window ends the canonical window at the actual
+# Early closes are the audit's to own (owner decision 2026-09; the schedule
+# stays as installed). Neither cron nor an OnCalendar expression can state the
+# NYSE calendar, so on a 13:00 close the cadence lines keep firing to 16:30 and
+# those sweeps land in the same partition. sweep_window ends the canonical window at the actual
 # session close via market_gate.market_close_et, and _classify_stamps puts
 # the post-close firings in their own bucket rather than reading ~178 of them
 # as "stray". The early-close answer comes from market_gate reading
@@ -175,10 +175,10 @@ def _classify_stamps(
     the two scheduled singletons. ``stray`` is everything else -- typically a
     sweep run by hand outside the session; reported, never counted.
 
-    ``post_close`` is the early-close case. Cron cannot express the NYSE
+    ``post_close`` is the early-close case. The schedule cannot state the NYSE
     calendar, so on a 13:00 close the cadence lines keep firing to 16:30 and
     ~178 sweeps land after the canonical window has ended. The audit owns
-    early closes (the crontab deliberately stays put): those sweeps are the
+    early closes (the schedule deliberately stays put): those sweeps are the
     schedule working as installed, so they are accounted for separately
     rather than reported as strays -- and never asserted on, so a sweep job
     that learns to stop at the early close does not fail the day it ships.

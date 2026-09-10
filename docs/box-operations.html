@@ -99,18 +99,25 @@
       (<code>deploy/ansible/playbook.yml</code>) templates a user-level
       <code>.service</code>/<code>.timer</code> pair per entry into
       <code>~/.config/systemd/user/</code> and enables the timers.</p>
-      <p>The box crontab is still installed directly from the repo
-      (<code>crontab deploy/crontab</code> — the placeholder path already matches the box user, no
-      <code>sed</code> rewrite needed) as a fallback while the timers take over. The overlap is
-      safe: both paths go through <code>scripts/cronjob.sh</code> and share
-      <code>/tmp/massive-&lt;job&gt;.lock</code>, so whichever fires first runs and the other logs
-      <code>job_skipped</code> and exits 0 — and every timer sets <code>AccuracySec=1s</code>, so
-      the loser fires inside the winner's runtime rather than a minute later. After a clean day
-      of timer runs, a follow-up PR removes the crontab and this paragraph. The
-      <code>box.yml</code> “Crontab drift” step fails the build if the installed crontab diverges
-      from the repo; that alarm fired on 2026-09-01 when PRs #10/#11 added
-      <code>rates_sync</code> and <code>ibkr_executions</code> before the crontab was
-      re-installed. Fix is always the same: pull <code>main</code>, re-install the crontab.</p>
+      <p>The timers are the only schedule. A crontab installed from the repo ran the same
+      jobs before them and stayed installed alongside them through the cutover, so that a
+      timer problem could not stop collection; it was removed on 2026-09-10 after the bake.
+      Both paths went through <code>scripts/cronjob.sh</code> and shared
+      <code>/tmp/massive-&lt;job&gt;.lock</code>, so each scheduled minute one path ran and the
+      other logged <code>job_skipped</code> and exited 0 — visible in
+      <code>/data/massive/logs/cron.log</code> as exactly one skip per scheduled fire per job
+      (423 for <code>snapshot_sweep</code> on each of 2026-09-08 and 2026-09-09), which is what
+      a clean overlap looks like. Over those two sessions <code>coverage_audit</code> read
+      421 of 421 sweeps on all three chains with no stray sweeps, so nothing was double-captured
+      and the crontab could go.</p>
+      <p>What guards against it coming back is the <code>box.yml</code>
+      “No repo crontab installed” step, which fails the build if any installed crontab line
+      runs <code>scripts/cronjob.sh</code>. It replaces the old “Crontab drift” step, which
+      compared the installed crontab against the repo and fired on 2026-09-01 when PRs #10/#11
+      added <code>rates_sync</code> and <code>ibkr_executions</code> before it was re-installed.
+      The equivalent alarm now is “Timer drift”: the installed units must match a fresh
+      render of <code>deploy/schedule.json</code>, and every timer must be loaded. Fix is the
+      same shape as it always was — pull <code>main</code>, re-run the playbook.</p>
 
       <h2 id="box-timers">Systemd job timers</h2>
       <p><span class="tag ok">active</span> One <code>massive-&lt;job&gt;.timer</code> +
@@ -121,7 +128,7 @@
       <code>massive-snapshot-sweep-eod</code> runs <code>snapshot_sweep --eod</code>.</p>
       <ul>
         <li><code>Type=oneshot</code> services through <code>scripts/cronjob.sh</code>; logs still append to <code>/data/massive/logs/cron.log</code>, and journald keeps unit start/stop/exit status — <code>journalctl --user -u massive-coverage-audit</code>.</li>
-        <li><code>AccuracySec=1s</code> + <code>Persistent=false</code> + <code>RandomizedDelaySec=0</code> on every timer. The 1s accuracy is load-bearing for the crontab overlap (systemd's default is 1&nbsp;min — a timer firing up to 60s late would double-capture <code>snapshot_sweep</code>); no persistence because a missed sweep is worthless an hour later and catch-up would stampede the day's backlog after a reboot.</li>
+        <li><code>AccuracySec=1s</code> + <code>Persistent=false</code> + <code>RandomizedDelaySec=0</code> on every timer. The 1s accuracy was load-bearing for the crontab overlap (systemd's default is 1&nbsp;min — a timer firing up to 60s late would have double-captured <code>snapshot_sweep</code>) and stays load-bearing without it: a sweep is stamped with the minute it claims to sample, so a minute of slack lets a fire slide into the next minute's slot, which <code>coverage_audit</code> reads as a gap plus a stray. No persistence because a missed sweep is worthless an hour later and catch-up would stampede the day's backlog after a reboot.</li>
         <li><code>Restart=on-failure</code> with <code>StartLimitBurst=3</code> / <code>StartLimitIntervalSec=1800</code> only on low-frequency jobs — cross-run retry, the thing cron never had. The 1/min and 5/min jobs get no retry: the next tick is closer than any sane delay.</li>
         <li><code>OnFailure=massive-alert@&lt;check-slug&gt;.service</code> pings the check's <code>/fail</code> for deaths the job cannot report itself (OOM kill, unit start failure, exhausted restarts). Ordinary non-zero exits already ping <code>/fail</code> from the job.</li>
         <li>Timers elapse in the box's local time, which must stay America/New_York — the playbook fails loudly if the system timezone drifts.</li>
@@ -179,6 +186,8 @@ loginctl enable-linger brad-lasater          # survives logout/reboot</code></pr
       <ul>
         <li><strong>2026-08-31</strong> — first capture day; partial (sweeps began 17:25 ET), so coverage_audit and the box workflow correctly read red for it.</li>
         <li><strong>2026-09-01</strong> — first full session at minute cadence (SPY + I:SPX + VIX); runner installed; crontab aligned; IBKR Flex wired; Healthchecks schedules set; first real <code>drift_check</code> canary at 17:00 ET.</li>
+        <li><strong>2026-09-05</strong> — systemd timers installed and enabled (20 timers, 41 units); crontab left installed as a fallback, both paths sharing the job locks.</li>
+        <li><strong>2026-09-10</strong> — crontab removed after the bake. Two clean overlapped sessions (2026-09-08, 2026-09-09): 421/421 sweeps per chain, zero stray, one flock skip per scheduled fire. The timers run alone.</li>
       </ul>
 
       <h2 id="box-verify">Verify-it-works cheat sheet</h2>
@@ -186,8 +195,8 @@ loginctl enable-linger brad-lasater          # survives logout/reboot</code></pr
 gh api repos/{owner}/{repo}/actions/runners --jq '.runners[] | {name,status}'
 
 # schedule matches the repo?
-crontab -l | diff - deploy/crontab
 systemctl --user list-timers 'massive-*'
+crontab -l 2>/dev/null | grep cronjob.sh   # must print nothing
 
 # entitlements + payload shapes, live?
 venv/bin/python -m ingest.entitlements

@@ -52,7 +52,7 @@ def _write_manifest(root: Path, day: date, datasets=("trades_v1", "minute_aggs_v
 # ---------------------------------------------------------------------------
 
 def test_expected_sweeps_regular_session(tmp_path: Path) -> None:
-    # 09:30 -> 16:30 (close + the crontab's 30-minute tail), both endpoints
+    # 09:30 -> 16:30 (close + the schedule's 30-minute tail), both endpoints
     # firing, = 421 sweeps. Not close + 20: that is the websocket deadline,
     # and borrowing it here understated the day by ten sweeps.
     cadence_start = datetime(2026, 8, 28, 9, 30)
@@ -128,7 +128,7 @@ def _ms(day: date, hh: int, mm: int) -> int:
 
 
 def _land_early_close_day(tmp_path: Path) -> Path:
-    """An early-close day exactly as the crontab produces it: the full
+    """An early-close day exactly as the schedule produces it: the full
     09:30-13:30 window, both singletons, and the cadence still firing every
     minute 13:31-16:30 past the close (cron cannot express early closes)."""
     part = tmp_path / "clean" / "option_snapshots" / f"dt={EARLY_DATE.isoformat()}"
@@ -222,7 +222,7 @@ def test_missing_eod_run_on_early_close_still_fails(tmp_path: Path) -> None:
 def test_past_the_cadence_hard_stop_is_still_stray_on_an_early_close(
     tmp_path: Path,
 ) -> None:
-    """post_close ends where the crontab's cadence ends; a 17:00 sweep is a
+    """post_close ends where the scheduled cadence ends; a 17:00 sweep is a
     manual run, early close or not."""
     from ingest.common import market_gate
     market_gate._holiday_cache.clear()
@@ -247,7 +247,7 @@ def _window_base_ms(tmp_path: Path) -> int:
 
 
 def _singleton_ms(tmp_path: Path, which: str) -> int:
-    """Epoch-ms of the pre-open or EOD sweep, as the crontab schedules it."""
+    """Epoch-ms of the pre-open or EOD sweep, as the schedule fires it."""
     from datetime import datetime
 
     from ingest.common import market_gate
@@ -256,7 +256,7 @@ def _singleton_ms(tmp_path: Path, which: str) -> int:
 
 
 def _land_full_day(tmp_path: Path, roots=("SPY", "I:SPX", "VIX")) -> Path:
-    """A healthy day exactly as the crontab produces it, singletons included."""
+    """A healthy day exactly as the schedule produces it, singletons included."""
     part = tmp_path / "clean" / "option_snapshots" / f"dt={RUN_DATE.isoformat()}"
     part.mkdir(parents=True, exist_ok=True)
     expected = audit.expected_sweeps(RUN_DATE, tmp_path)

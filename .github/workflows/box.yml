@@ -67,27 +67,36 @@ jobs:
         # migration shows up as a red build rather than months of quiet 403s.
         run: venv/bin/python -m ingest.entitlements
 
-      - name: Crontab drift
-        # The installed crontab must match the repo (modulo the $HOME rewrite).
-        # Kept green through the timer cutover: the crontab stays installed as
-        # a fallback until the follow-up PR removes it.
+      - name: No repo crontab installed
+        # The crontab was the pre-timer schedule and was removed once the
+        # timers had baked (2026-09-10). The timers are now the only path, so
+        # a crontab that comes back -- restored from a backup, re-installed
+        # from an old checkout by hand -- would double every job's fire. The
+        # locks in scripts/cronjob.sh would absorb it silently, so nothing
+        # else on the box would say so. Match on the wrapper rather than on
+        # the whole file: an unrelated personal crontab entry is not this
+        # repo's business.
         run: |
-          sed "s|/home/brad-lasater|$HOME|g" deploy/crontab > /tmp/expected.crontab
-          diff <(crontab -l) /tmp/expected.crontab
+          if crontab -l 2>/dev/null | grep -q "scripts/cronjob.sh"; then
+            echo "::error::a repo crontab is installed -- the systemd timers own the schedule now; run 'crontab -r'"
+            crontab -l | grep "scripts/cronjob.sh"
+            exit 1
+          fi
 
       - name: Timer drift
         # The generated user units must match a fresh render of
         # deploy/schedule.json, and every timer must be loaded by systemd.
         # ansible-core is installed into the CI venv only (it is a no-op when
         # already present); the units are rendered by the same templates the
-        # install playbook uses. Skipped entirely while no massive timer is
-        # installed: the units land at cutover (the playbook run after this
-        # merges), and a red build before then would block the PR that
-        # installs them.
+        # install playbook uses. This used to skip itself when no massive timer
+        # was installed, so that a red build could not block the PR that
+        # installed them. That escape hatch is gone with the crontab: the
+        # timers are the only schedule now, so a box with no timers on it is
+        # a box that has stopped collecting, and it should be loud.
         run: |
           if ! ls "$HOME"/.config/systemd/user/massive-*.timer >/dev/null 2>&1; then
-            echo "::notice::massive timers not installed on the box yet (pre-cutover) -- skipping"
-            exit 0
+            echo "::error::no massive timers installed -- the box is not collecting; run the install playbook"
+            exit 1
           fi
           venv/bin/pip install --quiet ansible-core
           rm -rf /tmp/massive-units-rendered

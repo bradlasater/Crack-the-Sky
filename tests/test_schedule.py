@@ -1,12 +1,16 @@
-"""deploy/schedule.json carries every schedule twice: the cron form (the
-installed crontab stays in place through the cutover overlap) and the systemd
-OnCalendar form (the generated timers). These tests make that duplication safe:
+"""deploy/schedule.json carries every schedule twice: the cron form and the
+systemd OnCalendar form (the generated timers). Nothing installs the cron form
+any more -- the crontab was removed once the timers had baked -- but the
+duplication is kept deliberately, as a second, readable statement of each
+schedule that the timers can be checked against. ``Mon-Fri 10..15:00..59:00``
+is not a string anyone reads correctly on sight; ``* 10-15 * * 1-5`` is. These
+tests make that duplication earn its place:
 
-* the cron forms and commands must reproduce deploy/crontab exactly, so the
-  crontab and the schedule file cannot drift apart while both are installed;
 * the OnCalendar forms must fire at the same instants as the cron forms,
   checked against ``systemd-analyze calendar --iterations=N`` where that binary
-  exists (ubuntu-latest CI has it; a macOS dev box skips);
+  exists (ubuntu-latest CI has it; a macOS dev box skips) -- so a mistyped
+  OnCalendar shows up as a red test rather than as a job that silently stops
+  firing when you thought it would;
 * structural rules from the design: one healthchecks block per job, and
   Restart= only where the next tick is far away.
 """
@@ -136,49 +140,6 @@ def test_prune_is_monitored_on_its_monthly_schedule() -> None:
 
 
 # ---------------------------------------------------------------------------
-# While both are installed: schedule.json must reproduce deploy/crontab
-# ---------------------------------------------------------------------------
-
-
-def _crontab_schedule() -> dict[tuple[str, tuple[str, ...]], list[str]]:
-    """(job, command tokens) -> cron expressions, from deploy/crontab.
-
-    Normalized to schedule.json's shape: ``$PY`` (the venv python) is dropped
-    from the command and the ``>> $LOG 2>&1`` redirect goes with the shell
-    wrapping, leaving the tokens cronjob.sh actually invokes.
-    """
-    out: dict[tuple[str, tuple[str, ...]], list[str]] = {}
-    for line in (REPO_ROOT / "deploy" / "crontab").read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        fields = line.split()
-        if not re.match(r"[\d*]", fields[0]):
-            continue  # environment assignment, not a schedule
-        m = re.match(
-            r"cd \$REPO && bash scripts/cronjob\.sh (\w+) (.+) >> \$LOG 2>&1$",
-            " ".join(fields[5:]),
-        )
-        assert m, f"crontab line does not match the cronjob.sh wrapper: {line}"
-        job, command = m.group(1), m.group(2).split()
-        if command[0] == "$PY":
-            command = command[1:]
-        out.setdefault((job, tuple(command)), []).append(" ".join(fields[:5]))
-    return out
-
-
-def test_schedule_json_reproduces_the_installed_crontab() -> None:
-    """The follow-up PR deletes deploy/crontab; until then they cannot drift."""
-    from_json: dict[tuple[str, tuple[str, ...]], list[str]] = {}
-    for unit in UNITS:
-        key = (unit["job"], tuple(unit["command"]))
-        from_json.setdefault(key, []).extend(unit["cron"])
-    from_json = {k: sorted(v) for k, v in from_json.items()}
-    from_crontab = {k: sorted(v) for k, v in _crontab_schedule().items()}
-    assert from_json == from_crontab
-
-
-# ---------------------------------------------------------------------------
 # cron and on_calendar must fire at the same instants
 # ---------------------------------------------------------------------------
 
@@ -272,6 +233,13 @@ def _dst_shift_day(d: date) -> bool:
 @pytest.mark.skipif(SYSTEMD_ANALYZE is None, reason="systemd-analyze not installed")
 @pytest.mark.parametrize("unit", UNITS, ids=[u["unit"] for u in UNITS])
 def test_on_calendar_fires_at_the_same_instants_as_cron(unit: dict) -> None:
+    """The cron form is the oracle the OnCalendar form is read against.
+
+    No crontab is installed any more, so this no longer guards two live
+    schedules against drift -- it guards one live schedule against being
+    mistyped. The cron column is the human-legible statement of intent and
+    systemd's own parser decides whether the OnCalendar column agrees with it.
+    """
     # Both lists start at this same instant -- see _MARGIN. Naive ET wall clock:
     # systemd-analyze runs with TZ=America/New_York, so seed the cron side from
     # ET too -- a UTC-local now (CI runners) can be a calendar day ahead and

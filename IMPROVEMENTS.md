@@ -18,8 +18,7 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   convention change in `docs/plans/trading-day-calendar.md` hits this
   directly), and the backtester cannot reproduce the inputs a decision was made
   on. **Pinned going forward** at 8 threads in `scripts/cronjob.sh` (every
-  scheduled job, so the systemd timers and the crontab fallback share one
-  definition) and in `scripts/build_surface.py` /
+  scheduled job, so every generated timer shares one definition) and in `scripts/build_surface.py` /
   `scripts/build_rv_forecast.py`, which are run directly and must set it above
   the `pricing` / `signals` import because OpenBLAS reads its thread count
   once, at load; `tests/test_thread_pin.py` asserts the three agree at the
@@ -48,7 +47,7 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   drift-proof.** `scripts/build_rv_forecast.py` pins BLAS threads to 8, but the
   writer `docs/data-flow.html` documents for the daily row —
   `python -m signals.har_rv`, run by hand — applies no pin, and there is no
-  `har_rv` entry in `deploy/crontab` or `deploy/schedule.json` and no unit on
+  `har_rv` entry in `deploy/schedule.json` and no unit on
   the box, so nothing routes it through `scripts/cronjob.sh`. The daily row is
   therefore fit at whatever the operator's shell carried (32 on this box) while
   a rebuild lands 8, and unlike `vol_surface` the schema has no `blas_threads`
@@ -121,7 +120,7 @@ conservative audit pass. Grouped by area, roughly highest-value first.
 - `deploy/schedule.json` (`prune` entry) — **fixed**: the monthly prune job
   has a `healthchecks` block (`15 3 1 * *`, 180 min grace). `cronjob.sh`
   pings `/start` and success/`/fail` for `bash *.sh` commands, so the
-  crontab fallback and the systemd unit share one definition. The generated
+  scheduled unit needs no ping wiring of its own. The generated
   unit now also gets `OnFailure=massive-alert@massive-prune`. Re-run
   `scripts/setup_healthchecks.py` on the box so the check is created with
   the monthly schedule; an auto-created check would default to daily.
@@ -201,12 +200,13 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   earlier quarantined file. Same shape-preserving nudge as
   `_unique_clean_path` (readers parse the final `-` token as an integer
   stamp).
-- `ingest/jobs/coverage_audit.py:120` + `deploy/crontab:57` — **fixed**:
-  owner decision was that the audit owns early closes, so the crontab stays
-  as installed. The canonical sweep window already ended at the actual
+- `ingest/jobs/coverage_audit.py:120` + the `snapshot_sweep` cadence in
+  `deploy/schedule.json` (then also `deploy/crontab:57`, since removed) —
+  **fixed**: owner decision was that the audit owns early closes, so the
+  schedule stays as installed. The canonical sweep window already ended at the actual
   session close via `market_gate.market_close_et`; what misread was the
   classification — `_classify_stamps` now puts the post-close cadence firings
-  (13:33–16:24 on a 13:00 close, up to the crontab's hard stop) in their own
+  (13:33–16:24 on a 13:00 close, up to the cadence's hard stop) in their own
   `post_close` bucket: accounted for in the check data, never counted towards
   the ratio, never required (a sweep job that learns to stop at the early
   close must not fail the day it ships), and no longer reported as ~178

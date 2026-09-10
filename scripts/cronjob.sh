@@ -69,13 +69,15 @@ if [ "${1:-}" = "bash" ]; then
 fi
 
 _load_env() {
-  # Crontab does not source .env; systemd EnvironmentFile does. Fill only
-  # variables that are unset. Empty-but-set must win so tests cannot leak a
-  # real ping against production. TZ_NAME/TRADES_CONCURRENCY ride along
-  # because the jobs read them from os.environ at module import
-  # (ingest/common/market_gate.py, ingest/jobs/trades_watchlist.py): without
-  # this, a value set in .env would apply under systemd but silently not
-  # under cron.
+  # The generated units set EnvironmentFile, so a scheduled run already has
+  # .env; this covers the path that does not, which is a job run by hand
+  # through this wrapper (and, until 2026-09-10, the crontab, which does not
+  # source .env at all). Fill only variables that are unset. Empty-but-set
+  # must win so tests cannot leak a real ping against production.
+  # TZ_NAME/TRADES_CONCURRENCY ride along because the jobs read them from
+  # os.environ at module import (ingest/common/market_gate.py,
+  # ingest/jobs/trades_watchlist.py): without this, a value set in .env would
+  # apply under systemd but silently not to a hand-run job.
   local envf line key val
   envf="$REPO_ROOT/.env"
   [ -f "$envf" ] || return 0

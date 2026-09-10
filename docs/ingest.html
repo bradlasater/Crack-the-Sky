@@ -57,8 +57,7 @@
       <p>
         Three pipes into one disk tree. Everything live is 15-minute delayed.
         The schedule lives in <code>deploy/schedule.json</code> and is rendered
-        into systemd user timers; the crontab stays installed through the
-        cutover. Every line goes through
+        into systemd user timers. Every line goes through
         <code>scripts/cronjob.sh</code>, which takes the job's
         <code>flock</code> and — when a previous run still holds it — logs a
         <code>job_skipped</code> event instead of dropping the run in silence.
@@ -316,16 +315,18 @@
         holding the job's flock logs <code>job_skipped</code> and exits 0.
       </p>
       <p>
-        Cutover: the crontab (<code>deploy/crontab</code>,
-        <code>TZ=America/New_York</code>) stays installed as a fallback while
-        the timers take over — safe because both paths share the lock, and the
-        timers' <code>AccuracySec=1s</code> keeps the loser's fire inside every
-        job's runtime (systemd's default 1-minute accuracy would not, and a
-        late duplicate <code>snapshot_sweep</code> would read as a stray
-        sweep). The crontab and its drift alarm are removed by a follow-up PR
-        after a clean day of timer runs. What is actually installed on the box,
-        and the drift alarms that keep it honest:
-        <a href="box-operations.html">box operations</a>.
+        Cutover, now finished: a crontab ran this same schedule before the
+        timers and stayed installed alongside them from 2026-09-05, so a timer
+        problem could not stop collection. It was safe because both paths took
+        the same lock, and because <code>AccuracySec=1s</code> kept the losing
+        fire inside every job's runtime (systemd's default 1-minute accuracy
+        would not, and a late duplicate <code>snapshot_sweep</code> would read
+        as a stray sweep). It came off on 2026-09-10 after two overlapped
+        sessions landed 421 of 421 sweeps per chain with no strays. The
+        <code>cron</code> column in <code>schedule.json</code> outlived it, as
+        the legible form each <code>OnCalendar</code> string is tested against.
+        What is actually installed on the box, and the drift alarms that keep
+        it honest: <a href="box-operations.html">box operations</a>.
       </p>
       <p>
         Healthchecks: one check per job, slug <code>massive-&lt;job&gt;</code>

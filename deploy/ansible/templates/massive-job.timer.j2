@@ -7,16 +7,17 @@ Description={{ item.unit }} schedule (America/New_York wall clock)
 {% for cal in item.on_calendar -%}
 OnCalendar={{ cal }}
 {% endfor -%}
-# AccuracySec=1s is the load-bearing line of the cutover. The crontab stays
-# installed alongside these timers, and both paths share /tmp/massive-<job>.lock
-# via cronjob.sh: whichever fires first runs, the other logs job_skipped. At the
-# default AccuracySec=1min the timer can fire up to 60s after cron -- long after
-# cron's ~13s snapshot_sweep released the lock -- producing two snapshot files in
-# one minute, which coverage_audit reads as stray sweeps. 1s closes that window.
+# AccuracySec=1s was the load-bearing line of the crontab cutover: at the
+# default 1min, a timer could fire up to 60s after the cron run of the same
+# job, long after that run had released /tmp/massive-<job>.lock, landing two
+# snapshot files in one minute. The crontab is gone, but the pin stays -- the
+# schedule is a wall-clock one (a sweep is stamped with the minute it claims to
+# sample) and a minute of slack would let a fire drift into the next minute's
+# slot, which coverage_audit reads as a gap plus a stray.
 AccuracySec=1s
 RandomizedDelaySec=0
-# cron has no catch-up either, and a missed snapshot sweep is worthless an hour
-# later; Persistent=true would stampede the whole day's backlog after a reboot.
+# A missed snapshot sweep is worthless an hour later; Persistent=true would
+# stampede the whole day's backlog after a reboot.
 Persistent=false
 
 [Install]

@@ -170,7 +170,7 @@ def main(argv: list[str] | None = None) -> None:
     2026-09-05: ``job_start`` logged at 09:00:01, process gone one second
     later, no ``job_end``, no partition.
 
-    Injecting it here rather than in ``deploy/crontab`` keeps a hand-run
+    Injecting it here rather than in the unit's command line keeps a hand-run
     ``python -m ingest.jobs.contracts_sync --expired`` on a weekend from
     falling into the same hole, and lets CI assert the invariant.
 

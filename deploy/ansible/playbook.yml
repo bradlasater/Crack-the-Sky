@@ -69,19 +69,7 @@
         editable: true
         virtualenv: "{{ repo_dir }}/venv"
 
-    - name: Crontab installed from the repo
-      # Installing the same file again is a no-op in effect, so just always do
-      # it; the box.yml "Crontab drift" step verifies the result.
-      # Cutover note: the crontab STAYS installed while the systemd timers
-      # below take over. Both paths go through scripts/cronjob.sh and share
-      # /tmp/massive-<job>.lock, so the loser of each race logs job_skipped and
-      # exits 0. The timers' AccuracySec=1s keeps the loser's fire inside every
-      # job's runtime, so there is no double capture. A follow-up PR removes
-      # the crontab after a clean day of timer runs.
-      ansible.builtin.command:
-        cmd: crontab {{ repo_dir }}/deploy/crontab
-
-    - name: Schedule definition (one canonical file for crontab + timers)
+    - name: Schedule definition (one canonical file for the timers)
       ansible.builtin.include_vars:
         file: "{{ playbook_dir }}/../schedule.json"
         name: schedule
@@ -141,6 +129,42 @@
       ansible.builtin.command: systemctl --user enable --now {{ item.unit }}.timer
       loop: "{{ schedule.units }}"
       changed_when: false
+      tags: [timers]
+
+    - name: Unit changes land before the old schedule goes
+      # Handlers otherwise flush at the end of the play, which would put
+      # `crontab -r` ahead of the daemon-reload that arms the units this
+      # converge just wrote.
+      ansible.builtin.meta: flush_handlers
+
+    - name: Repo crontab removed (the timers above own the schedule)
+      # Last, deliberately: the crontab was the schedule before the timers and
+      # stayed installed alongside them through the cutover overlap so that a
+      # timer problem could not stop collection. It only comes off once this
+      # play has put the timers in place and started them, so no converge can
+      # leave the box with neither schedule on it. The overlap baked clean over
+      # 2026-09-08/09 -- 421 of 421 sweeps on every chain both days, and one
+      # flock skip per scheduled fire per job, which is exactly the second path
+      # losing the race.
+      #
+      # Only a crontab this repo installed is removed: `crontab -r` wipes the
+      # whole table, so refuse to run it over one carrying a schedule line that
+      # does not go through scripts/cronjob.sh. The leading assignments
+      # (TZ, REPO, PY, LOG) are this repo's own and go with it.
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          current="$(crontab -l 2>/dev/null || true)"
+          [ -n "$current" ] || { echo "absent"; exit 0; }
+          if printf '%s\n' "$current" | grep -E '^[0-9*@]' | grep -qv 'scripts/cronjob.sh'; then
+            echo "refusing: crontab schedules a job this repo did not install" >&2
+            exit 1
+          fi
+          crontab -r
+          echo "removed"
+        executable: /bin/bash
+      register: crontab_removal
+      changed_when: crontab_removal.stdout == "removed"
       tags: [timers]
 
     - name: Linger state

@@ -167,8 +167,8 @@ def test_bash_script_job_pings_fail_on_nonzero(tmp_path: Path) -> None:
     assert f"/{slug}/fail?create=1" in lines[1]
 
 
-def test_crontab_loads_healthchecks_from_dotenv(tmp_path: Path) -> None:
-    """Crontab does not source .env; a copied wrapper must read it itself."""
+def test_wrapper_loads_healthchecks_from_dotenv(tmp_path: Path) -> None:
+    """A run outside systemd gets no EnvironmentFile; the wrapper reads .env."""
     job = _job_name()
     bin_dir, log = _fake_curl(tmp_path)
     wrapper_root = tmp_path / "wrap"
@@ -198,7 +198,7 @@ def test_crontab_loads_healthchecks_from_dotenv(tmp_path: Path) -> None:
     assert f"https://hc.example.internal/ping/KEY/{slug}?create=1" in lines[1]
 
 
-def test_crontab_loads_tuning_vars_from_dotenv(tmp_path: Path) -> None:
+def test_wrapper_loads_tuning_vars_from_dotenv(tmp_path: Path) -> None:
     """TZ_NAME/TRADES_CONCURRENCY are read at module import, so cron must
     export them from .env before the command starts (systemd does it via
     EnvironmentFile). Set-but-empty in the real environment still wins."""

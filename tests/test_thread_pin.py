@@ -71,8 +71,8 @@ def _run_under_cronjob(env_extra: dict[str, str] | None = None) -> dict[str, str
 @pytest.mark.parametrize("var", THREAD_VARS)
 def test_cronjob_pins_every_thread_var(var: str) -> None:
     """Every scheduled job runs through cronjob.sh, so the pin belongs there
-    rather than in one unit -- it covers the systemd timers and the crontab
-    fallback with one definition."""
+    rather than in each of the twenty-odd generated units -- one definition
+    covers every timer, and a hand-run job through the same wrapper too."""
     assert _run_under_cronjob()[var] == PIN
 
 

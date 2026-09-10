@@ -33,7 +33,7 @@ from pathlib import Path
 # The count matches cronjob.sh's so the repo has one BLAS pin rather than two,
 # but be clear about what that does and does not buy here. Unlike vol_surface,
 # rv_forecast has no scheduled writer to agree with: there is no har_rv entry
-# in deploy/crontab or deploy/schedule.json and no unit on the box, and
+# in deploy/schedule.json and no unit on the box, and
 # docs/data-flow.html documents the daily writer as `python -m signals.har_rv`
 # run by hand, which applies no pin at all. So this script is pinned and that
 # path is not, rv_forecast has no blas_threads column to tell the two apart,

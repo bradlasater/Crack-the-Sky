@@ -215,7 +215,7 @@
             <td class="job">flatfile_pull<br><span class="tag s3">s3</span></td>
             <td class="when">11:05 · default date = T-1</td>
             <td>Tue–Sat</td>
-            <td>OPRA trades / minute aggs / day aggs csv.gz, filtered to roots SPY / SPX / SPXW / VIX / VIXW (not SPYL… / VIXY…). Manifest <code>_meta/flatfile_manifest.json</code>.</td>
+            <td>OPRA trades / minute aggs / day aggs csv.gz, filtered to roots SPY / SPX / SPXW / VIX / VIXW (not SPYL… / VIXY…). Manifest <code>_meta/flatfile_manifest.json</code>. A dataset the vendor has not published by 12:00 ET fails the run, so it pings <code>/fail</code> and the unit retries every 30 min to ~15:30 — the other three ways a dataset can be missing (out of entitlement, genuinely absent for a historical date, <code>--dry-run</code>) exit 0. The run also re-pulls anything the manifest shows missing from the last 10 session days first, so a day left partial by a late publish heals the next morning; <code>--no-backfill</code> skips that. A dataset already in the manifest is left alone — re-running does not write a second parquet into the partition — unless <code>--replace</code> or <code>--force-download</code> says otherwise.</td>
           </tr>
           <tr>
             <td class="job">reconcile<br><span class="tag s3">s3</span></td>

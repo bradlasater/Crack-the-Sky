@@ -38,13 +38,33 @@ def _trade(ticker: str) -> dict:
     }
 
 
-def _write_manifest(root: Path, day: date, datasets=("trades_v1", "minute_aggs_v1", "day_aggs_v1")) -> None:
+def _write_manifest(root: Path, day: date, datasets=("trades_v1", "minute_aggs_v1", "day_aggs_v1"),
+                    land: bool = True) -> None:
+    """Manifest rows, and by default the clean output they claim to describe.
+
+    The partition check compares the two, so a manifest with nothing written
+    behind it is an incomplete day, not a complete one.
+    """
     path = landing.meta_path("flatfile_manifest.json", data_root=root)
     path.write_text(json.dumps([
         {"dataset": ds, "date": day.isoformat(), "bytes": 1,
          "rows_in": 100, "rows_kept": 10, "md5": "x"}
         for ds in datasets
     ]), encoding="utf-8")
+    if land:
+        for ds in datasets:
+            _land_flatfile_rows(root, day, ds, 10)
+
+
+def _land_flatfile_rows(root: Path, day: date, dataset: str, rows: int) -> None:
+    """Write ``rows`` flatfile_pull-authored rows into the clean partition."""
+    from ingest import schemas
+    from ingest.jobs.flatfile_pull import CLEAN_DATASET
+
+    clean = CLEAN_DATASET[dataset]
+    blank = {f.name: None for f in schemas.SCHEMAS[clean]}
+    landing.write_clean(clean, day, [dict(blank) for _ in range(rows)],
+                        job="flatfile_pull", data_root=root)
 
 
 # ---------------------------------------------------------------------------
@@ -829,3 +849,87 @@ def test_a_day_older_than_the_boundary_skips(tmp_path) -> None:
     far_future = RUN_DATE + timedelta(days=audit.UNDERLYING_ENTITLEMENT_DAYS + 30)
     checks = audit.check_underlying_window(s, RUN_DATE, today=far_future)
     assert [c.status for c in checks] == [audit.SKIP]
+
+
+# ---------------------------------------------------------------------------
+# Duplicate / truncated flat-file writes
+# ---------------------------------------------------------------------------
+#
+# partition[...] only asks whether a partition is non-empty, so a partition
+# holding every row twice passed it. 2026-09-04 and 2026-09-14 both sat that
+# way in production -- twelve days and four days -- with every check green.
+
+def _partition_checks(settings: Settings, day: date) -> dict:
+    return {c.name: c for c in audit.check_flatfiles(settings, day)
+            if c.name.startswith("flatfile_partition[")}
+
+
+def test_a_single_correct_write_passes(tmp_path: Path) -> None:
+    _write_manifest(tmp_path, RUN_DATE)
+    checks = _partition_checks(_settings(tmp_path), RUN_DATE)
+    assert {c.status for c in checks.values()} == {audit.PASS}
+    assert checks["flatfile_partition[trades_v1]"].detail == "10 rows in 1 file"
+
+
+def test_a_duplicate_write_is_caught(tmp_path: Path) -> None:
+    """The 2026-09-04 / 2026-09-14 shape: the same rows written twice."""
+    _write_manifest(tmp_path, RUN_DATE)
+    _land_flatfile_rows(tmp_path, RUN_DATE, "trades_v1", 10)  # the second copy
+    check = _partition_checks(_settings(tmp_path), RUN_DATE)["flatfile_partition[trades_v1]"]
+    assert check.status == audit.FAIL
+    assert "2 copies of the same 10 rows" in check.detail
+    assert check.data == {"rows": 20, "files": 2, "rows_kept": 10}
+
+
+def test_output_missing_behind_a_manifest_row_is_caught(tmp_path: Path) -> None:
+    """The manifest row is written after the parquet, so this is a real loss."""
+    _write_manifest(tmp_path, RUN_DATE, land=False)
+    check = _partition_checks(_settings(tmp_path), RUN_DATE)["flatfile_partition[trades_v1]"]
+    assert check.status == audit.FAIL
+    assert "no flatfile_pull file is there" in check.detail
+
+
+def test_a_truncated_write_is_caught(tmp_path: Path) -> None:
+    """Fewer rows than the manifest counted: not a duplicate, still wrong."""
+    _write_manifest(tmp_path, RUN_DATE, land=False)
+    for ds in ("trades_v1", "day_aggs_v1"):
+        _land_flatfile_rows(tmp_path, RUN_DATE, ds, 4)
+    check = _partition_checks(_settings(tmp_path), RUN_DATE)["flatfile_partition[trades_v1]"]
+    assert check.status == audit.FAIL
+    assert "4 rows in 1 file(s), manifest kept 10" in check.detail
+
+
+def test_other_jobs_writing_the_same_partition_do_not_count(tmp_path: Path) -> None:
+    """trades_watchlist lands ~90 files a day into option_trades.
+
+    Counting every parquet in the partition would read those as duplication.
+    """
+    from ingest import schemas
+    _write_manifest(tmp_path, RUN_DATE)
+    blank = {f.name: None for f in schemas.SCHEMAS["option_trades"]}
+    landing.write_clean("option_trades", RUN_DATE, [dict(blank) for _ in range(7)],
+                        job="trades_watchlist", data_root=tmp_path)
+    check = _partition_checks(_settings(tmp_path), RUN_DATE)["flatfile_partition[trades_v1]"]
+    assert check.status == audit.PASS
+    assert check.data["rows"] == 10
+
+
+def test_minute_aggs_is_exempt_because_reconcile_owns_that_partition(tmp_path: Path) -> None:
+    """reconcile rewrites option_minute_bars and quarantines the pull's file.
+
+    Checking the invariant there would fail every day it worked correctly.
+    """
+    _write_manifest(tmp_path, RUN_DATE)
+    assert "flatfile_partition[minute_aggs_v1]" not in _partition_checks(
+        _settings(tmp_path), RUN_DATE)
+    assert "minute_aggs_v1" not in audit.FLATFILE_OWNED_PARTITIONS
+
+
+def test_zero_rows_kept_does_not_add_a_second_failure(tmp_path: Path) -> None:
+    """flatfile[...] already fails there; saying it twice is noise."""
+    path = landing.meta_path("flatfile_manifest.json", data_root=tmp_path)
+    path.write_text(json.dumps([
+        {"dataset": "trades_v1", "date": RUN_DATE.isoformat(),
+         "rows_in": 100, "rows_kept": 0}
+    ]), encoding="utf-8")
+    assert _partition_checks(_settings(tmp_path), RUN_DATE) == {}

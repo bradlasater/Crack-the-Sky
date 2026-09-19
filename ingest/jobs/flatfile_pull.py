@@ -22,6 +22,17 @@ so re-filtering history after a roots change costs no bandwidth;
 
 Default ``--date`` is the previous trading day (so the Tue-Sat 11:05 cron
 always targets yesterday); pass ``--date`` explicitly to backfill.
+
+A dataset the vendor has not published by ``RETRY_UNTIL_ET`` raises
+``FlatfilePullError``, so the run exits 1, pings Healthchecks ``/fail`` and
+lets the unit's ``Restart=on-failure`` try again over the afternoon. The three
+other ways a dataset can be missing -- out of entitlement, genuinely absent
+for a historical date, or ``--dry-run`` -- are not failures and exit 0.
+
+On the unattended run (no explicit ``--date``) the job first sweeps the last
+``BACKFILL_LOOKBACK`` session days and re-pulls anything the manifest shows
+missing, so a day left partial by a late publish heals the next morning
+instead of waiting for a human. ``--no-backfill`` skips it.
 """
 
 from __future__ import annotations
@@ -33,6 +44,7 @@ import hashlib
 import json
 import sys
 import time
+from dataclasses import dataclass
 from datetime import date
 from datetime import time as dtime
 from pathlib import Path
@@ -59,6 +71,40 @@ CLEAN_DATASET = {
 RETRY_SLEEP_S = 300
 RETRY_UNTIL_ET = dtime(12, 0)  # T-1 file is normally published ~11:00 ET
 CHUNK = 1024 * 1024
+
+# How far back the self-heal sweep looks, in session days the manifest knows
+# about. Ten covers a two-week vendor hiccup without turning a cold archive
+# into a re-pull of everything.
+BACKFILL_LOOKBACK = 10
+
+# Why a dataset produced no manifest entry. Only LATE is worth failing the run
+# over: the vendor has not published yet but will, so a retry can still win.
+# ABSENT and NOT_ENTITLED are permanent for that date and retrying either just
+# alerts forever; DRY_RUN pulled nothing on purpose.
+LATE, ABSENT, NOT_ENTITLED, DRY_RUN = "late", "absent", "not_entitled", "dry_run"
+
+
+@dataclass
+class PullResult:
+    """One dataset's outcome for one date: the manifest entry, or why not.
+
+    ``_main`` needs the *reason* a dataset is missing, not just the count --
+    a bare None made ``--dry-run`` (three misses, by design) indistinguishable
+    from a vendor running late (the 2026-09-14 hole).
+    """
+
+    entry: dict[str, Any] | None = None
+    miss: str | None = None
+
+
+class FlatfilePullError(RuntimeError):
+    """A dataset the vendor should have published is still missing.
+
+    Raised so run_job exits 1 and pings /fail, which in turn lets the unit's
+    Restart=on-failure have a turn. Deliberately absent from cli._is_retryable:
+    that layer backs off 30s, which is nothing against a vendor hours late, and
+    it would triple the job's wall time before systemd ever got a look in.
+    """
 
 _AUTH_ERROR_CODES = {
     "InvalidSignature",
@@ -128,8 +174,11 @@ def _head_with_retry(
     key: str,
     logger: JsonlLogger,
     wait_for_publish: bool = True,
-) -> bool:
-    """HEAD the object; returns True when it exists. Auth errors exit 3.
+) -> str | None:
+    """HEAD the object; ``None`` when it exists, else why it does not.
+
+    The reason travels back to ``_main`` because the three misses are not
+    alike: only ``LATE`` is worth failing the run over. Auth errors exit 3.
 
     When ``wait_for_publish`` (the T-1 cron case) a 404 is retried every 300s
     until 12:00 ET, because the vendor publishes yesterday's file around
@@ -142,7 +191,7 @@ def _head_with_retry(
     while True:
         try:
             s3.head_object(Bucket=bucket, Key=key)
-            return True
+            return None
         except ClientError as exc:
             if _is_auth_error(exc):
                 if not _credentials_work(s3, bucket):
@@ -150,17 +199,17 @@ def _head_with_retry(
                 # Keys are fine: this object is out of entitlement (dataset
                 # above the tier, or a date before the history window).
                 logger.log("flatfile_not_entitled", key=key)
-                return False
+                return NOT_ENTITLED
             code = str(exc.response.get("Error", {}).get("Code", ""))
             if code not in ("404", "NoSuchKey", "NotFound"):
                 raise
             if not wait_for_publish:
                 logger.log("flatfile_absent", key=key)
-                return False
+                return ABSENT
             now = market_gate.now_et()
             if now.time() >= RETRY_UNTIL_ET:
                 logger.log("flatfile_not_ready_giving_up", key=key, now=now.isoformat())
-                return False
+                return LATE
             logger.log("flatfile_not_ready", key=key, retry_in_s=RETRY_SLEEP_S)
             time.sleep(RETRY_SLEEP_S)
         except (EndpointConnectionError, NoCredentialsError) as exc:
@@ -198,8 +247,13 @@ def manifest_dates(data_root: Path, dataset: str = SESSION_ORACLE) -> set[str]:
     }
 
 
-def _manifest_md5(data_root: Path, dataset: str, d: date) -> str | None:
-    """The md5 recorded for this dataset+date, if we have pulled it before."""
+def _manifest_entry(data_root: Path, dataset: str, d: date) -> dict[str, Any] | None:
+    """The manifest row for this dataset+date, if we have landed it before.
+
+    The row is written after the parquet, so its presence is a completion
+    record rather than a "file exists" guess -- which is what makes it safe
+    to skip work on the strength of it.
+    """
     path = landing.meta_path("flatfile_manifest.json", data_root)
     try:
         manifest = json.loads(path.read_text(encoding="utf-8"))
@@ -210,8 +264,14 @@ def _manifest_md5(data_root: Path, dataset: str, d: date) -> str | None:
     for entry in manifest:
         if (isinstance(entry, dict) and entry.get("dataset") == dataset
                 and entry.get("date") == d.isoformat()):
-            return entry.get("md5")
+            return entry
     return None
+
+
+def _manifest_md5(data_root: Path, dataset: str, d: date) -> str | None:
+    """The md5 recorded for this dataset+date, if we have pulled it before."""
+    entry = _manifest_entry(data_root, dataset, d)
+    return entry.get("md5") if entry is not None else None
 
 
 def _file_md5(path: Path) -> tuple[int, str]:
@@ -481,12 +541,35 @@ def _update_manifest(data_root: Path, entry: dict[str, Any]) -> Path:
 
 
 def _pull_dataset(s3: Any, settings: Settings, dataset: str, d: date,
-                  logger: JsonlLogger, args: Any) -> dict[str, Any] | None:
-    """Pull one dataset for one date; returns the manifest entry or None."""
+                  logger: JsonlLogger, args: Any) -> PullResult:
+    """Pull one dataset for one date; the manifest entry, or why there is none."""
     bucket = settings.massive_s3_bucket
     key = s3_key(dataset, d)
     dest = (Path(settings.data_root) / "raw" / "flatfiles" / dataset
             / f"dt={d.isoformat()}" / f"{d.isoformat()}.csv.gz")
+
+    # Already in the manifest means already landed, so do nothing. reuse_local
+    # below only skips the *download*: it still re-filters and writes a second
+    # timestamped parquet, which a whole-partition read then double-counts.
+    # That is the hazard refilter.sh quarantines against, and it is not
+    # theoretical -- a repair.sh run for 2026-09-14 landed trades_v1 twice,
+    # 2,861,001 rows counted as 5,722,002. Now that a late sibling dataset
+    # fails the run, every systemd retry would add another copy.
+    # --replace / --force-download are the deliberate rewrite paths (refilter)
+    # and still go through.
+    rewriting = (getattr(args, "replace", False)
+                 or getattr(args, "force_download", False))
+    landed = None if rewriting else _manifest_entry(
+        Path(settings.data_root), dataset, d
+    )
+    if landed is not None:
+        logger.log("flatfile_already_landed", dataset=dataset,
+                   date=d.isoformat(), rows_kept=landed.get("rows_kept"))
+        # Normalised because a hand-edited manifest row is foreign data and
+        # _main sums these fields.
+        return PullResult(entry={**landed,
+                                 "rows_kept": landed.get("rows_kept") or 0,
+                                 "bytes": landed.get("bytes") or 0})
 
     # Reuse is decided BEFORE touching S3. A re-filter of bytes already on
     # disk must not depend on the vendor being reachable, the credentials
@@ -502,11 +585,12 @@ def _pull_dataset(s3: Any, settings: Settings, dataset: str, d: date,
         # Only wait for publication when this is the file the vendor is about
         # to publish (yesterday's). Older dates resolve a 404 immediately.
         wait_for_publish = d >= previous_trading_day(market_gate.today_et())
-        if not _head_with_retry(s3, bucket, key, logger, wait_for_publish):
-            return None
+        miss = _head_with_retry(s3, bucket, key, logger, wait_for_publish)
+        if miss is not None:
+            return PullResult(miss=miss)
         if args.dry_run:
             logger.log("flatfile_dry_run", dataset=dataset, key=key)
-            return None
+            return PullResult(miss=DRY_RUN)
         size, md5 = _download(s3, bucket, key, dest)
         logger.log("flatfile_downloaded", dataset=dataset, path=str(dest),
                    bytes=size, md5=md5)
@@ -515,7 +599,7 @@ def _pull_dataset(s3: Any, settings: Settings, dataset: str, d: date,
     else:
         if args.dry_run:
             logger.log("flatfile_dry_run", dataset=dataset, key=key, reuse=True)
-            return None
+            return PullResult(miss=DRY_RUN)
         size, md5 = reused
         logger.log("flatfile_reused", dataset=dataset, path=str(dest),
                    bytes=size, md5=md5)
@@ -551,23 +635,106 @@ def _pull_dataset(s3: Any, settings: Settings, dataset: str, d: date,
         "md5": md5,
     }
     _update_manifest(Path(settings.data_root), entry)
-    return entry
+    return PullResult(entry=entry)
+
+
+def incomplete_recent_days(
+    data_root: Path, before: date, lookback: int = BACKFILL_LOOKBACK
+) -> list[tuple[date, list[str]]]:
+    """Recent session days the manifest shows as partly landed, oldest first.
+
+    A date with *some* dataset landed was certainly a session -- the vendor
+    publishes nothing at all for a closed day -- so a date carrying one or two
+    of the three is a hole provable without asking the vendor anything. A date
+    carrying none of them is ambiguous (a holiday, or a total miss) and is
+    deliberately left alone: deciding that needs the trades-object HEAD oracle
+    and the trading_days.json cache that history_audit owns, not a guess from
+    here.
+
+    ``before`` is exclusive. The caller's own target is pulled immediately
+    after this runs, and sweeping it too would either duplicate that work or,
+    for T-1, sit in the publish wait twice.
+    """
+    landed = {ds: manifest_dates(data_root, ds) for ds in DATASETS}
+    sessions: set[date] = set()
+    for isos in landed.values():
+        for iso in isos:
+            try:
+                sessions.add(date.fromisoformat(iso))
+            except ValueError:  # a hand-edited manifest row knows nothing
+                continue
+    out = []
+    for day in sorted(s for s in sessions if s < before)[-lookback:]:
+        missing = [ds for ds in DATASETS if day.isoformat() not in landed[ds]]
+        if missing:
+            out.append((day, missing))
+    return out
+
+
+def _backfill(s3: Any, settings: Settings, before: date,
+              logger: JsonlLogger, args: Any) -> dict[str, int]:
+    """Re-pull datasets missing from recent session days; returns counters.
+
+    This is the fix for the class of bug rather than the instance. On
+    2026-09-15 the vendor published minute_aggs_v1 and day_aggs_v1 for
+    2026-09-14 after the 12:00 ET cutoff; the run exited 0 two datasets short
+    and nothing looked at that date again, because the job only ever targets
+    T-1. With this sweep the next morning's run closes it unattended.
+
+    Deliberately does not raise. A day the vendor never fills would otherwise
+    fail this job forever -- masking a fresh T-1 failure behind a stale one
+    and burning the restart budget on a hole that is not going to close.
+    history_audit already alerts weekly on a gap that persists, with the
+    oracle to tell a hole from a holiday.
+    """
+    days = incomplete_recent_days(Path(settings.data_root), before)
+    if not days:
+        return {}
+    filled = failed = 0
+    for day, missing in days:
+        for dataset in missing:
+            result = _pull_dataset(s3, settings, dataset, day, logger, args)
+            if result.entry is not None:
+                filled += 1
+                logger.log("flatfile_backfilled", dataset=dataset,
+                           date=day.isoformat(), rows_kept=result.entry["rows_kept"])
+            else:
+                failed += 1
+                logger.log("flatfile_backfill_failed", dataset=dataset,
+                           date=day.isoformat(), reason=result.miss)
+    return {"backfilled": filled, "backfill_failed": failed}
 
 
 def _main(args: Any, settings: Settings, logger: JsonlLogger) -> dict[str, Any]:
     d = date.fromisoformat(args.date)  # always set: main() injects the default
     s3 = _s3_client(settings)
-    entries = []
-    for dataset in DATASETS:
-        entry = _pull_dataset(s3, settings, dataset, d, logger, args)
-        if entry is not None:
-            entries.append(entry)
-    return {
+
+    # Heal recent partial days before pulling today's. Ordered this way so a
+    # backfill still happens on a day the target itself fails.
+    swept = (_backfill(s3, settings, d, logger, args)
+             if getattr(args, "backfill", False) and not args.dry_run else {})
+
+    results = [_pull_dataset(s3, settings, ds, d, logger, args) for ds in DATASETS]
+    entries = [r.entry for r in results if r.entry is not None]
+    late = [ds for ds, r in zip(DATASETS, results, strict=True) if r.miss == LATE]
+
+    summary = {
         "rows": sum(e["rows_kept"] for e in entries),
         "bytes": sum(e["bytes"] for e in entries),
         "datasets_ok": len(entries),
         "datasets_missing": len(DATASETS) - len(entries),
+        **swept,
     }
+    if late:
+        # Log the counters the raise is about to cost: run_job writes
+        # job_error instead of job_end on an exception, and this incident was
+        # read off exactly these fields four days after the fact.
+        logger.log("flatfile_summary", date=d.isoformat(), **summary)
+        raise FlatfilePullError(
+            f"{len(late)} dataset(s) still unpublished for {d} at "
+            f"{RETRY_UNTIL_ET:%H:%M} ET: {', '.join(late)}"
+        )
+    return summary
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -575,9 +742,11 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(argv) if argv is not None else sys.argv[1:]
     argv, force_download = strip_flag(argv, "--force-download")
     argv, replace = strip_flag(argv, "--replace")
+    argv, no_backfill = strip_flag(argv, "--no-backfill")
     # "--date=X" is a single argv token; a bare-membership check misses it and
     # the appended default then wins (argparse keeps the last --date).
-    if not any(a == "--date" or a.startswith("--date=") for a in argv):
+    explicit_date = any(a == "--date" or a.startswith("--date=") for a in argv)
+    if not explicit_date:
         # Resolve against DATA_ROOT without requiring full Settings (the
         # market gate only needs the holidays cache location).
         prev = previous_trading_day(market_gate.today_et())
@@ -585,6 +754,10 @@ def main(argv: list[str] | None = None) -> int:
     def main_fn(a, st, log):
         a.force_download = force_download
         a.replace = replace
+        # The sweep belongs to the unattended T-1 run. An explicit --date is
+        # someone working on one specific day, who should not have nine others
+        # pulled out from under them.
+        a.backfill = not (no_backfill or explicit_date)
         return _main(a, st, log)
 
     return run_job(JOB, main_fn, argv)  # run_job exits; return is for tests

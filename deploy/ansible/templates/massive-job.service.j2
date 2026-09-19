@@ -21,8 +21,12 @@ OnFailure=massive-alert@massive-{{ item.job | replace('_', '-') }}.service
 # has one). StartLimit* live in [Unit]: in [Service] they parse as unknown keys
 # and are silently ignored (deploy/systemd/massive-ws-minute-bars.service has
 # lived with that).
-StartLimitBurst=3
-StartLimitIntervalSec=1800
+# The interval must stay wider than burst x RestartSec, or the restarts
+# outrun the window that is meant to count them, no start limit is ever
+# reached, and the unit retries forever instead of failing and alerting.
+# tests/test_schedule.py asserts that for every unit.
+StartLimitBurst={{ item.restart.burst | default(3) }}
+StartLimitIntervalSec={{ item.restart.interval_sec | default(1800) }}
 {% endif %}
 
 [Service]

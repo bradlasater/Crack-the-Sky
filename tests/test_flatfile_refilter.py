@@ -362,9 +362,9 @@ def test_refilter_does_not_need_s3(tmp_path: Path) -> None:
 
     d = date(2026, 8, 28)
     _reusable_day(tmp_path, d)
-    entry = _pull_dataset(_ExplodingS3(), _settings_for(tmp_path), "trades_v1",
-                          d, JsonlLogger(path=None, echo=False), _args())
-    assert entry is not None and entry["rows_kept"] == 5
+    result = _pull_dataset(_ExplodingS3(), _settings_for(tmp_path), "trades_v1",
+                           d, JsonlLogger(path=None, echo=False), _args())
+    assert result.entry is not None and result.entry["rows_kept"] == 5
     part = tmp_path / "clean" / CLEAN_DATASET["trades_v1"] / f"dt={d.isoformat()}"
     assert len(list(part.glob("*.parquet"))) == 1
 

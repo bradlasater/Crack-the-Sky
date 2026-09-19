@@ -65,7 +65,17 @@ def test_unit_schema_and_uniqueness() -> None:
             f"{u['unit']}: cron and on_calendar pair up one-to-one"
         )
         if u["restart"] is not None:
-            assert set(u["restart"]) == {"sec"} and u["restart"]["sec"] > 0
+            assert set(u["restart"]) <= {"sec", "burst", "interval_sec"}
+            assert u["restart"]["sec"] > 0
+            # The start limit only bounds the retries when its window is wider
+            # than the retries themselves. Equal or narrower and the unit
+            # restarts forever instead of failing and firing its alert.
+            burst = u["restart"].get("burst", 3)
+            interval = u["restart"].get("interval_sec", 1800)
+            assert interval > burst * u["restart"]["sec"], (
+                f"{u['unit']}: StartLimitIntervalSec must exceed "
+                f"burst x RestartSec or the start limit never trips"
+            )
 
 
 def test_every_job_has_exactly_one_healthcheck_block() -> None:

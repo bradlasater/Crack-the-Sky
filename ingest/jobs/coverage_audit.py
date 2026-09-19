@@ -41,6 +41,8 @@ from ingest.common.cli import run_job
 from ingest.common.config import Settings, default_data_root
 from ingest.common.logging_utils import JsonlLogger
 from ingest.jobs import OPTION_ROOTS, ticker_root, underlying_root
+from ingest.jobs.flatfile_pull import CLEAN_DATASET as FLATFILE_CLEAN
+from ingest.jobs.flatfile_pull import JOB as FLATFILE_JOB
 
 # Same tuple as pricing.surface.SURFACE_ROOTS. Duplicated so this module
 # does not import pricing; test_coverage_audit pins the two equal.
@@ -110,6 +112,14 @@ SINGLETON_TOLERANCE = timedelta(minutes=10)
 EXPECTED_ROOTS = ("SPY", "SPX", "VIX")
 # Flat-file datasets flatfile_pull is responsible for.
 FLATFILE_DATASETS = ("trades_v1", "minute_aggs_v1", "day_aggs_v1")
+
+# Datasets whose clean partition flatfile_pull still owns, and so the only
+# ones the manifest row count can be checked against. minute_aggs_v1 is
+# absent on purpose: reconcile rewrites option_minute_bars from the flat file
+# and quarantines flatfile_pull's parquet as it goes, so that partition
+# legitimately holds no flatfile_pull-written file at all. Duplication there
+# is already prevented by reconcile's own quarantine_prior.
+FLATFILE_OWNED_PARTITIONS = ("trades_v1", "day_aggs_v1")
 
 PASS, WARN, FAIL, SKIP = "PASS", "WARN", "FAIL", "SKIP"
 
@@ -312,7 +322,74 @@ def check_flatfiles(settings: Settings, d: date) -> list[Check]:
                 f"flatfile[{dataset}]", PASS,
                 f"{entry['rows_kept']:,} rows kept of {entry.get('rows_in', 0):,}",
                 {"rows_kept": entry["rows_kept"], "rows_in": entry.get("rows_in")}))
+        # Only meaningful once the job claims it wrote something: at
+        # rows_kept 0 the flatfile[...] check above already failed, and a
+        # second failure saying the same thing is noise.
+        if dataset in FLATFILE_OWNED_PARTITIONS and entry and entry.get("rows_kept"):
+            checks.append(_check_flatfile_partition(settings, dataset, entry, d))
     return checks
+
+
+def _flatfile_partition_rows(
+    settings: Settings, clean_dataset: str, d: date
+) -> tuple[int, int]:
+    """``(rows, files)`` that flatfile_pull wrote into a clean partition.
+
+    Scoped to this job's own file names, because other jobs land in the same
+    partitions -- trades_watchlist writes ~90 files a day into option_trades
+    -- and their rows are not what the manifest counted. ``(-1, -1)`` when a
+    file will not open.
+    """
+    try:
+        import pyarrow.parquet as pq
+    except ImportError:  # pragma: no cover
+        return 0, 0
+    part = _clean_root(settings, clean_dataset) / f"dt={d.isoformat()}"
+    total = files = 0
+    for path in sorted(part.glob(f"{FLATFILE_JOB}-*.parquet")):
+        try:
+            total += pq.ParquetFile(path).metadata.num_rows
+        except Exception:  # noqa: BLE001 - a corrupt file is a finding, not a crash
+            return -1, -1
+        files += 1
+    return total, files
+
+
+def _check_flatfile_partition(
+    settings: Settings, dataset: str, entry: dict[str, Any], d: date
+) -> Check:
+    """The partition holds exactly the rows the manifest says were written.
+
+    ``partition[...]`` only asks whether a partition is non-empty, and a
+    double-written one passes that easily: 2026-09-04 and 2026-09-14 each
+    carried every flat-file row twice while every check stayed green, for
+    twelve days and four days respectively. Nothing downstream errored --
+    a whole-partition read just returned each trade twice.
+
+    The manifest records ``rows_kept`` per dataset and flatfile_pull writes
+    exactly one file per dataset per date, so this is an exact invariant
+    rather than a plausibility heuristic: more rows than that means a second
+    write, fewer means output that was lost or truncated after the fact.
+    """
+    name = f"flatfile_partition[{dataset}]"
+    kept = entry.get("rows_kept") or 0
+    rows, files = _flatfile_partition_rows(settings, FLATFILE_CLEAN[dataset], d)
+    data = {"rows": rows, "files": files, "rows_kept": kept}
+    if rows < 0:
+        return Check(name, FAIL, "unreadable parquet in partition", {"rows_kept": kept})
+    if files == 0:
+        return Check(name, FAIL,
+                     f"manifest kept {kept:,} rows but no {FLATFILE_JOB} file is there",
+                     data)
+    if rows == kept:
+        return Check(name, PASS, f"{rows:,} rows in 1 file" if files == 1
+                     else f"{rows:,} rows across {files} files", data)
+    if files > 1 and kept and rows == kept * files:
+        return Check(name, FAIL,
+                     f"{files} copies of the same {kept:,} rows -- duplicate write",
+                     data)
+    return Check(name, FAIL,
+                 f"{rows:,} rows in {files} file(s), manifest kept {kept:,}", data)
 
 
 def _partition_rows(settings: Settings, dataset: str, d: date) -> int:

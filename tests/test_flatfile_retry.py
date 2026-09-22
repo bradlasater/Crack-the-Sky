@@ -107,6 +107,16 @@ def _log() -> JsonlLogger:
     return JsonlLogger(path=None, echo=False)
 
 
+class _RecordingLog:
+    """A logger that keeps what it was told, for asserting on events."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict[str, Any]]] = []
+
+    def log(self, event: str, **kw: Any) -> None:
+        self.events.append((event, kw))
+
+
 def _write_manifest(tmp_path: Path, rows: list[tuple[str, str]]) -> None:
     """Land manifest entries as (dataset, iso-date) pairs."""
     landing.meta_path("flatfile_manifest.json", data_root=tmp_path).write_text(
@@ -308,8 +318,56 @@ def test_a_complete_archive_sweeps_nothing(tmp_path: Path, clock) -> None:
     """A healthy archive must cost no extra S3 calls at all."""
     _write_manifest(tmp_path, [(ds, LATE_DAY.isoformat()) for ds in fp.DATASETS])
     s3 = FakeS3()
-    assert fp._backfill(s3, _settings(tmp_path), TARGET, _log(), _args()) == {}
+    out = fp._backfill(s3, _settings(tmp_path), TARGET, _log(), _args())
+    assert out == {"backfilled": 0, "backfill_failed": 0}
     assert s3.heads == []
+
+
+def test_a_no_op_sweep_still_says_so(tmp_path: Path, clock) -> None:
+    """The healthy case must leave a record, or it cannot be verified.
+
+    A clean no-op is the *expected* result on a complete archive, so it is
+    also the case that gets signed off unattended. Logging nothing made "the
+    sweep ran and found nothing" indistinguishable from "the sweep never ran"
+    -- which is exactly the question the morning check has to answer.
+    """
+    _write_manifest(tmp_path, [(ds, LATE_DAY.isoformat()) for ds in fp.DATASETS])
+    log = _RecordingLog()
+    fp._backfill(FakeS3(), _settings(tmp_path), TARGET, log, _args())
+    swept = [kw for event, kw in log.events if event == "flatfile_backfill_swept"]
+    assert len(swept) == 1
+    assert swept[0]["incomplete"] == []
+    assert swept[0]["lookback"] == fp.BACKFILL_LOOKBACK
+
+
+def test_the_sweep_names_the_holes_it_found(tmp_path: Path, clock) -> None:
+    """And on an unhealthy one, the record says which dates were short."""
+    _write_manifest(tmp_path, [(ds, LATE_DAY.isoformat())
+                               for ds in ("minute_aggs_v1", "day_aggs_v1")])
+    log = _RecordingLog()
+    fp._backfill(FakeS3(), _settings(tmp_path), TARGET, log, _args())
+    swept = next(kw for event, kw in log.events
+                 if event == "flatfile_backfill_swept")
+    assert swept["incomplete"] == [
+        {"date": LATE_DAY.isoformat(), "datasets": ["trades_v1"]}
+    ]
+
+
+def test_a_disabled_sweep_is_not_a_zero(tmp_path: Path, clock, monkeypatch) -> None:
+    """Absent counters mean "disabled"; zeroed counters mean "found nothing".
+
+    job_end has to carry that difference, because it is the only place the
+    morning check looks.
+    """
+    _write_manifest(tmp_path, [(ds, LATE_DAY.isoformat()) for ds in fp.DATASETS])
+    s3 = FakeS3(present={(ds, TARGET.isoformat()) for ds in fp.DATASETS})
+    monkeypatch.setattr(fp, "_s3_client", lambda _s: s3)
+
+    swept = fp._main(_args(backfill=True), _settings(tmp_path), _log())
+    assert swept["backfilled"] == 0
+
+    off = fp._main(_args(backfill=False), _settings(tmp_path), _log())
+    assert "backfilled" not in off
 
 
 # ---------------------------------------------------------------------------

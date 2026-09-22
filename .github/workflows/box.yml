@@ -18,13 +18,28 @@ name: box
 # so the job sees the credentials.
 
 on:
-  # Runs on every push and PR. Accepted risk (documented, solo repo): the
-  # runner's service environment holds the Massive API/S3 keys, so pushed code
-  # executes next to those credentials and /data/massive. Mitigants: private
-  # repo with a single owner (only the owner can push), the keys are read-only
-  # market-data credentials -- no brokerage access or money movement is
-  # reachable from this box -- and the checks themselves are read-only. The
-  # real gate is the GitHub account's 2FA, not the trigger list.
+  # Runs on every push and PR. The runner's service environment holds the
+  # Massive API/S3 keys and the IBKR Flex token, so code that reaches this
+  # workflow executes next to those credentials and /data/massive.
+  #
+  # THIS REPO IS PUBLIC, AND DELIBERATELY SO -- it is linked from the owner's
+  # website as a work sample for hiring managers. An earlier version of this
+  # note claimed "private repo with a single owner" as the mitigant; that was
+  # never true of this repo and is the premise to stop relying on.
+  #
+  # What actually holds: `push` is safe, because pushing needs write access,
+  # and the GitHub account's 2FA is the real gate on that. `pull_request` is
+  # not -- anyone can fork a public repo and open a PR, and fork-PR code would
+  # run here. The keys are read-only market-data credentials (no money
+  # movement is reachable from this box) and the checks themselves are
+  # read-only, which bounds the blast radius to disclosure, not loss.
+  #
+  # OPEN: the fork-PR path is still unguarded, pending a decision on which
+  # remedy to take -- drop `pull_request` (the `push` trigger already covers
+  # the owner's own branches), or keep it and guard the job with
+  #   if: github.event_name != 'pull_request' ||
+  #       github.event.pull_request.head.repo.full_name == github.repository
+  # Tracked as item 1 of docs/plans/outstanding-corrections.md.
   push:
     branches: ["**"]
   pull_request:

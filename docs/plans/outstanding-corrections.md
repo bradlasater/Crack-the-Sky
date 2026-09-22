@@ -235,27 +235,38 @@ None of this affects capture. Ordered by size.
 
 ---
 
+## Deployed 2026-09-21 22:45 ET
+
+PR #83 merged as `fb07309`, and the box is converged.
+
+- `ansible-playbook -i deploy/ansible/inventory_local.ini deploy/ansible/playbook.yml`
+  changed exactly the one unit predicted: `massive-rates-sync.timer`,
+  `OnCalendar=Tue-Sat 08:20:00` → `Mon-Fri 08:20:00`. No failed units.
+- The playbook's timer re-arm fired `rates_sync` immediately, which turned out
+  to be the useful accident: it landed a curve dated **2026-09-18**, so
+  `load_curve(2026-09-21)` now returns Friday's curve instead of the 09-16 one
+  the day was actually priced against. Today's staleness is healed, not just
+  prevented from recurring.
+- `scripts/setup_healthchecks.py` applied; `massive-rates-sync` now carries
+  `20 8 * * 1-5`.
+- `coverage_audit --date 2026-09-18` reports **25/25 PASS**, the new
+  `rate_curve` among them.
+- A clean `workflow_dispatch` of `box` on `main` is green on every step,
+  including Timer drift — so the repo and the box genuinely agree, rather than
+  the merge run having passed on timing.
+
+Worth noting for the threshold: the vendor lag is not *always* exactly 2
+trading days. The twelve runs sampled from 09-01 to 09-18 were all 2, but
+tonight's landed at 1. Both PASS; WARN still starts at 3, which remains the
+right line for "a run did not land".
+
 ## What is left
 
 1. **Item 1 — repo visibility.** Deferred by Brad 2026-09-21. Still the only
-   item with an attacker in the threat model.
-2. **Merge `fix/rates-sync-weekday-and-dry-run`, then converge the box**, in
-   that order. `deploy/ansible/playbook.yml`'s first task refuses a checkout
-   with local modifications because the box tracks `main`, so the units cannot
-   be re-rendered until the change is merged:
-   `ansible-playbook -i deploy/ansible/inventory_local.ini deploy/ansible/playbook.yml`.
-   Expect exactly one unit to change, `massive-rates-sync.timer`
-   (`OnCalendar=Tue-Sat 08:20:00` → `Mon-Fri 08:20:00`); that diff was rendered
-   and checked before commit.
-3. **Re-run `scripts/setup_healthchecks.py`** after converging, so the
-   `massive-rates-sync` check's own schedule moves to `20 8 * * 1-5`. Left as it
-   is, the check expects a Saturday ping that will no longer come and a Monday
-   one it does not know about.
-4. **Expect one red `box` CI run in the meantime.** Its "Timer drift" step
-   diffs a fresh render of `deploy/schedule.json` against the units installed on
-   the box, so any schedule change is red from the moment it is pushed until the
-   box converges. That is inherent to the check, not a fault in the branch — PR
-   #81 had the same shape.
+   item with an attacker in the threat model, and still unchanged: `gh repo
+   view` reports PUBLIC, `box.yml` still triggers on `pull_request`, and the
+   runner still loads `.env`.
+2. **Tomorrow's scheduled runs** are the last unverified thing — see below.
 
 ## Verification when all of it is done
 

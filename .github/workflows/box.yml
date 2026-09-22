@@ -34,15 +34,20 @@ on:
   # movement is reachable from this box) and the checks themselves are
   # read-only, which bounds the blast radius to disclosure, not loss.
   #
-  # OPEN: the fork-PR path is still unguarded, pending a decision on which
-  # remedy to take -- drop `pull_request` (the `push` trigger already covers
-  # the owner's own branches), or keep it and guard the job with
-  #   if: github.event_name != 'pull_request' ||
-  #       github.event.pull_request.head.repo.full_name == github.repository
-  # Tracked as item 1 of docs/plans/outstanding-corrections.md.
+  # CLOSED 2026-09-22, two ways, because one of them is a single line someone
+  # could undo without noticing:
+  #
+  #   1. `pull_request` is gone from the triggers below. A fork PR now starts
+  #      no run here at all, so no fork-authored code is ever handed to this
+  #      runner. Nothing is lost on our own branches -- `push: ["**"]` already
+  #      builds every branch, and its run reports against the PR head, so a
+  #      pull request still shows the `live` check. It also retires a genuine
+  #      waste: push and pull_request were firing two identical runs per PR.
+  #   2. The job below still carries a same-repo `if:` guard. With no
+  #      `pull_request` trigger it never fires, and that is the point -- it is
+  #      there so that re-adding the trigger cannot silently reopen this.
   push:
     branches: ["**"]
-  pull_request:
   schedule:
     - cron: "17 22 * * *" # daily, after the 16:35 ET EOD sweep
   workflow_dispatch:
@@ -53,6 +58,13 @@ concurrency:
 
 jobs:
   live:
+    # Belt and braces for the trigger list above: never run fork-authored code
+    # on the credentialed self-hosted runner. Always true today, since there
+    # is no `pull_request` trigger -- it earns its place the day someone adds
+    # one back.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, linux]
     steps:
       - uses: actions/checkout@v4

@@ -26,7 +26,8 @@ of them fail, so cron, Healthchecks.io and the box CI workflow all surface it:
     like a healthy run.
 
 Run: ``python -m ingest.jobs.coverage_audit [--date YYYY-MM-DD]``
-(default: the previous trading day).
+(default: the last completed session -- T-1 once the following day's pipeline
+has produced it, which is what ``last_completed_session`` works out).
 """
 
 from __future__ import annotations
@@ -54,6 +55,13 @@ SURFACE_ROOTS = ("SPX", "SPXW")
 
 JOB = "coverage_audit"
 COVERAGE_NAME = "coverage.json"
+
+# When the previous session's pipeline has finished producing, in ET. The
+# surface job is the last link in it (deploy/schedule.json: Tue-Sat 12:15),
+# and this audit's own slot is the 12:30 right behind it. Before this time a
+# session's partitions are not late, they are simply not due -- which is the
+# distinction last_completed_session() exists to draw.
+PIPELINE_DONE_ET = time(12, 15)
 
 
 def _clean_root(settings: Settings, dataset: str) -> Path:
@@ -904,8 +912,43 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger):
     return summary
 
 
+def last_completed_session(
+    data_root: Path | str | None = None, now: datetime | None = None
+) -> date:
+    """The newest session this audit can fairly grade: T-1, but not too early.
+
+    A session is not gradeable the moment it ends. Its data is produced the
+    *following* day by a chain that finishes with the surface job at 12:15 ET
+    (``deploy/schedule.json``), and the audit's own 12:30 slot sits right
+    after it. So the newest gradeable session is the newest trading day whose
+    following day has already passed 12:15 ET.
+
+    Plain T-1 was right for the 12:30 run and for the 18:17 ET scheduled CI
+    run, and wrong for everything earlier: a push at 11:55 ET on 2026-09-22
+    failed the ``box`` workflow on ``vol_surface`` for 2026-09-21, a partition
+    that was twenty minutes from being written. The audit was reporting a hole
+    where there was only a job that had not come due.
+
+    Stepping back by the *processing* day rather than a fixed count keeps
+    Monday honest: Friday's session is processed by Saturday's run, so on
+    Monday morning Friday is already complete and stays the target.
+
+    This only moves the date the audit *defaults* to. It never softens a
+    check: once a session is in scope it is graded exactly as strictly as
+    before, and a surface job that genuinely fails to run still fails the
+    12:30 audit.
+    """
+    now = now or market_gate.now_et()
+    d = market_gate.previous_trading_day(now.date(), data_root)
+    while datetime.combine(
+        d + timedelta(days=1), PIPELINE_DONE_ET, tzinfo=now.tzinfo
+    ) > now:
+        d = market_gate.previous_trading_day(d, data_root)
+    return d
+
+
 def main(argv: list[str] | None = None) -> None:
-    """Entry point; defaults --date to the previous trading day, then run_job.
+    """Entry point; defaults --date to the last completed session, then run_job.
 
     The date must be resolved before ``run_job``: the audit runs Tue-Sat to
     grade the prior session, and ``run_job``'s market gate would otherwise
@@ -914,13 +957,12 @@ def main(argv: list[str] | None = None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
     # argparse also accepts ``--date=X``; a bare "--date" membership test
     # misses that form, and the appended default would silently override the
-    # date the caller asked to audit. The T-1 default is computed against the
+    # date the caller asked to audit. The default is computed against the
     # configured root: main() runs before run_job's Settings.load(), so a
     # DATA_ROOT that lives only in .env needs config.default_data_root.
     if not any(a == "--date" or a.startswith("--date=") for a in argv):
-        prev = market_gate.previous_trading_day(
-            market_gate.today_et(), default_data_root())
-        argv += ["--date", prev.isoformat()]
+        target = last_completed_session(default_data_root())
+        argv += ["--date", target.isoformat()]
     run_job(JOB, _main_fn, argv)
 
 

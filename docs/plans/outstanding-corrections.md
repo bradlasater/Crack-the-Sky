@@ -79,25 +79,25 @@ an oversight. Earlier drafts of this document recommended
 `gh repo edit --visibility private`; that recommendation is withdrawn, and no
 future audit should re-raise it.
 
-That leaves exactly one remedy worth taking — stop fork code reaching the box,
-which costs nothing a reader of the repo would notice. Either drop
-`pull_request` from `box.yml`'s triggers (`push: branches: ["**"]` already
-covers your own branches, since pushing needs write access), or keep the
-trigger and guard the job with
+**Closed 2026-09-22** by stopping fork code from reaching the box, which costs
+nothing a reader of the repo would notice:
 
-```yaml
-if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-```
+- **`pull_request` is gone from `box.yml`'s triggers.** A fork PR now starts no
+  run on the box at all. Nothing is lost on our own branches — `push:
+  branches: ["**"]` already builds every branch and its run reports against the
+  PR head, so a pull request still shows the `live` check. It also retires a
+  real waste: `push` and `pull_request` had been firing two identical runs for
+  every PR.
+- **The `live` job additionally carries a same-repo `if:` guard.** With no
+  `pull_request` trigger it never fires today. That is the point — it is there
+  so re-adding the trigger later cannot silently reopen this.
+- **The accepted-risk note is rewritten** to say the repo is public on purpose,
+  and to stop offering a private repo as its mitigant.
 
-Two smaller pieces belong with it:
-
-- The accepted-risk note in `box.yml` **has been rewritten** (2026-09-22) to
-  say the repo is public on purpose, to stop claiming a private repo as its
-  mitigant, and to name the fork-PR path as the open item.
-- Still owed: replace the real IBKR account id in
-  `tests/fixtures/flex_trades.xml` and `tests/test_ibkr_executions.py` with a
-  fake one. On a repo written to be read by strangers, that one is worth doing
-  on its own account.
+Still owed, and worth doing on its own account now that the repo is explicitly
+written to be read by strangers: replace the real IBKR account id in
+`tests/fixtures/flex_trades.xml` and `tests/test_ibkr_executions.py` with a
+fake one.
 
 **Verify:** a test PR from a fork produces no `box` run.
 
@@ -306,14 +306,40 @@ dict is now reserved for the sweep being *disabled* — an explicit `--date`,
 means something different from `backfilled: 0`. Four tests pin it, all of which
 fail against the previous code.
 
+### The audit was grading a session before it existed
+
+The first morning pushes this repo has ever had turned up a second
+time-of-day bug, this one in CI rather than in a job. `box.yml` runs
+`coverage_audit` for T-1 on every push, but T-1's `vol_surface` partition is
+written by the surface job at 12:15 ET. Two pushes at 11:51 and 11:55 ET —
+including the merge of the docs-only PR #84, so `main` itself went red — failed
+on `vol_surface: partition missing or empty` for a partition that was twenty
+minutes from being written. Everything else passed, 24 of 25, `rate_curve`
+among them at 1 trading day.
+
+It had stayed hidden because the daily scheduled run fires at 22:17 UTC
+(18:17 ET) and every previous push in the repo's history also landed in the
+afternoon or evening ET. On the schedule the check was always sound.
+
+**Fixed** by having the audit default to the last *completed* session rather
+than to plain T-1: the newest trading day whose following day has passed
+12:15 ET. Brad chose this over keeping it strict and accepting red on morning
+pushes. Two properties are worth stating, because both were the reason for
+picking this shape:
+
+- It steps back by *processing* day, not by a fixed count, so Monday morning
+  still grades Friday — Friday's session is produced by Saturday's run. A
+  naive "go back two sessions before 12:15" would give up Friday for nothing.
+- **It never softens a check.** It moves only the date the audit defaults to.
+  Once a session is in scope it is graded exactly as strictly as before, and
+  the 12:30 run — the one the alarm actually rides on — still grades T-1 and
+  still fails if the surface job genuinely did not run.
+
 ## What is left
 
-1. **Item 1 — the fork-PR path to the credentialed runner.** The repo is
-   public by design and stays that way (see item 1 above); what remains is
-   guarding `box.yml` so fork code cannot run on the box. Still the only item
-   with an attacker in the threat model.
-2. **The IBKR account id in the test fixtures**, which wants a fake value.
-3. **Two scheduled runs still to watch:** today's `coverage_audit` at 12:30,
+1. **The IBKR account id in the test fixtures**, which wants a fake value.
+   The last item carrying any exposure, and a small one.
+2. **Two scheduled runs still to watch:** today's `coverage_audit` at 12:30,
    and Monday 2026-09-28's `rates_sync`.
 
 ## Verification when all of it is done

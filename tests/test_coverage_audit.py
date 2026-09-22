@@ -933,3 +933,127 @@ def test_zero_rows_kept_does_not_add_a_second_failure(tmp_path: Path) -> None:
          "rows_in": 100, "rows_kept": 0}
     ]), encoding="utf-8")
     assert _partition_checks(_settings(tmp_path), RUN_DATE) == {}
+
+
+# ---------------------------------------------------------------------------
+# Rate curve freshness
+# ---------------------------------------------------------------------------
+#
+# A stale curve is the one failure mode nothing else here notices: rates_sync
+# reports success on any run that lands rows, and load_curve happily returns
+# last week's row, so every IV keeps inverting off a frozen curve. These pin
+# both directions.
+
+
+def _land_curve(root: Path, run_day: date, curve_days: list[date]) -> None:
+    """Land treasury_yields rows dated ``curve_days`` in run partition ``run_day``.
+
+    The two differ on purpose: ``dt=`` is the ingestion run date, not the curve
+    date, and the check has to read the rows rather than trust the partition.
+    """
+    from ingest import schemas
+
+    blank = {f.name: None for f in schemas.SCHEMAS["treasury_yields"]}
+    rows = [{**blank, "date": d.isoformat(), "yield_1_month": 3.84} for d in curve_days]
+    landing.write_clean("treasury_yields", run_day, rows,
+                        job="rates_sync", data_root=root)
+
+
+def _curve_check(root: Path, day: date = RUN_DATE):
+    checks = audit.check_rate_curve(_settings(root), day)
+    assert len(checks) == 1
+    return checks[0]
+
+
+def test_curve_at_the_vendors_steady_lag_passes(tmp_path: Path) -> None:
+    """T-2 trading days is what a healthy box looks like, every day."""
+    from ingest.common import market_gate
+
+    t1 = market_gate.previous_trading_day(RUN_DATE, data_root=tmp_path)
+    t2 = market_gate.previous_trading_day(t1, data_root=tmp_path)
+    _land_curve(tmp_path, RUN_DATE, [t2])
+    check = _curve_check(tmp_path)
+    assert check.status == audit.PASS
+    assert check.data == {"curve_date": t2.isoformat(), "trading_days_stale": 2}
+
+
+def test_one_missed_run_warns(tmp_path: Path) -> None:
+    """3 trading days back is one run that did not land -- loud, not fatal."""
+    from ingest.common import market_gate
+
+    d = RUN_DATE
+    for _ in range(3):
+        d = market_gate.previous_trading_day(d, data_root=tmp_path)
+    _land_curve(tmp_path, RUN_DATE, [d])
+    check = _curve_check(tmp_path)
+    assert check.status == audit.WARN
+    assert check.data["trading_days_stale"] == 3
+
+
+def test_a_job_that_has_stopped_fails(tmp_path: Path) -> None:
+    from ingest.common import market_gate
+
+    d = RUN_DATE
+    for _ in range(6):
+        d = market_gate.previous_trading_day(d, data_root=tmp_path)
+    _land_curve(tmp_path, RUN_DATE, [d])
+    check = _curve_check(tmp_path)
+    assert check.status == audit.FAIL
+    assert check.data["trading_days_stale"] > audit.RATE_CURVE_FAIL_TRADING_DAYS
+
+
+def test_a_weekend_is_not_staleness(tmp_path: Path) -> None:
+    """Monday priced off Friday's curve is 1 trading day, not 3 calendar days.
+
+    Counting calendar days would WARN every Monday on a healthy box -- the
+    same false-alarm shape the sweep-cadence window was narrowed to avoid.
+    """
+    from ingest.common import market_gate
+
+    monday = date(2026, 8, 31)
+    assert monday.weekday() == 0
+    friday = market_gate.previous_trading_day(monday, data_root=tmp_path)
+    assert (monday - friday).days == 3
+    _land_curve(tmp_path, monday, [friday])
+    check = _curve_check(tmp_path, monday)
+    assert check.status == audit.PASS
+    assert check.data["trading_days_stale"] == 1
+
+
+def test_rows_after_the_session_are_ignored(tmp_path: Path) -> None:
+    """Auditing an older day by hand must not read a curve from its future."""
+    from ingest.common import market_gate
+
+    t1 = market_gate.previous_trading_day(RUN_DATE, data_root=tmp_path)
+    t2 = market_gate.previous_trading_day(t1, data_root=tmp_path)
+    _land_curve(tmp_path, RUN_DATE, [t2, RUN_DATE + timedelta(days=30)])
+    check = _curve_check(tmp_path)
+    assert check.status == audit.PASS
+    assert check.data["curve_date"] == t2.isoformat()
+
+
+def test_the_newest_row_wins_across_partitions(tmp_path: Path) -> None:
+    """`dt=` is the run date: a --full walk puts 1962 in the newest partition."""
+    from ingest.common import market_gate
+
+    t1 = market_gate.previous_trading_day(RUN_DATE, data_root=tmp_path)
+    t2 = market_gate.previous_trading_day(t1, data_root=tmp_path)
+    older_partition = RUN_DATE - timedelta(days=7)
+    _land_curve(tmp_path, older_partition, [t2])
+    _land_curve(tmp_path, RUN_DATE, [date(1962, 1, 2)])
+    check = _curve_check(tmp_path)
+    assert check.status == audit.PASS
+    assert check.data["curve_date"] == t2.isoformat()
+
+
+def test_no_curve_data_at_all_fails(tmp_path: Path) -> None:
+    check = _curve_check(tmp_path)
+    assert check.status == audit.FAIL
+    assert "no treasury_yields data" in check.detail
+
+
+def test_the_curve_check_runs_in_the_real_audit(tmp_path: Path) -> None:
+    """A check nobody calls is not a check."""
+    _write_manifest(tmp_path, RUN_DATE)
+    names = {c.name for c in audit.run_checks(_settings(tmp_path), RUN_DATE, _logger())}
+    assert "rate_curve" in names

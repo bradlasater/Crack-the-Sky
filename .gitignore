@@ -10,3 +10,8 @@ __pycache__/
 *.egg-info/
 venv
 .env.example.bak
+
+# Claude Code scratch space: agent worktrees and session state. Untracked and
+# ignored on purpose -- a worktree here is a whole second checkout, and on a
+# public repo one `git add -A` would publish it.
+.claude/

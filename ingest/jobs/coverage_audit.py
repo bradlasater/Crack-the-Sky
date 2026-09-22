@@ -17,6 +17,9 @@ of them fail, so cron, Healthchecks.io and the box CI workflow all surface it:
   * ``option_trades`` / bars -- partitions non-empty.
   * ``vol_surface`` -- T-1 SVI fit landed for every scheduled root
     (derived; a silent skip is as invisible as a capture hole).
+  * the par curve -- how many trading days behind the session the newest
+    ``treasury_yields`` row is, since a rates job that stops landing is
+    otherwise silent: every IV still inverts, just off a frozen curve.
   * websocket capture -- raw files present and ``ws_gap`` events counted.
   * disk runway -- how many days of snapshot growth the volume still holds.
   * per-underlying ticker coverage -- so an SPX-shaped hole cannot again look
@@ -40,6 +43,7 @@ from ingest.common import landing, market_gate
 from ingest.common.cli import run_job
 from ingest.common.config import Settings, default_data_root
 from ingest.common.logging_utils import JsonlLogger
+from ingest.common.rates import DATASET as RATE_DATASET
 from ingest.jobs import OPTION_ROOTS, ticker_root, underlying_root
 from ingest.jobs.flatfile_pull import CLEAN_DATASET as FLATFILE_CLEAN
 from ingest.jobs.flatfile_pull import JOB as FLATFILE_JOB
@@ -120,6 +124,22 @@ FLATFILE_DATASETS = ("trades_v1", "minute_aggs_v1", "day_aggs_v1")
 # legitimately holds no flatfile_pull-written file at all. Duplication there
 # is already prevented by reconcile's own quarantine_prior.
 FLATFILE_OWNED_PARTITIONS = ("trades_v1", "day_aggs_v1")
+
+# How stale the par curve may be, measured in trading days between the audited
+# session and the newest curve row at or before it.
+#
+# The vendor publishes at a steady T-2: across the twelve rates_sync runs from
+# 2026-09-01 to 2026-09-18 the newest row was exactly 2 trading days behind the
+# run date every single time (2 calendar days midweek, 4-5 across a weekend or
+# Labor Day). So 2 is the healthy number and anything above it means a run did
+# not land, not that the Treasury was slow.
+#
+# WARN at 3 catches one missed run on the morning after. FAIL at 6 is a job
+# that has stopped: a whole week of sessions discounting off the same curve.
+# The gap is counted in trading days rather than calendar days precisely so a
+# weekend or a holiday does not read as staleness.
+RATE_CURVE_WARN_TRADING_DAYS = 2
+RATE_CURVE_FAIL_TRADING_DAYS = 5
 
 PASS, WARN, FAIL, SKIP = "PASS", "WARN", "FAIL", "SKIP"
 
@@ -740,6 +760,82 @@ def check_disk(settings: Settings, d: date) -> list[Check]:
     )]
 
 
+def check_rate_curve(settings: Settings, d: date) -> list[Check]:
+    """Is the discount curve the day was priced against actually current?
+
+    Nothing else here notices a stale curve. ``rates_sync`` reports success on
+    a run that lands rows, and every downstream consumer calls
+    ``ingest.common.rates.load_curve``, which takes the newest row at or before
+    the session and is perfectly happy to return one from last week. So a job
+    that stops landing is silent: IVs keep inverting, the surface keeps
+    fitting, and every number is quietly discounted off a curve that has
+    stopped moving.
+
+    That is not hypothetical. ``rates_sync`` was scheduled Tue-Sat while
+    ``run_job``'s gate tests *today*, so every Saturday fire exited 0 without
+    landing anything, and with no Monday run either, 2026-09-21 was priced off
+    the 2026-09-16 curve -- 3 trading days back, with nothing anywhere saying
+    so. The schedule is Mon-Fri now; this check is what makes the next
+    regression of that shape loud instead.
+
+    Reads the parquet directly rather than through ``rates.load_curve``: the
+    audit wants the date on the newest row, and ``load_curve`` returns a
+    ``RateCurve`` built from it. Going to the files also keeps this honest if
+    the loader's own selection rule ever drifts.
+    """
+    import pyarrow.parquet as pq
+
+    root = _clean_root(settings, RATE_DATASET)
+    if not root.is_dir():
+        return [Check("rate_curve", FAIL,
+                      f"no {RATE_DATASET} data under {root} -- "
+                      "every IV inversion is running on a fallback rate", {})]
+
+    want = d.isoformat()
+    newest: str | None = None
+    # Every partition, because `dt=` is the ingestion run date, not the curve
+    # date -- a resumed `--full` walk writes 1962 into the newest partition.
+    # Same reason ingest.common.rates._load_curve_cached scans them all.
+    for part in sorted(root.glob("dt=*")):
+        for path in sorted(part.glob("*.parquet")):
+            try:
+                dates = pq.read_table(path, columns=["date"]).column("date").to_pylist()
+            except Exception:  # noqa: BLE001 - a corrupt file is a finding, not a crash
+                return [Check("rate_curve", FAIL,
+                              f"unreadable parquet in {part.name}", {})]
+            for row in dates:
+                s = str(row or "")
+                if s and s <= want and (newest is None or s > newest):
+                    newest = s
+
+    if newest is None:
+        return [Check("rate_curve", FAIL,
+                      f"no {RATE_DATASET} row at or before {want}", {})]
+
+    # Trading days, not calendar days: a Monday session is 1 trading day after
+    # Friday, and counting calendar days would flag every weekend.
+    gap = 0
+    cursor = d
+    curve_date = date.fromisoformat(newest)
+    while cursor > curve_date and gap <= RATE_CURVE_FAIL_TRADING_DAYS + 1:
+        cursor = market_gate.previous_trading_day(cursor, data_root=settings.data_root)
+        gap += 1
+
+    data = {"curve_date": newest, "trading_days_stale": gap}
+    detail = (f"newest curve {newest}, {gap} trading day"
+              f"{'' if gap == 1 else 's'} before {want}")
+    if gap > RATE_CURVE_FAIL_TRADING_DAYS:
+        return [Check("rate_curve", FAIL,
+                      detail + " -- rates_sync has stopped landing; everything "
+                      "priced since is discounting off a frozen curve", data)]
+    if gap > RATE_CURVE_WARN_TRADING_DAYS:
+        return [Check("rate_curve", WARN,
+                      detail + f" -- expected {RATE_CURVE_WARN_TRADING_DAYS} "
+                      "at the vendor's steady T-2; a run probably did not land",
+                      data)]
+    return [Check("rate_curve", PASS, detail, data)]
+
+
 def run_checks(settings: Settings, d: date, logger: JsonlLogger) -> list[Check]:
     """Every check for one trading day."""
     checks: list[Check] = []
@@ -749,6 +845,7 @@ def run_checks(settings: Settings, d: date, logger: JsonlLogger) -> list[Check]:
     checks += check_vol_surface(settings, d)
     checks += check_underlying_coverage(settings, d)
     checks += check_underlying_window(settings, d)
+    checks += check_rate_curve(settings, d)
     checks += check_websocket(settings, d, logger)
     checks += check_disk(settings, d)
     return checks

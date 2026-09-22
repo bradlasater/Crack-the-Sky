@@ -160,6 +160,44 @@ def test_dry_run_misses_everything_and_still_exits_clean(tmp_path: Path, clock,
     assert out["datasets_ok"] == 0
 
 
+def test_dry_run_on_an_unpublished_date_still_exits_clean(tmp_path: Path, clock,
+                                                          monkeypatch) -> None:
+    """A dry run must never classify LATE, however silent the vendor is.
+
+    The sibling test above only covers objects that *exist*, so the dry-run
+    branch was reached before the miss ever mattered. With nothing published,
+    `_head_with_retry` returned LATE and `_main` raised before the dry-run
+    check -- exit 1, and a /fail ping against the production check. Observed
+    for real on 2026-09-21 while probing the retry fix by hand.
+    """
+    s3 = FakeS3(present=set())
+    monkeypatch.setattr(fp, "_s3_client", lambda _s: s3)
+    out = fp._main(_args(dry_run=True), _settings(tmp_path), _log())
+    assert out["datasets_missing"] == 3
+    assert out["datasets_ok"] == 0
+
+
+def test_dry_run_does_not_wait_for_publication(tmp_path: Path, monkeypatch) -> None:
+    """An inspection must not sleep until 12:00 ET the way the cron run does.
+
+    Deliberately *before* RETRY_UNTIL_ET, without the `clock` fixture's late
+    time, so a regression here hangs the suite on a real sleep rather than
+    passing quietly.
+    """
+    monkeypatch.setattr(market_gate, "now_et", lambda: datetime(2026, 9, 16, 9, 0))
+    monkeypatch.setattr(fp, "previous_trading_day", lambda _today=None: TARGET)
+    monkeypatch.setattr(market_gate, "today_et", lambda: date(2026, 9, 16))
+
+    def _no_sleep(_s):
+        raise AssertionError("a dry run waited for publication")
+
+    monkeypatch.setattr(fp.time, "sleep", _no_sleep)
+    s3 = FakeS3(present=set())
+    monkeypatch.setattr(fp, "_s3_client", lambda _s: s3)
+    out = fp._main(_args(dry_run=True), _settings(tmp_path), _log())
+    assert out["datasets_missing"] == 3
+
+
 def test_a_not_entitled_dataset_does_not_fail_the_run(tmp_path: Path, clock,
                                                       monkeypatch) -> None:
     """A 403 on an object outside the plan will never succeed; alerting is noise."""

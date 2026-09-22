@@ -584,13 +584,27 @@ def _pull_dataset(s3: Any, settings: Settings, dataset: str, d: date,
         logger.log("flatfile_head", dataset=dataset, key=key)
         # Only wait for publication when this is the file the vendor is about
         # to publish (yesterday's). Older dates resolve a 404 immediately.
-        wait_for_publish = d >= previous_trading_day(market_gate.today_et())
+        #
+        # A dry run never waits: RETRY_SLEEP_S until 12:00 ET is the right
+        # behaviour for the 11:05 cron run and absurd for an inspection, which
+        # would sit there for the best part of an hour before printing what it
+        # already knew at the first HEAD.
+        wait_for_publish = (
+            not args.dry_run and d >= previous_trading_day(market_gate.today_et())
+        )
         miss = _head_with_retry(s3, bucket, key, logger, wait_for_publish)
+        if args.dry_run:
+            logger.log("flatfile_dry_run", dataset=dataset, key=key,
+                       present=miss is None)
+            # LATE is the one classification that raises, exits 1 and pings
+            # /fail, so a dry run must never return it -- an inspection that
+            # fails the production check is worse than no inspection. Observed
+            # 2026-09-21: `--dry-run --date <unpublished>` after the cutoff
+            # reddened massive-flatfile-pull. ABSENT and NOT_ENTITLED are real
+            # findings that already exit 0, so they travel back unchanged.
+            return PullResult(miss=DRY_RUN if miss in (None, LATE) else miss)
         if miss is not None:
             return PullResult(miss=miss)
-        if args.dry_run:
-            logger.log("flatfile_dry_run", dataset=dataset, key=key)
-            return PullResult(miss=DRY_RUN)
         size, md5 = _download(s3, bucket, key, dest)
         logger.log("flatfile_downloaded", dataset=dataset, path=str(dest),
                    bytes=size, md5=md5)

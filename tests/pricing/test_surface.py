@@ -534,6 +534,97 @@ def test_from_rows_refuses_an_american_root() -> None:
         sf.Surface.from_rows(rows)
 
 
+# ---------------------------------------------------------------------------
+# One root's failure must not discard another (surface-coverage step 2)
+# ---------------------------------------------------------------------------
+
+class _FlatCurve:
+    def at(self, _T: float) -> float:
+        return R
+
+
+def _session_inputs(monkeypatch, fail: tuple[str, ...]) -> None:  # noqa: ANN001
+    """Two clean chains, with the named roots forced to raise in the fit."""
+    bars = _svi_bars() + _chain_bars(NEAR, T_NEAR, lambda k: _true_vol(k, T_NEAR), root="SPX")
+    monkeypatch.setattr(sf, "read_day_bars", lambda _s, _d: bars)
+    monkeypatch.setattr(sf, "load_curve", lambda _d, _root=None: _FlatCurve())
+    real = sf.build_surfaces
+
+    def build(bars, d, roots, *args, **kwargs):  # noqa: ANN001, ANN202
+        if set(roots) & set(fail):
+            raise sf.SurfaceArbitrageError(f"calendar arbitrage in {roots}")
+        return real(bars, d, roots, *args, **kwargs)
+
+    monkeypatch.setattr(sf, "build_surfaces", build)
+
+
+def _settings(tmp_path):  # noqa: ANN001, ANN202
+    from ingest.common.config import Settings
+
+    return Settings(massive_api_key="k", data_root=tmp_path, log_root=tmp_path / "logs")
+
+
+def test_session_lands_spxw_when_spx_fails(tmp_path, monkeypatch) -> None:
+    """184 of the 347 missing sessions were exactly this: SPXW fit, SPX did
+    not, and the exception discarded both."""
+    _session_inputs(monkeypatch, fail=("SPX",))
+    got = sf.build_session(_settings(tmp_path), DAY, daycount=ACT_365)
+    assert set(got.surfaces) == {"SPXW"}
+    assert set(got.failures) == {"SPX"}
+    assert got.failures["SPX"].startswith("SurfaceArbitrageError: ")
+    # The root that landed is the same fit it would be on its own.
+    alone = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate,
+                              daycount=ACT_365)["SPXW"]
+    assert got.surfaces["SPXW"].slices == alone.slices
+
+
+def test_session_reports_every_root_when_none_fits(tmp_path, monkeypatch) -> None:
+    _session_inputs(monkeypatch, fail=("SPX", "SPXW"))
+    got = sf.build_session(_settings(tmp_path), DAY, daycount=ACT_365)
+    assert got.surfaces == {}
+    assert set(got.failures) == {"SPX", "SPXW"}
+
+
+def test_build_for_date_stays_strict(tmp_path, monkeypatch) -> None:
+    """The diagnostic relies on the exception itself, so the strict path stays."""
+    _session_inputs(monkeypatch, fail=("SPX",))
+    with pytest.raises(sf.SurfaceArbitrageError):
+        sf.build_for_date(_settings(tmp_path), DAY, daycount=ACT_365)
+
+
+def _job_args(**kw):  # noqa: ANN003, ANN202
+    import argparse
+
+    return argparse.Namespace(**{"date": DAY.isoformat(), "underlying": None,
+                                 "dry_run": False, **kw})
+
+
+def test_job_writes_the_root_that_fit_and_logs_the_other(tmp_path, monkeypatch) -> None:
+    from ingest.common.logging_utils import JsonlLogger
+
+    _session_inputs(monkeypatch, fail=("SPX",))
+    monkeypatch.setattr(sf, "hybrid_for", lambda _root=None: ACT_365)
+    logger = JsonlLogger(path=None, echo=False)
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(logger, "log", lambda e, **f: events.append((e, f)) or {})
+    summary = sf._main_fn(_job_args(), _settings(tmp_path), logger)
+    assert summary["roots"] == 1 and summary["roots_failed"] == 1
+    assert sf.load_surface(_settings(tmp_path), DAY, "SPXW")
+    with pytest.raises(sf.SurfaceError, match="no vol_surface rows for SPX"):
+        sf.load_surface(_settings(tmp_path), DAY, "SPX")
+    failed = [f for e, f in events if e == "surface_root_failed"]
+    assert [f["root"] for f in failed] == ["SPX"]
+
+
+def test_job_fails_naming_each_root_when_none_fits(tmp_path, monkeypatch) -> None:
+    from ingest.common.logging_utils import JsonlLogger
+
+    _session_inputs(monkeypatch, fail=("SPX", "SPXW"))
+    monkeypatch.setattr(sf, "hybrid_for", lambda _root=None: ACT_365)
+    with pytest.raises(sf.SurfaceError, match=r"SPX: .*SPXW: "):
+        sf._main_fn(_job_args(), _settings(tmp_path), JsonlLogger(path=None, echo=False))
+
+
 def test_load_surface_reads_what_write_rows_landed(tmp_path) -> None:
     from ingest.common.config import Settings
 

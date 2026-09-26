@@ -910,6 +910,50 @@ def build_for_date(
     )
 
 
+@dataclass(frozen=True)
+class SessionBuild:
+    """What one session's fit produced: the roots that landed, and why the rest did not."""
+
+    surfaces: dict[str, Surface]
+    failures: dict[str, str]  # root -> "ErrorType: message"
+
+
+def build_session(
+    settings: Settings, d: date, roots: tuple[str, ...] = SURFACE_ROOTS,
+    daycount: DayCount | None = None,
+) -> SessionBuild:
+    """Fit each root on its own, so one root's failure cannot discard another.
+
+    :func:`build_for_date` fits every root in one call and any failure escapes
+    it, which is how a session where SPXW fit cleanly was lost whenever SPX
+    did not -- 184 of the 347 sessions missing from the archive on 2026-09-26
+    (``docs/plans/surface-coverage.md``). Here a root that raises
+    :class:`SurfaceError` (arbitrage guards included) is recorded in
+    ``failures`` and the others still land. Day bars and the curve are read
+    once for the session. A root with no chain is in neither map, as before.
+
+    The scheduled job and the archive rebuild go through this.
+    :func:`build_for_date` stays strict, for callers that want the exception
+    itself (``scripts/diagnose_surface_coverage.py``).
+    """
+    if daycount is None:
+        daycount = hybrid_for(settings.data_root)
+    curve = load_curve(d, settings.data_root)
+    bars = read_day_bars(settings, d)
+    surfaces: dict[str, Surface] = {}
+    failures: dict[str, str] = {}
+    for root in roots:
+        try:
+            surfaces.update(build_surfaces(
+                bars, d, (root,), settings.data_root,
+                rate_fn=lambda _as_of, T: curve.at(T),
+                daycount=daycount,
+            ))
+        except SurfaceError as exc:
+            failures[root] = f"{type(exc).__name__}: {exc}"
+    return SessionBuild(surfaces, failures)
+
+
 def write_rows(settings: Settings, d: date, rows: list[dict[str, Any]]) -> Path:
     """Write one session's rows, replacing this job's previous output.
 
@@ -968,11 +1012,17 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger):
     d = date.fromisoformat(args.date)
     roots = tuple(parse_underlyings(args.underlying, list(SURFACE_ROOTS)))
 
-    surfaces = build_for_date(settings, d, roots)
+    build = build_session(settings, d, roots)
+    surfaces = build.surfaces
+    for root, why in sorted(build.failures.items()):
+        logger.log("surface_root_failed", date=d.isoformat(), root=root, error=why)
+        print(f"FAIL  {root}  {why}", file=sys.stderr)
     if not surfaces:
+        failed = "; ".join(f"{r}: {w}" for r, w in sorted(build.failures.items()))
         raise SurfaceError(
-            f"no surface for {d}: no option_day_bars, or no expiry quoting at "
-            f"least {MIN_STRIKES} OTM strikes for roots {list(roots)}"
+            f"no surface for {d}: "
+            + (failed or f"no option_day_bars, or no expiry quoting at least "
+                         f"{MIN_STRIKES} OTM strikes for roots {list(roots)}")
         )
 
     rows = rows_from_surfaces(surfaces)
@@ -990,7 +1040,9 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger):
     if not args.dry_run:
         path = write_rows(settings, d, rows)
         print(f"PASS  wrote {path}", file=sys.stderr)
-    return {"rows": len(rows), "roots": len(surfaces)}
+    # A root that failed still lands the others and exits 0; coverage_audit
+    # is what makes a missing SPXW loud (FAIL) and a missing SPX visible (WARN).
+    return {"rows": len(rows), "roots": len(surfaces), "roots_failed": len(build.failures)}
 
 
 def main(argv: list[str] | None = None) -> int:

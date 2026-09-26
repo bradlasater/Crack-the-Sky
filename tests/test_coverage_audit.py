@@ -497,16 +497,33 @@ def test_vol_surface_fails_when_absent_and_passes_when_both_roots_landed(
     assert got.data["rows"] == 2
 
 
-def test_vol_surface_fails_when_a_scheduled_root_is_missing(tmp_path: Path) -> None:
-    """build_surfaces omits a root with no chain; a row-count check would miss that."""
+def test_vol_surface_warns_when_only_spx_is_missing(tmp_path: Path) -> None:
+    """Each root lands on its own now, so SPXW without SPX is a legitimate
+    session -- but one a row-count check would pass silently, so it warns."""
     settings = _settings(tmp_path)
     landing.write_clean(
         "vol_surface", RUN_DATE, [_vol_surface_row("SPXW")],
         job="surface", data_root=tmp_path,
     )
     got = audit.check_vol_surface(settings, RUN_DATE)[0]
-    assert got.status == audit.FAIL
+    assert got.status == audit.WARN
     assert got.data["missing"] == ["SPX"]
+
+
+def test_vol_surface_fails_when_spxw_is_missing(tmp_path: Path) -> None:
+    """SPXW is the book's root and every feature's input."""
+    settings = _settings(tmp_path)
+    landing.write_clean(
+        "vol_surface", RUN_DATE, [_vol_surface_row("SPX")],
+        job="surface", data_root=tmp_path,
+    )
+    got = audit.check_vol_surface(settings, RUN_DATE)[0]
+    assert got.status == audit.FAIL
+    assert got.data["missing"] == ["SPXW"]
+
+
+def test_required_surface_roots_are_fitted_roots() -> None:
+    assert set(audit.REQUIRED_SURFACE_ROOTS) <= set(audit.SURFACE_ROOTS)
 
 
 def test_coverage_surface_roots_match_the_fitter() -> None:

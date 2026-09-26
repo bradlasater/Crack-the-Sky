@@ -6,8 +6,8 @@ coverage"), which cannot run over history until this is fixed. Scope:
 `pricing/surface.py`, its tests, `coverage_audit`'s `vol_surface` check,
 a rebuild of `clean/vol_surface`, and the docs that describe the surface.
 
-Status: **decisions 1–5 resolved 2026-09-26, all as recommended. Step 1 in
-progress.**
+Status: **decisions 1–5 resolved 2026-09-26, all as recommended. Step 1's
+per-expiry rerun still running; step 2 done.**
 
 ---
 
@@ -181,6 +181,12 @@ refit settled finding 4 and surfaced finding 5. The per-expiry rerun of the
 logs it and continues; `build_for_date` raises only when no root fits.
 `coverage_audit`: FAIL on missing SPXW, WARN on missing SPX. Tests: one
 root raising still lands the other; no root raises.
+**Done 2026-09-26.** `pricing.surface.build_session` reads the day bars and
+curve once and fits each root on its own, returning what landed and why the
+rest did not. The scheduled job and `scripts/build_surface.py` go through it;
+`build_for_date` stays strict for the diagnostic. On 2022-09-01, a lost
+session, SPXW now lands 28 slices while SPX's butterfly failure is reported
+beside it. Nothing changes for a session where both roots already fit.
 
 **Step 3 — B: overlap-grid calendar check** in `Surface._check_calendar` and
 the fit-time floor. Tests: a pair crossing only outside their overlap is

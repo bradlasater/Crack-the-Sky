@@ -15,7 +15,8 @@ of them fail, so cron, Healthchecks.io and the box CI workflow all surface it:
   * flat files -- all three datasets present in the manifest with rows kept.
   * ``contracts`` -- universe present, and per-underlying counts sane.
   * ``option_trades`` / bars -- partitions non-empty.
-  * ``vol_surface`` -- T-1 SVI fit landed for every scheduled root
+  * ``vol_surface`` -- T-1 SVI fit landed: FAIL without SPXW, the book's
+    root; WARN without SPX, which the fit now lands or fails on its own
     (derived; a silent skip is as invisible as a capture hole).
   * ``rv_forecast`` -- T-1 HAR-RV row landed at every horizon, fit under
     the BLAS pin (derived; it once went three weeks stale with no job and
@@ -55,6 +56,11 @@ from ingest.jobs.flatfile_pull import JOB as FLATFILE_JOB
 # Same tuple as pricing.surface.SURFACE_ROOTS. Duplicated so this module
 # does not import pricing; test_coverage_audit pins the two equal.
 SURFACE_ROOTS = ("SPX", "SPXW")
+# The roots a session is incomplete without. SPXW carries the 5-45 DTE book
+# and every feature; SPX monthlies are fit and landed when they can be, but
+# nothing downstream reads them, so a missing SPX is a WARN
+# (docs/plans/surface-coverage.md, decision 1).
+REQUIRED_SURFACE_ROOTS = ("SPXW",)
 # Same tuple as signals.har_rv.HORIZONS, duplicated for the same reason.
 RV_HORIZONS = (3, 5, 10, 21, 32)
 
@@ -480,10 +486,10 @@ def check_vol_surface(settings: Settings, d: date) -> list[Check]:
     """Yesterday's fitted smile landed -- a silent skip is as invisible as a capture hole.
 
     Derived, so a missed day is rebuilt with ``scripts/build_surface.py``
-    rather than lost. It is still a FAIL when the partition is missing or
-    when a scheduled root is absent: ``build_surfaces`` omits a root with
-    no chain, so a nonempty SPXW-only partition would pass a row-count
-    check while ``load_surface`` fails for SPX.
+    rather than lost. It is a FAIL when the partition is missing or SPXW is
+    absent, and a WARN when only SPX is: the fit lands each root on its own
+    (``pricing.surface.build_session``), so an SPX-less partition is a
+    legitimate outcome, but still one a row-count check would pass silently.
     """
     rows = _partition_rows(settings, "vol_surface", d)
     if rows < 0:
@@ -495,8 +501,9 @@ def check_vol_surface(settings: Settings, d: date) -> list[Check]:
         return [Check("vol_surface", FAIL, "unreadable parquet in partition", {})]
     missing = [r for r in SURFACE_ROOTS if r not in roots]
     if missing:
+        required = [r for r in missing if r in REQUIRED_SURFACE_ROOTS]
         return [Check(
-            "vol_surface", FAIL,
+            "vol_surface", FAIL if required else WARN,
             f"missing roots {missing}",
             {"rows": rows, "roots": sorted(roots), "missing": missing},
         )]

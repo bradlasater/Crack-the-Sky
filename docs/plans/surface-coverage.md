@@ -6,8 +6,8 @@ coverage"), which cannot run over history until this is fixed. Scope:
 `pricing/surface.py`, its tests, `coverage_audit`'s `vol_surface` check,
 a rebuild of `clean/vol_surface`, and the docs that describe the surface.
 
-Status: **decisions 1–4 resolved 2026-09-26, all as recommended; decision 5
-(new, from step 1) open. Step 1 in progress.**
+Status: **decisions 1–5 resolved 2026-09-26, all as recommended. Step 1 in
+progress.**
 
 ---
 
@@ -194,7 +194,7 @@ slice fails still raises; dropped book-tenor slices surface in the audit.
 
 **Step 5 — D, if chosen.**
 
-**Step 5b — E, if chosen:** the curve cut-off in `ingest/common/rates.py`,
+**Step 5b — E:** the curve cut-off in `ingest/common/rates.py`,
 passed by `pricing.surface`, `pricing.term_structure` and `rate_for`'s
 derived callers. Tests: a curve landed after `d+1` is invisible to `d`; the
 daily path picks the same curve it picks today. `atm_term_structure` and
@@ -232,7 +232,7 @@ gap as a found-and-fixed entry), and `features-v0.md`'s blocked section.
    change for a diagnostic.
 4. **DTE cap.** Stop fitting past ~400 DTE? **Not now**; decide after step 6
    shows what B and C leave.
-5. **Point-in-time curve (open).** Fix the one-day curve look-ahead in this
-   plan, before the rebuild (E), or separately? *(Recommended: here, as E.
-   The surface rebuild is happening anyway, and doing it without E bakes the
-   look-ahead into 1,020 fresh partitions.)*
+5. **Point-in-time curve.** Fix the one-day curve look-ahead in this plan,
+   before the rebuild? **Yes, as E** (resolved 2026-09-26). The surface
+   rebuild is happening anyway, and doing it without E would bake the
+   look-ahead into 1,020 fresh partitions.

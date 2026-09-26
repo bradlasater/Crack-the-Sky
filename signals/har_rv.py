@@ -35,6 +35,13 @@ exp(E[log rv])); ``vol_ann`` annualises it and ``vol_ann_p10`` /
 understates out-of-sample error -- acceptable for a baseline the
 walk-forward backtester will grade anyway.
 
+**Reproducibility.** Every row stamps ``blas_threads``, the BLAS thread pin
+the fit ran under (null when unpinned), the same contract ``vol_surface``
+keeps -- see :func:`pricing.surface.blas_thread_pin`. Both writers pin:
+``scripts/cronjob.sh`` for the scheduled job and
+``scripts/build_rv_forecast.py`` for the archive rebuild, so a daily row and
+a rebuilt row are fit under the same count, and a row that was not says so.
+
 **Point-in-time discipline.** The fit for origin ``t`` is an expanding
 walk-forward: training rows are origins ``j`` whose *entire* target window
 lies at or before ``t`` (``j + h <= t``), so no forecast touches data after
@@ -58,7 +65,10 @@ source attests to raises ``CalendarRangeError`` rather than guessing, the
 calendar module's own convention for "one of the two jobs is behind".
 
 Run: ``python -m signals.har_rv [--date YYYY-MM-DD]`` (default: previous
-trading day). Archive: ``scripts/build_rv_forecast.py``.
+trading day). Scheduled Tue-Sat 12:10 ET, behind ``spy_spot`` at 12:05
+(``deploy/schedule.json``); by hand, go through ``scripts/cronjob.sh`` so
+the row is pinned like the scheduled one. Archive:
+``scripts/build_rv_forecast.py``.
 """
 
 from __future__ import annotations
@@ -82,6 +92,7 @@ from pricing.calendar import (
     SessionCalendar,
     load_session_calendar,
 )
+from pricing.surface import blas_thread_pin
 from signals.spot import DATASET as SPOT_DATASET
 
 JOB = "rv_forecast"
@@ -190,7 +201,8 @@ def _fit(X: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, float]:
 
 
 def _forecast_row(
-    day: str, h: int, x: np.ndarray, beta: np.ndarray, sigma: float, n: int
+    day: str, h: int, x: np.ndarray, beta: np.ndarray, sigma: float, n: int,
+    blas_threads: int | None,
 ) -> dict[str, Any]:
     mu = float(x @ beta)
     rv_daily = math.exp(mu + 0.5 * sigma * sigma)  # lognormal mean: E[rv]
@@ -207,6 +219,7 @@ def _forecast_row(
         "vol_ann_p10": math.sqrt(SESSIONS_PER_YEAR * lo),
         "vol_ann_p90": math.sqrt(SESSIONS_PER_YEAR * hi),
         "n_train": n,
+        "blas_threads": blas_threads,
     }
 
 
@@ -233,6 +246,7 @@ def forecast_rows(
     feats: list[np.ndarray | None] = [har_features(rv, i) for i in range(n)]
     feat_ok = np.array([f is not None for f in feats])
     idx = np.arange(n)
+    blas = blas_thread_pin()
     out: list[dict[str, Any]] = []
     for h in horizons:
         targets = np.array(
@@ -252,7 +266,9 @@ def forecast_rows(
                 continue
             X = np.stack([feats[j] for j in idx[train]])  # type: ignore[arg-type]
             beta, sigma = _fit(X, targets[train])
-            out.append(_forecast_row(days[i], h, x, beta, sigma, int(train.sum())))
+            out.append(
+                _forecast_row(days[i], h, x, beta, sigma, int(train.sum()), blas)
+            )
     out.sort(key=lambda r: (r["date"], r["horizon"]))
     return out
 

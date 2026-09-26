@@ -17,6 +17,9 @@ of them fail, so cron, Healthchecks.io and the box CI workflow all surface it:
   * ``option_trades`` / bars -- partitions non-empty.
   * ``vol_surface`` -- T-1 SVI fit landed for every scheduled root
     (derived; a silent skip is as invisible as a capture hole).
+  * ``rv_forecast`` -- T-1 HAR-RV row landed at every horizon, fit under
+    the BLAS pin (derived; it once went three weeks stale with no job and
+    no check to say so).
   * the par curve -- how many trading days behind the session the newest
     ``treasury_yields`` row is, since a rates job that stops landing is
     otherwise silent: every IV still inverts, just off a frozen curve.
@@ -52,6 +55,8 @@ from ingest.jobs.flatfile_pull import JOB as FLATFILE_JOB
 # Same tuple as pricing.surface.SURFACE_ROOTS. Duplicated so this module
 # does not import pricing; test_coverage_audit pins the two equal.
 SURFACE_ROOTS = ("SPX", "SPXW")
+# Same tuple as signals.har_rv.HORIZONS, duplicated for the same reason.
+RV_HORIZONS = (3, 5, 10, 21, 32)
 
 JOB = "coverage_audit"
 COVERAGE_NAME = "coverage.json"
@@ -498,6 +503,63 @@ def check_vol_surface(settings: Settings, d: date) -> list[Check]:
     return [Check("vol_surface", PASS, f"{rows:,} slices", {"rows": rows})]
 
 
+def check_rv_forecast(settings: Settings, d: date) -> list[Check]:
+    """Yesterday's HAR-RV forecast landed at every horizon, pinned.
+
+    Derived and rebuilt by ``scripts/build_rv_forecast.py``, so a FAIL costs
+    a rebuild rather than data -- but only if something says so: before this
+    check the dataset sat three weeks stale behind a green audit. A horizon
+    missing from the partition is a FAIL, since the writer emits all of them
+    or raises. A row with a null ``blas_threads`` was fit unpinned and is
+    not reproducible against a rebuild; that is a WARN, the data is usable.
+    """
+    try:
+        import pyarrow.parquet as pq
+    except ImportError:  # pragma: no cover
+        return []
+    part = _clean_root(settings, "rv_forecast") / f"dt={d.isoformat()}"
+    horizons: set[int] = set()
+    unpinned = null_horizons = 0
+    for path in part.glob("*.parquet"):
+        try:
+            table = pq.read_table(path, columns=["horizon", "blas_threads"])
+        except Exception:  # noqa: BLE001 - a corrupt file is a finding, not a crash
+            return [Check("rv_forecast", FAIL, "unreadable parquet in partition", {})]
+        values = table.column("horizon").to_pylist()
+        null_horizons += sum(h is None for h in values)
+        horizons.update(int(h) for h in values if h is not None)
+        unpinned += table.column("blas_threads").null_count
+    if null_horizons:
+        # The writer never emits one, so this is a malformed row. Name it
+        # rather than let int(None) turn the finding into a job error that
+        # writes no coverage.json.
+        return [Check(
+            "rv_forecast", FAIL,
+            f"{null_horizons} rows with a null horizon",
+            {"null_horizons": null_horizons, "horizons": sorted(horizons)},
+        )]
+    if not horizons:
+        return [Check("rv_forecast", FAIL, "partition missing or empty", {"rows": 0})]
+    missing = [h for h in RV_HORIZONS if h not in horizons]
+    if missing:
+        return [Check(
+            "rv_forecast", FAIL,
+            f"missing horizons {missing}",
+            {"horizons": sorted(horizons), "missing": missing},
+        )]
+    if unpinned:
+        return [Check(
+            "rv_forecast", WARN,
+            f"{unpinned} rows fit without the BLAS pin",
+            {"horizons": sorted(horizons), "unpinned": unpinned},
+        )]
+    return [Check(
+        "rv_forecast", PASS,
+        f"{len(horizons)} horizons, pinned",
+        {"horizons": sorted(horizons)},
+    )]
+
+
 def check_underlying_coverage(settings: Settings, d: date) -> list[Check]:
     """Per-underlying ticker counts, so a one-sided hole cannot hide.
 
@@ -851,6 +913,7 @@ def run_checks(settings: Settings, d: date, logger: JsonlLogger) -> list[Check]:
     checks += check_flatfiles(settings, d)
     checks += check_partitions(settings, d)
     checks += check_vol_surface(settings, d)
+    checks += check_rv_forecast(settings, d)
     checks += check_underlying_coverage(settings, d)
     checks += check_underlying_window(settings, d)
     checks += check_rate_curve(settings, d)

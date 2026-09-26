@@ -38,8 +38,8 @@ entitlement or owner decision before code helps).
 | Diagram box | Status | Reality |
 |---|---|---|
 | Feature engineering | **partial** | ATM term structure (`pricing/term_structure.py`), SVI slice params (`pricing/surface.py`), continuous spot series (`signals/spot.py`). No RV features, no feature pipeline, no regimes/event flags. |
-| Forecasting (HAR-RV baseline, distributions) | **built** | `signals/har_rv.py` — walk-forward HAR-RV (1/5/22-session cascade, fit in logs) on the `spy_spot` series, no Roll debias per the measured Stage 1.1 call. One row per (origin, horizon) at 3/5/10/21/32 sessions (≈4–45 calendar days, the 5–45 DTE book), carrying the full lognormal forecast distribution (`log_rv_mean`/`log_rv_sd`) plus an 80% annualised-vol band. Daily T-1 entry `python -m signals.har_rv`; archive rebuild `scripts/build_rv_forecast.py`. |
-| Pricing / surface analytics | **built** | Own IV (European + American/CRR), parity forwards, raw-SVI surface with butterfly *and* calendar arbitrage repaired inside the fit (`SurfaceArbitrageError` otherwise). Gaps on record: SPY smile (American under a European fit path), VIX surface, **no scheduled surface job**. |
+| Forecasting (HAR-RV baseline, distributions) | **built** | `signals/har_rv.py` — walk-forward HAR-RV (1/5/22-session cascade, fit in logs) on the `spy_spot` series, no Roll debias per the measured Stage 1.1 call. One row per (origin, horizon) at 3/5/10/21/32 sessions (≈4–45 calendar days, the 5–45 DTE book), carrying the full lognormal forecast distribution (`log_rv_mean`/`log_rv_sd`) plus an 80% annualised-vol band. Scheduled Tue–Sat 12:10 ET (`massive-rv-forecast`), audited daily by `coverage_audit`, rows stamped with the BLAS pin; archive rebuild `scripts/build_rv_forecast.py`. |
+| Pricing / surface analytics | **built** | Own IV (European + American/CRR), parity forwards, raw-SVI surface with butterfly *and* calendar arbitrage repaired inside the fit (`SurfaceArbitrageError` otherwise). Scheduled Tue–Sat 12:15 ET (`massive-surface`) and audited daily. Gaps on record: SPY smile (American under a European fit path), VIX surface. |
 | Signal / strategy engine | **missing** | No candidate structures, no entry/exit/roll/no-trade rules, no edge-net-of-costs. |
 
 ### Trading control loop — all missing, none near-term
@@ -84,9 +84,9 @@ job or a script, not just a module.
 
 **Week 1 — finish the analytics foundation:**
 
-1. **Scheduled surface build.** `vol_surface` rebuilds exist only by hand
-   (`scripts/build_surface.py`). Add the scheduled job + healthcheck, per
-   the not-built ledger. Then wire drift_check's off-ATM slice consumer.
+1. **Scheduled surface build.** Landed: `massive-surface` Tue–Sat 12:15 ET
+   with its healthcheck and a `vol_surface` audit check; drift_check's
+   off-ATM canary consumes the landed slices.
 2. **Adopt the trading-day calendar** in `pricing/` (decision 4 above).
    Day-bar path: hybrid default, per-row stamp (step 3). Live path still
    ACT/365 (step 4). Production `clean/` swap is the remaining cutover.
@@ -97,7 +97,8 @@ job or a script, not just a module.
 4. **Baseline RV forecast.** HAR-RV on the `signals/spot` series,
    horizon-matched to the 5–45 DTE book, with an uncertainty band — the
    diagram is explicit: a distribution, not a point estimate. Honor the
-   measured Stage 1.1 call (no Roll debias).
+   measured Stage 1.1 call (no Roll debias). Landed as `signals/har_rv.py`,
+   scheduled Tue–Sat 12:10 ET behind `spy_spot` and audited daily.
 
 **Week 2 — close the loop on paper:**
 

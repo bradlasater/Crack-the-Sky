@@ -520,6 +520,79 @@ def test_vol_surface_is_part_of_the_daily_run(tmp_path: Path) -> None:
     assert "vol_surface" in names
 
 
+def _rv_forecast_rows(horizons: tuple[int, ...], blas_threads: int | None = 8) -> list[dict]:
+    return [
+        {
+            "date": RUN_DATE.isoformat(), "horizon": h, "log_rv_mean": -9.5,
+            "log_rv_sd": 0.6, "rv_daily": 9e-05, "vol_ann": 0.15,
+            "vol_ann_p10": 0.10, "vol_ann_p90": 0.22, "n_train": 900,
+            "blas_threads": blas_threads,
+        }
+        for h in horizons
+    ]
+
+
+def _land_rv_forecast(tmp_path: Path, rows: list[dict]) -> None:
+    landing.write_clean("rv_forecast", RUN_DATE, rows, job="rv_forecast", data_root=tmp_path)
+
+
+def test_rv_forecast_fails_when_absent_and_passes_when_every_horizon_landed(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    assert audit.check_rv_forecast(settings, RUN_DATE)[0].status == audit.FAIL
+    _land_rv_forecast(tmp_path, _rv_forecast_rows(audit.RV_HORIZONS))
+    got = audit.check_rv_forecast(settings, RUN_DATE)[0]
+    assert got.status == audit.PASS
+    assert got.data["horizons"] == list(audit.RV_HORIZONS)
+
+
+def test_rv_forecast_fails_when_a_horizon_is_missing(tmp_path: Path) -> None:
+    _land_rv_forecast(tmp_path, _rv_forecast_rows(audit.RV_HORIZONS[:-1]))
+    got = audit.check_rv_forecast(_settings(tmp_path), RUN_DATE)[0]
+    assert got.status == audit.FAIL
+    assert got.data["missing"] == [audit.RV_HORIZONS[-1]]
+
+
+def test_rv_forecast_warns_on_an_unpinned_fit(tmp_path: Path) -> None:
+    """A hand run outside cronjob.sh lands usable rows that a rebuild will not
+    reproduce -- worth saying, not worth failing the day over."""
+    _land_rv_forecast(tmp_path, _rv_forecast_rows(audit.RV_HORIZONS, blas_threads=None))
+    got = audit.check_rv_forecast(_settings(tmp_path), RUN_DATE)[0]
+    assert got.status == audit.WARN
+    assert got.data["unpinned"] == len(audit.RV_HORIZONS)
+
+
+def test_rv_forecast_fails_on_a_null_horizon_instead_of_crashing(tmp_path: Path) -> None:
+    """Written straight to parquet: the writer would never emit this row, which
+    is exactly why the audit has to name it rather than raise on int(None)."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from ingest.schemas import SCHEMAS
+
+    rows = _rv_forecast_rows(audit.RV_HORIZONS)
+    rows.append({**rows[0], "horizon": None})
+    part = tmp_path / "clean" / "rv_forecast" / f"dt={RUN_DATE.isoformat()}"
+    part.mkdir(parents=True)
+    pq.write_table(pa.Table.from_pylist(rows, schema=SCHEMAS["rv_forecast"]),
+                   part / "rv_forecast-malformed.parquet")
+    got = audit.check_rv_forecast(_settings(tmp_path), RUN_DATE)[0]
+    assert got.status == audit.FAIL
+    assert got.data["null_horizons"] == 1
+
+
+def test_rv_horizons_match_the_forecast_job() -> None:
+    from signals.har_rv import HORIZONS
+
+    assert audit.RV_HORIZONS == HORIZONS
+
+
+def test_rv_forecast_is_part_of_the_daily_run(tmp_path: Path) -> None:
+    names = {c.name for c in audit.run_checks(_settings(tmp_path), RUN_DATE, _logger())}
+    assert "rv_forecast" in names
+
+
 def test_render_lists_every_check(tmp_path: Path) -> None:
     checks = [audit.Check("a", audit.PASS, "ok"), audit.Check("b", audit.FAIL, "bad")]
     out = audit._render(RUN_DATE, checks)

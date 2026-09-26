@@ -149,6 +149,23 @@ def test_prune_is_monitored_on_its_monthly_schedule() -> None:
     assert prune["healthchecks"]["grace_min"] == 180
 
 
+def test_rv_forecast_runs_between_its_input_and_its_audit() -> None:
+    """rv_forecast reads T-1 spy_spot and coverage_audit grades its output, so
+    the timer has to sit after the one and before the other on the same days.
+    The pipeline slots are minutes apart; a retime that crossed either would
+    fit yesterday's series or fail an audit that ran too early."""
+    by_job = {u["job"]: u for u in UNITS if u["job"] in ("spy_spot", "rv_forecast", "coverage_audit")}
+
+    def slot(job: str) -> tuple[str, str]:
+        (cal,) = by_job[job]["on_calendar"]
+        days, clock = cal.split()
+        return days, clock
+
+    days = {slot(j)[0] for j in by_job}
+    assert days == {"Tue-Sat"}
+    assert slot("spy_spot")[1] < slot("rv_forecast")[1] < slot("coverage_audit")[1]
+
+
 # ---------------------------------------------------------------------------
 # cron and on_calendar must fire at the same instants
 # ---------------------------------------------------------------------------

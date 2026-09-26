@@ -6,7 +6,7 @@ derived dataset, the job that writes it, its rebuild script, its audit check,
 and the docs that describe it. Nothing in `ingest/` capture changes.
 
 Status: **review questions 1–3 resolved 2026-09-26, all as recommended.
-Steps 0–2 done. Steps 3–9 not started.**
+Steps 0–3 done. Steps 4–9 not started.**
 
 Three decisions were agreed before this was drafted:
 
@@ -256,6 +256,10 @@ on a node exactly where the scoping scan said it would (3/5/10: 673,
 
 **Step 3 — schema** for `vol_features` in `ingest/schemas`, and the
 non-null contract in `marketdata/validate.py` (every column required).
+**Done 2026-09-26.** `on_node` is the warehouse's first boolean column; a
+row written through `landing.write_clean` reads back through the catalog's
+schema check and validates clean. A test pins the required tuple to the
+schema's column list, so a new column cannot join without being classified.
 
 **Step 4 — `signals/vol_features.py`**: `build_for_date(settings, d)`
 reads `vol_surface`, `rv_forecast` and `spy_spot` at or before `d` and

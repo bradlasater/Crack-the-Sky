@@ -81,8 +81,18 @@ def test_schema_has_the_documented_columns() -> None:
     names = [f.name for f in SCHEMAS["rv_forecast"]]
     assert names == [
         "date", "horizon", "log_rv_mean", "log_rv_sd", "rv_daily",
-        "vol_ann", "vol_ann_p10", "vol_ann_p90", "n_train",
+        "vol_ann", "vol_ann_p10", "vol_ann_p90", "n_train", "blas_threads",
     ]
+
+
+def test_rows_stamp_the_blas_thread_pin(monkeypatch) -> None:
+    """Same contract as vol_surface: the row records the count it ran under."""
+    sessions = _sessions(120)
+    series = realized_variances(_spot_rows(sessions, _synthetic_spots(120)))
+    monkeypatch.setenv("OPENBLAS_NUM_THREADS", "8")
+    assert {r["blas_threads"] for r in forecast_rows(series)} == {8}
+    monkeypatch.delenv("OPENBLAS_NUM_THREADS")
+    assert {r["blas_threads"] for r in forecast_rows(series)} == {None}
 
 
 def test_realized_variances_are_squared_log_returns() -> None:

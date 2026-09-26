@@ -332,7 +332,9 @@ def _build_schemas() -> dict[str, Any]:
     # lognormal distribution (log_rv_mean/log_rv_sd), the annualised point
     # forecast and its 80% band, and the training-row count -- not just a
     # vol number. horizon is in sessions: 3/5/10/21/32 ~= 4-45 calendar days,
-    # the 5-45 DTE book.
+    # the 5-45 DTE book. blas_threads is vol_surface's stamp: the daily job
+    # and the archive rebuild both pin, and the column says which count a
+    # row was actually fit under.
     rv_forecast_fields = [
         pa.field("date", pa.string()),             # forecast origin session
         pa.field("horizon", pa.int64()),           # sessions ahead
@@ -343,6 +345,7 @@ def _build_schemas() -> dict[str, Any]:
         pa.field("vol_ann_p10", pa.float64()),     # 80% band, annualised vol
         pa.field("vol_ann_p90", pa.float64()),
         pa.field("n_train", pa.int64()),           # complete training rows in the fit
+        pa.field("blas_threads", pa.int64()),      # BLAS pin the fit ran under; null = unpinned
     ]
 
     # One row per decision event (entry / exit / roll / no-trade). Append-only:

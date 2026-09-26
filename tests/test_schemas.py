@@ -256,6 +256,7 @@ def test_rv_forecast_schema_roundtrip() -> None:
         "vol_ann_p10": 0.117,
         "vol_ann_p90": 0.331,
         "n_train": 700,
+        "blas_threads": 8,
     }]
     table = check_records("rv_forecast", records)
     assert table["horizon"].to_pylist() == [21]

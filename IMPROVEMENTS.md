@@ -43,18 +43,16 @@ conservative audit pass. Grouped by area, roughly highest-value first.
   it at 1 thread but does at 8 and at 32, so an ambient value in the operator's
   shell beat both writers' fallback assignment (`setdefault` / `:=`) and no
   column exists to say what it was.
-- `signals/har_rv.py` + `ingest/schemas/__init__.py` — **`rv_forecast` is not
-  drift-proof.** `scripts/build_rv_forecast.py` pins BLAS threads to 8, but the
-  writer `docs/data-flow.html` documents for the daily row —
-  `python -m signals.har_rv`, run by hand — applies no pin, and there is no
-  `har_rv` entry in `deploy/schedule.json` and no unit on
-  the box, so nothing routes it through `scripts/cronjob.sh`. The daily row is
-  therefore fit at whatever the operator's shell carried (32 on this box) while
-  a rebuild lands 8, and unlike `vol_surface` the schema has no `blas_threads`
-  column, so the mix is invisible. Closing it needs both halves: the daily
-  writer through a pinned entry point (a scheduled job, or the pin inside the
-  module above the numpy import), and a stamp on the schema — which makes it a
-  rebuild-and-swap like `vol_surface`'s, not an in-place change.
+- `signals/har_rv.py` + `ingest/schemas/__init__.py` — **fixed**: `rv_forecast`
+  was not drift-proof. The daily row was written by hand with no BLAS pin while
+  `scripts/build_rv_forecast.py` pinned 8, and the schema had no column to show
+  the mix. It also went stale: nothing ran the job, so the dataset stopped at
+  2026-09-04 behind a green audit. Now `massive-rv-forecast` runs it Tue–Sat
+  12:10 through `scripts/cronjob.sh`, every row stamps `blas_threads` via
+  `pricing.surface.blas_thread_pin`, and `coverage_audit` FAILs a missing
+  horizon and WARNs an unpinned row. The schema change needs the archive
+  rebuilt once with `scripts/build_rv_forecast.py --force`. Nothing reads
+  `rv_forecast` yet, so that is an in-place rebuild, not a staged swap.
 - `scripts/cronjob.sh` + `deploy/ansible/templates/massive-job.service.j2:31` —
   the BLAS pin is a fallback (`: "${VAR:=8}"`), and the unit imports the
   operator's environment (`EnvironmentFile=-%h/crack-the-sky/.env`), so a

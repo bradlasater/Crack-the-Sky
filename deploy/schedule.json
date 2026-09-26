@@ -164,6 +164,15 @@
       "restart": {"sec": 120}
     },
     {
+      "job": "rv_forecast",
+      "unit": "massive-rv-forecast",
+      "command": ["-m", "signals.har_rv"],
+      "cron": ["10 12 * * 2-6"],
+      "on_calendar": ["Tue-Sat 12:10:00"],
+      "healthchecks": {"schedule": "10 12 * * 2-6", "grace_min": 120, "desc": "HAR-RV forecast off T-1 spy_spot (derived, rebuildable)"},
+      "restart": {"sec": 120}
+    },
+    {
       "job": "surface",
       "unit": "massive-surface",
       "command": ["-m", "pricing.surface"],

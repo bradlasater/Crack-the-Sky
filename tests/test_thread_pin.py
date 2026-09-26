@@ -18,7 +18,8 @@ These tests pin the mechanism rather than the numerics: the value has to reach
 the job's own process, it has to be the same value in every writer that sets
 one, in the archive rebuild it has to be set before OpenBLAS loads, and the
 value stamped on landed ``vol_surface`` rows (``blas_threads``) has to be the
-one the job actually ran under.
+one the job actually ran under. ``rv_forecast`` stamps the same value
+through the same function (``pricing.surface.blas_thread_pin``).
 
 What they deliberately do not assert: that a writer cannot run at some other
 count. ``setdefault`` and ``:=`` both yield to an inherited value, which is the
@@ -111,11 +112,9 @@ def test_manual_rebuilds_pin_the_same_count_as_the_scheduled_job(script: Path) -
     job, and the two archive rebuild scripts that are run by hand -- so the
     value can drift apart in the source without anything noticing.
 
-    For ``vol_surface`` that would mix two non-comparable fits into one
-    archive, visibly, because every row stamps the count it ran under. For
-    ``rv_forecast`` there is no stamp and no scheduled writer to agree with at
-    all (see scripts/build_rv_forecast.py); this only keeps the repo's own two
-    values from diverging.
+    For ``vol_surface`` and ``rv_forecast`` that would mix two
+    non-comparable fits into one archive -- visibly, because both stamp the
+    count every row ran under, but a stamp that disagrees is still a rebuild.
     """
     src = script.read_text()
     values = set(re.findall(r'os\.environ\.setdefault\(_var, "(\d+)"\)', src))

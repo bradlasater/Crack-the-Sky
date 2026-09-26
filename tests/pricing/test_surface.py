@@ -415,6 +415,124 @@ def test_vol_is_flat_outside_the_fitted_term_range() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Fixed-moneyness total variance (the constant-maturity feature read)
+# ---------------------------------------------------------------------------
+
+def _slice(expiry: str, sessions: int, forward: float, daycount: str = "bus/252",
+           **params: float) -> sf.Slice:
+    """A slice built from known SVI parameters, so every w is exact."""
+    p = {**PARAMS, **params}
+    return sf.Slice(
+        expiration_date=expiry, dte=sessions, t_years=sessions / 252,
+        forward=forward, a=p["a"], b=p["b"], rho=p["rho"], m=p["m"],
+        sigma=p["sigma"], k_min=-0.1, k_max=0.1, n_strikes=21, rms_error=0.0,
+        min_g=0.5, rate=R, daycount=daycount,
+    )
+
+
+def _book_surface() -> sf.Surface:
+    """Nodes at 3, 5 and 10 sessions; ``a`` rises with T so the calendar
+    guard passes, and the forwards differ so fixed-k and fixed-K disagree."""
+    return sf.Surface(DAY, "SPXW", [
+        _slice("2026-09-02", 3, 7700.0, a=0.0008),
+        _slice("2026-09-04", 5, 7710.0, a=0.0014),
+        _slice("2026-09-11", 10, 7725.0, a=0.0030),
+    ])
+
+
+def test_slice_derivatives_match_finite_differences() -> None:
+    s = _slice("2026-09-02", 3, 7700.0)
+    h = 1e-5
+    for k in (-0.08, -0.01, 0.0, 0.01, 0.06):
+        w, dw, d2w = s.total_variance_derivatives(k)
+        assert w == s.total_variance(k)
+        assert dw == pytest.approx(
+            (s.total_variance(k + h) - s.total_variance(k - h)) / (2 * h), rel=1e-6)
+        assert d2w == pytest.approx(
+            (s.total_variance(k + h) - 2 * w + s.total_variance(k - h)) / (h * h),
+            rel=1e-4)
+
+
+def test_fixed_k_read_is_exact_on_a_node() -> None:
+    surf = _book_surface()
+    for s in surf.slices:
+        lo, hi, u = surf.bracket(s.t_years)
+        assert lo is s and hi is s and u == 0.0
+        assert surf.total_variance_derivatives(0.0, s.t_years) == (
+            s.total_variance_derivatives(0.0))
+
+
+def test_a_tenor_built_as_h_over_252_lands_on_its_node() -> None:
+    """The feature grid computes T as h/252; a slice five sessions out has
+    t_years = 5/252. They must meet as a node, not as an interpolation."""
+    surf = _book_surface()
+    lo, hi, _ = surf.bracket(5 / 252)
+    assert lo is hi and lo.expiration_date == "2026-09-04"
+    lo, hi, _ = surf.bracket(5 / 252 + 1e-14)
+    assert lo is hi
+
+
+def test_fixed_k_read_is_linear_in_total_variance_between_nodes() -> None:
+    surf = _book_surface()
+    near, mid = surf.slices[0], surf.slices[1]
+    T = 4 / 252
+    u = (T - near.t_years) / (mid.t_years - near.t_years)
+    for k in (-0.05, 0.0, 0.03):
+        got = surf.total_variance_derivatives(k, T)
+        want = [x + (y - x) * u for x, y in zip(
+            near.total_variance_derivatives(k), mid.total_variance_derivatives(k),
+            strict=True)]
+        assert got == pytest.approx(want, rel=1e-12)
+        assert surf.total_variance(k, T) == got[0]
+
+
+def test_fixed_k_is_not_fixed_strike() -> None:
+    """ATM forward is k=0 on every slice; vol(K, T) at a fixed strike reads
+    each slice at its own forward's k, so the two differ when forwards do."""
+    surf = _book_surface()
+    T = 4 / 252
+    fixed_k = math.sqrt(surf.total_variance(0.0, T) / T)
+    fixed_strike = surf.vol(7700.0, T)
+    assert fixed_k != pytest.approx(fixed_strike, rel=1e-9)
+
+
+def test_fixed_k_read_refuses_to_extrapolate() -> None:
+    """vol() holds the nearest slice flat; a feature must not."""
+    surf = _book_surface()
+    with pytest.raises(sf.SurfaceError, match="outside the fitted term range"):
+        surf.total_variance(0.0, 2 / 252)
+    with pytest.raises(sf.SurfaceError, match="outside the fitted term range"):
+        surf.total_variance(0.0, 11 / 252)
+    with pytest.raises(ValueError):
+        surf.bracket(0.0)
+
+
+def test_fixed_k_read_refuses_to_bridge_two_daycounts() -> None:
+    """The hybrid stamps act/365 past the holiday horizon; a line from a
+    bus/252 T to an act/365 T mixes units."""
+    surf = sf.Surface(DAY, "SPXW", [
+        _slice("2026-09-02", 3, 7700.0, a=0.0008),
+        _slice("2027-09-02", 300, 7800.0, daycount="act/365", a=0.05),
+    ])
+    with pytest.raises(sf.SurfaceError, match="not comparable"):
+        surf.total_variance(0.0, 100 / 252)
+    # The nodes themselves are still readable.
+    assert surf.total_variance(0.0, 3 / 252) == surf.slices[0].total_variance(0.0)
+
+
+def test_flat_surface_has_zero_skew_and_curvature() -> None:
+    """b = 0 makes every slice flat: w = a everywhere, derivatives zero."""
+    surf = sf.Surface(DAY, "SPXW", [
+        _slice("2026-09-02", 3, 7700.0, a=0.18**2 * 3 / 252, b=0.0),
+        _slice("2026-09-11", 10, 7725.0, a=0.18**2 * 10 / 252, b=0.0),
+    ])
+    T = 7 / 252
+    w, dw, d2w = surf.total_variance_derivatives(0.0, T)
+    assert math.sqrt(w / T) == pytest.approx(0.18, rel=1e-12)
+    assert dw == 0.0 and d2w == 0.0
+
+
+# ---------------------------------------------------------------------------
 # Thin chains fail loud at the fit, quietly at the build
 # ---------------------------------------------------------------------------
 

@@ -6,8 +6,8 @@ coverage"), which cannot run over history until this is fixed. Scope:
 `pricing/surface.py`, its tests, `coverage_audit`'s `vol_surface` check,
 a rebuild of `clean/vol_surface`, and the docs that describe the surface.
 
-Status: **decisions 1–6 resolved 2026-09-26, all as recommended. Steps 1,
-2 and 3 done.**
+Status: **decisions 1–6 resolved 2026-09-26; decision 7 (new, from step 3b)
+open. Steps 1–3 done; 3b built, and its measurement surfaced finding 7.**
 
 ---
 
@@ -142,6 +142,30 @@ parameters, so a refit under a narrower grid may land slightly elsewhere;
 step 6 measures the real outcome. 37 of the 95 also break Lee's asymptotic
 wing-slope bound, `b(1 + |ρ|) ≤ 2`, which only binds infinitely far out.
 
+**7. The unconstrained fit can stop in a poor local optimum, and the wide
+butterfly pad was hiding it.** *Found measuring step 3b.* With B and F
+together, SPXW fits in 280 of the 347 missing sessions (93.4% coverage
+before C), but 6 of the 30 previously good sessions in the check sample now
+fail SPXW (and 3 SPX), all on calendar crossings inside the data at
+`k ≈ 0.06–0.24`. Under B alone all 30 fit. Traced on 2022-11-29, expiry
+2022-12-07:
+
+| | fit kept | a | b | ρ | σ | rms |
+|---|---|---|---|---|---|---|
+| B alone | the repair's refit | 0.0004 | 0.021 | −0.999 | 0.059 | 4.4e-5 |
+| B + F | the first fit | −0.750 | 0.392 | −0.162 | 1.942 | 1.04e-4 |
+
+`least_squares` from the one data-derived seed stopped in a basin more than
+twice as bad: a wide parabola with a large negative `a`. Under the flat
+1.0 pad that fit failed the butterfly check, so it went to the repair, which
+restarts from a projected seed and found the better basin. F's narrower
+check accepts the poor fit as it is. Its right edge then sits too high for
+the next expiry to clear inside the data, and the calendar guard rejects the
+session. The wide pad was a lucky rescue, not a design. Lee's bound would
+not catch this one (its wing slope is 0.46). This is also the likeliest
+source of the odd shapes F lets through (34 of its 81 recovered slices
+break Lee's bound).
+
 ---
 
 ## The fix
@@ -196,6 +220,16 @@ expiry is then checked about 0.06 past its strikes, a two-year one at 18%
 vol about 0.75, close to today's pad. The cost is the same kind as B's: no butterfly promise
 in the far extrapolated wing of a short expiry. Lee's wing-slope bound stays
 a logged diagnostic, not a rejection. **Decision 6.**
+
+**G. Keep the best fit, not the first feasible one (finding 7).** Always
+run both starting points the repair already uses (the unconstrained optimum
+and the projected data seed) and keep whichever feasible candidate has the
+lower RMS, rather than accepting the unconstrained fit whenever it passes
+the guards. Deterministic, since the seeds are. The cost is an SLSQP solve
+per slice instead of only per violating slice, so fits get slower; step 6
+measures by how much. It changes the parameters of any slice where the
+repair's basin is better, including slices in sessions that fit today, so
+it lands before the rebuild like everything else here. **Decision 7.**
 
 What is *not* proposed: loosening the butterfly tolerance (`G_TOL`),
 raising the arbitrage repair budget, or holding a failed slice's parameters
@@ -335,3 +369,8 @@ gap as a found-and-fixed entry), and `features-v0.md`'s blocked section.
    `k`? **Yes, as F** (resolved 2026-09-26). It recovers about 81 of the 95
    SPXW butterfly failures, most of them inside the book, which C would
    otherwise drop and leave as holes in the features' grid.
+7. **Best-of-candidates fit (open).** Keep the lowest-RMS feasible fit across
+   both starting points, rather than the first fit that passes (G)?
+   *(Recommended: yes. Without it, F trades one kind of failure for another
+   and keeps poor fits, and the alternative is reverting F and letting C drop
+   the 95 SPXW slices, most of them inside the book.)*

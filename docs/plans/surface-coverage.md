@@ -7,7 +7,7 @@ coverage"), which cannot run over history until this is fixed. Scope:
 a rebuild of `clean/vol_surface`, and the docs that describe the surface.
 
 Status: **decisions 1–6 resolved 2026-09-26, all as recommended. Steps 1
-and 2 done; step 3 in progress.**
+and 2 done; step 3 built, real-data check running.**
 
 ---
 
@@ -236,6 +236,31 @@ the fit-time floor. Tests: a pair crossing only outside their overlap is
 accepted; a crossing inside the overlap is still rejected (the existing
 calendar tests must still pass unchanged); a disjoint pair (no overlap) is
 accepted with nothing to compare, and says so in the log.
+
+**Step 3 as built (2026-09-26): two changes from the text above.**
+
+- **Every pair, not only neighbours.** On the union grid, checking adjacent
+  pairs was enough: every pair shared one grid, so `w₁ ≤ w₂ ≤ w₃` at each
+  point carried through. On overlaps it does not: a strike covered by
+  expiries 1 and 3 but not 2 would never be compared. The guard compares
+  every pair on its overlap, and the fit-time floor is the highest earlier
+  slice wherever that slice has data.
+- **One shared lattice.** The first cut sampled the floor on the new slice's
+  own range and the guard on each pair's overlap, two different point sets.
+  Loading the 673 landed sessions under it rejected 1,106 of 1,346
+  root-surfaces, all on hairline crossings (1e-7 to 6e-6 in total variance)
+  between one grid's points that the other never constrained. The old
+  design had avoided this by using one grid for both. The fix keeps that
+  property: floor and guard both evaluate only at multiples of
+  `K_STEP = 0.0025` in `k` inside the relevant range, so a slice fit to
+  clear the floor passes the guard at the same points.
+
+**Consequence for deploying.** The landed archive was fit against the old
+union grid's points, so the new guard rejects most of it on load (1,134 of
+1,346 root-surfaces), and anything that reads the surface would fail on
+old partitions. The code and the rebuilt archive therefore have to go live
+together, through step 7's staged rebuild and swap, the same constraint the
+`daycount` and `blas_threads` changes had. Rollback likewise means both.
 
 **Step 3b — F: slice-scaled butterfly pad** in `_butterfly_grid`
 and its callers. Tests: a short slice with arbitrage only past three

@@ -299,6 +299,77 @@ def test_calendar_arbitrage_is_detected() -> None:
         sf.build_surfaces(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)
 
 
+# Calendar checks compare two slices only where both have data (fix B).
+
+def _ranged(expiry: str, sessions: int, k_min: float, k_max: float, **params: float) -> sf.Slice:
+    """A slice from known SVI parameters, fit (notionally) to ``[k_min, k_max]``."""
+    p = {**PARAMS, **params}
+    return sf.Slice(
+        expiration_date=expiry, dte=sessions, t_years=sessions / 252, forward=7700.0,
+        a=p["a"], b=p["b"], rho=p["rho"], m=p["m"], sigma=p["sigma"],
+        k_min=k_min, k_max=k_max, n_strikes=21, rms_error=0.0, min_g=0.5,
+        rate=R, daycount="bus/252",
+    )
+
+
+def test_a_crossing_outside_the_overlap_is_not_arbitrage() -> None:
+    """A short slice's steep left wing crosses a longer, flatter one far past
+    both slices' strikes. Nothing was priced there, so nothing is rejected."""
+    near = _ranged("2026-09-02", 3, -0.10, 0.05, a=0.0002, b=0.004, rho=-0.9, m=0.0, sigma=0.02)
+    far = _ranged("2026-09-11", 10, -0.10, 0.05, a=0.0012, b=0.003, rho=0.0, m=0.0, sigma=0.05)
+    inside = np.linspace(-0.10, 0.05, 51)
+    assert all(far.total_variance(k) > near.total_variance(k) for k in inside)
+    k = -1.0  # far outside [-0.10, 0.05]
+    assert near.total_variance(k) > far.total_variance(k)  # the wing crossing is real
+    assert len(sf.Surface(DAY, "SPXW", [near, far])) == 2
+
+
+def test_a_crossing_inside_the_overlap_is_still_rejected() -> None:
+    near = _ranged("2026-09-02", 3, -0.10, 0.05, a=0.0030)
+    far = _ranged("2026-09-11", 10, -0.10, 0.05, a=0.0008)
+    with pytest.raises(sf.SurfaceArbitrageError, match="calendar arbitrage"):
+        sf.Surface(DAY, "SPXW", [near, far])
+
+
+def test_disjoint_slices_have_nothing_to_compare() -> None:
+    near = _ranged("2026-09-02", 3, -0.10, -0.05, a=0.0030)
+    far = _ranged("2026-09-11", 10, 0.00, 0.05, a=0.0008)
+    assert len(sf.Surface(DAY, "SPXW", [near, far])) == 2
+
+
+def test_non_adjacent_slices_are_compared_where_they_overlap() -> None:
+    """The middle slice covers none of the region where the outer two cross,
+    so an adjacent-only check would pass them."""
+    first = _ranged("2026-09-02", 3, -0.30, -0.20, a=0.0030)
+    middle = _ranged("2026-09-04", 5, 0.00, 0.05, a=0.0040)
+    last = _ranged("2026-09-11", 10, -0.30, -0.20, a=0.0008)
+    with pytest.raises(sf.SurfaceArbitrageError, match="2026-09-02 .* and 2026-09-11"):
+        sf.Surface(DAY, "SPXW", [first, middle, last])
+
+
+def test_floor_and_guard_share_one_lattice() -> None:
+    """The fit constrains and the guard checks the same points, bit for bit;
+    two different samplings found hairline crossings between each other's
+    points on 1,106 landed root-surfaces."""
+    a = sf._lattice(-0.1234, 0.0567)
+    b = sf._lattice(-0.3, 0.2)
+    shared = np.intersect1d(a, b)
+    assert shared.size == a.size  # every point of the narrower range is in the wider
+    assert np.all(np.round(a / sf.K_STEP) * sf.K_STEP == a)
+
+
+def test_calendar_floor_is_the_highest_earlier_slice_where_it_has_data() -> None:
+    low = _ranged("2026-09-02", 3, -0.10, 0.00, a=0.0010)
+    high = _ranged("2026-09-04", 5, -0.05, 0.10, a=0.0020)
+    grid, floor = sf._calendar_floor(-0.20, 0.20, [low, high])
+    assert grid.min() >= -0.10 and grid.max() <= 0.10  # uncovered points dropped
+    both = (grid >= -0.05) & (grid <= 0.00)
+    assert np.allclose(floor[both], [high.total_variance(k) for k in grid[both]])
+    only_low = grid < -0.05
+    assert np.allclose(floor[only_low], [low.total_variance(k) for k in grid[only_low]])
+    assert sf._calendar_floor(0.5, 0.6, [low, high]) is None
+
+
 def test_calendar_wing_crossing_is_repaired_not_rejected() -> None:
     """Issue #46: a slice dipping below its predecessor's wing is refit under
     w >= w_prev on the guard grid, because day-bar wings carry small genuine
@@ -327,8 +398,10 @@ def test_build_surfaces_chains_the_calendar_repair() -> None:
     """Copilot review on #49: cover the two-pass build wiring itself.
 
     A later slice whose unconstrained fit dips below the earlier slice must
-    be repaired inside build_surfaces -- forwarding the predecessor, the
-    union grid, and the expiry ordering -- not just inside fit_slice.
+    be repaired inside build_surfaces -- forwarding the earlier slices' floor
+    on the shared lattice, and the expiry ordering -- not just inside
+    fit_slice. Clean means clean at the lattice points where both slices
+    have data: that is what the fit constrains and the Surface guard checks.
     """
     delta = 2e-4
     lower_smile = {**PARAMS, "a": PARAMS["a"] - delta}
@@ -338,8 +411,8 @@ def test_build_surfaces_chains_the_calendar_repair() -> None:
     surf = sf.build_surfaces(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)["SPXW"]
     assert len(surf.slices) == 2
     near, far = surf.slices
-    grid = np.linspace(min(near.k_min, far.k_min), max(near.k_max, far.k_max),
-                       sf.G_POINTS)
+    grid = sf._lattice(*sf._overlap(near.k_min, near.k_max, far.k_min, far.k_max))
+    assert grid.size > 10
     near_w = sf._svi_w(grid, near.a, near.b, near.rho, near.m, near.sigma)
     far_w = sf._svi_w(grid, far.a, far.b, far.rho, far.m, far.sigma)
     assert float(np.min(far_w - near_w)) >= -sf.CAL_TOL  # calendar-clean

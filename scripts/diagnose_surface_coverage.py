@@ -11,7 +11,7 @@ appended as one JSON line per (session, root) to ``--out``.
 
 ``--missing`` selects sessions with ``option_day_bars`` but no ``vol_surface``
 partition; ``--all`` selects every ``option_day_bars`` session; ``--dates``
-takes ``D`` or ``D1:D2``. Re-running with the same ``--out`` resumes, skipping
+takes ``D`` or ``D1:D2``; ``--dates-file`` a list, one date per line. Re-running with the same ``--out`` resumes, skipping
 sessions already recorded.
 
 A failing record names the expiry whose fit raised (``expiry``, ``dte``) --
@@ -137,6 +137,9 @@ def refit(iso: str) -> list[dict[str, Any]]:
 
 def _select(args: argparse.Namespace, settings: Settings) -> list[str]:
     bars = [d.isoformat() for d in partition_dates(settings, "option_day_bars")]
+    if args.dates_file:
+        wanted = {line.strip() for line in Path(args.dates_file).read_text().splitlines()}
+        return [d for d in bars if d in wanted]
     if args.dates:
         lo, _, hi = args.dates.partition(":")
         hi = hi or lo
@@ -154,6 +157,7 @@ def main(argv: list[str] | None = None) -> int:
                        help="sessions with day bars but no vol_surface")
     which.add_argument("--all", action="store_true", help="every day-bar session")
     which.add_argument("--dates", help="D or D1:D2 (inclusive)")
+    which.add_argument("--dates-file", help="file with one YYYY-MM-DD per line")
     parser.add_argument("--out", required=True, help="JSONL output; resumes if present")
     parser.add_argument("--jobs", type=int, default=4, help="worker processes")
     args = parser.parse_args(argv)

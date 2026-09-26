@@ -6,7 +6,7 @@ derived dataset, the job that writes it, its rebuild script, its audit check,
 and the docs that describe it. Nothing in `ingest/` capture changes.
 
 Status: **review questions 1–3 resolved 2026-09-26, all as recommended.
-Step 0 done. Steps 1–9 not started.**
+Steps 0–2 done. Steps 3–9 not started.**
 
 Three decisions were agreed before this was drafted:
 
@@ -109,8 +109,8 @@ here: `Surface.vol(K, T)` fixes the *strike* and evaluates each slice at its
 own forward's `k`, and it holds the nearest slice flat outside the fitted
 range. Features need fixed *moneyness* (ATM forward is `k = 0` on every
 slice, whatever the forwards) and must **refuse** to extrapolate, not hold
-flat. So step 2 adds a small `Surface.total_variance(k, T)` (with derivatives)
-rather than reusing `vol`. Linear-in-`w` at fixed `k` is also the
+flat. So step 2 adds `Surface.total_variance(k, T)` and
+`Surface.total_variance_derivatives(k, T)` rather than reusing `vol`. Linear-in-`w` at fixed `k` is also the
 interpolation the calendar guard already protects: `w` is non-decreasing in
 `T` at every `k` on the fitted grid, so the interpolated `w` cannot go
 negative or produce a negative forward variance.
@@ -241,13 +241,18 @@ only the stamp changed. The archive has no unpinned rows left.
 brackets every tenor on a node or close to one. SPX monthlies are AM-settled:
 they settle at the expiry day's open, so the session count overstates their
 vol time by most of a session, which is a large error at a 3-session tenor. **Review
-question 3: agreed, SPXW only for v0.**
+question 3: agreed, SPXW only for v0.** **Done:** a decision, no code.
 
-**Step 2 — `Surface.total_variance(k, T)` and its k-derivatives** in
+**Step 2 — `Surface.total_variance(k, T)` / `total_variance_derivatives(k, T)`** in
 `pricing/surface.py`: linear in `w` at fixed `k`, exact on a node, raising
 (not holding flat) outside `[T_first, T_last]`. Tests: exact on a node,
 linear between nodes on a synthetic two-slice surface, refuses both ends,
 derivatives agree with finite differences.
+**Done 2026-09-26.** Against the production archive, the read succeeds for
+all 673 SPXW sessions at all five tenors, with no non-positive `w`. It lands
+on a node exactly where the scoping scan said it would (3/5/10: 673,
+21: 662, 32: 180). It also refuses to interpolate across a `bus/252` /
+`act/365` boundary, which the plan had not called for.
 
 **Step 3 — schema** for `vol_features` in `ingest/schemas`, and the
 non-null contract in `marketdata/validate.py` (every column required).

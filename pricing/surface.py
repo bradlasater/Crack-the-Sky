@@ -66,6 +66,14 @@ always exists on that segment -- because SLSQP started infeasible slides to
 the degenerate flat slice instead of the good feasible fit next to the data.
 The feasible candidate with the lower cost wins.
 
+**How far past the strikes.** The guard grid pads each slice's strike range
+by three of its own standard deviations (``sqrt`` of its smallest observed
+total variance), capped at 1.0 in ``k``. A flat 1.0 checked a 3-day expiry
+dozens of standard deviations past any price, and rejected smiles whose only
+arbitrage was in that extrapolation (docs/plans/surface-coverage.md, fix F);
+the cap keeps a long-dated slice's check where it was. Nothing is promised
+further out than the pad.
+
 **The calendar guard is chained through the build the same way.** Real day
 bars carry small genuine calendar inversions -- the raw ATM curve itself
 crosses on these sessions -- so the build fits slices in expiry order and a
@@ -164,9 +172,16 @@ MAX_NFEV = 5000
 # noise (see the module docstring). 3e-5 is ~$0.23 at F ~ 7700.
 MIN_TIME_VALUE_FRAC = 3e-5
 
-# Butterfly guard grid: g(k) is checked this far (in k) past the quoted
-# strikes. Calendar comparison shares the grid resolution.
+# Butterfly guard grid: g(k) is checked past the quoted strikes by
+# G_PAD_SD of the slice's own standard deviations -- sqrt of its smallest
+# observed total variance -- and never further than G_PAD. A flat pad of 1.0
+# in k was, for a 3-day expiry, a check out to strikes at 32% and 286% of the
+# forward, dozens of standard deviations past any price; 83 of the 95 SPXW
+# butterfly failures measured on 2026-09-26 had no arbitrage inside their
+# strikes at all (docs/plans/surface-coverage.md, finding 6, fix F). Capping
+# at the old pad means this can only narrow the check, never widen it.
 G_PAD = 1.0
+G_PAD_SD = 3.0
 G_POINTS = 201
 G_TOL = 1e-8
 # The constrained refit is required to beat zero by this margin so the
@@ -296,9 +311,21 @@ def _calendar_floor(
     return grid[keep], floor[keep]
 
 
-def _butterfly_grid(k_lo: float, k_hi: float) -> np.ndarray:
+def _butterfly_pad(ws: Any) -> float:
+    """How far past its strikes a slice's butterfly condition is checked.
+
+    ``G_PAD_SD`` standard deviations of the slice, taking ``sqrt(min w)`` over
+    its observed total variances as the standard deviation in ``k`` -- known
+    before the fit, so the grid stays fixed through the constrained refit --
+    and capped at ``G_PAD``.
+    """
+    w_min = float(np.min(np.asarray(ws, dtype=float)))
+    return min(G_PAD, G_PAD_SD * math.sqrt(max(w_min, 0.0)))
+
+
+def _butterfly_grid(k_lo: float, k_hi: float, pad: float = G_PAD) -> np.ndarray:
     """The padded k-grid the butterfly guard and the constrained refit share."""
-    return np.linspace(k_lo - G_PAD, k_hi + G_PAD, G_POINTS)
+    return np.linspace(k_lo - pad, k_hi + pad, G_POINTS)
 
 
 def _min_g(grid: np.ndarray, p: np.ndarray) -> float:
@@ -309,15 +336,16 @@ def _min_g(grid: np.ndarray, p: np.ndarray) -> float:
 
 
 def _check_butterfly(
-    a: float, b: float, rho: float, m: float, sigma: float, k_lo: float, k_hi: float
+    a: float, b: float, rho: float, m: float, sigma: float, k_lo: float, k_hi: float,
+    pad: float = G_PAD,
 ) -> float:
     """Min of g(k) on the padded grid; SurfaceArbitrageError when negative."""
-    grid = _butterfly_grid(k_lo, k_hi)
+    grid = _butterfly_grid(k_lo, k_hi, pad)
     min_g = float(np.min(_g(grid, a, b, rho, m, sigma)))
     if min_g < -G_TOL:
         raise SurfaceArbitrageError(
             f"butterfly arbitrage: min g(k) = {min_g:.6g} over "
-            f"[{k_lo - G_PAD:.3f}, {k_hi + G_PAD:.3f}] for "
+            f"[{k_lo - pad:.3f}, {k_hi + pad:.3f}] (strikes [{k_lo:.3f}, {k_hi:.3f}]) for "
             f"a={a:.6g} b={b:.6g} rho={rho:.4f} m={m:.4f} sigma={sigma:.4f}"
         )
     return min_g
@@ -557,7 +585,8 @@ def fit_slice(
         raise SurfaceError(f"SVI fit did not converge: {fit.message}")
 
     x = fit.x
-    grid = _butterfly_grid(float(ks[0]), float(ks[-1]))
+    pad = _butterfly_pad(ws)
+    grid = _butterfly_grid(float(ks[0]), float(ks[-1]), pad)
     if w_floor is None and floor is not None and cal_grid is not None:
         w_floor = _svi_w(cal_grid, floor.a, floor.b, floor.rho, floor.m, floor.sigma)
     if cal_grid is None:
@@ -593,7 +622,7 @@ def fit_slice(
     rms = float(np.sqrt(np.mean(residuals(x) ** 2)))
     # The guard still raises after the fit -- the loud backstop for a slice
     # the constrained refit could not repair either.
-    min_g = _check_butterfly(a, b, rho, m, sigma, float(ks[0]), float(ks[-1]))
+    min_g = _check_butterfly(a, b, rho, m, sigma, float(ks[0]), float(ks[-1]), pad)
     return SliceFit(a=a, b=b, rho=rho, m=m, sigma=sigma, rms_error=rms, min_g=min_g)
 
 

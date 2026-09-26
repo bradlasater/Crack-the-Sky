@@ -225,6 +225,40 @@ def test_butterfly_violating_smile_is_repaired_not_rejected() -> None:
     assert fit.rms_error < 1e-3
 
 
+# The butterfly check reaches three of the slice's standard deviations past
+# its strikes, not a flat 1.0 in k (fix F).
+
+# A real SPXW slice: 2022-09-02's 7-day expiry, strikes k in [-0.270, 0.069].
+# Its unconstrained fit is arbitrage-free there and for several standard
+# deviations beyond, and fails only far out in the extrapolated wing.
+SHORT_REAL = {"a": -0.00211003, "b": 1.72961, "rho": -0.999, "m": -0.2991, "sigma": 0.0293}
+SHORT_REAL_STRIKES = (-0.270, 0.069)
+
+
+def test_butterfly_pad_scales_with_the_slice_and_is_capped() -> None:
+    short = [0.0002, 0.0004, 0.0009]      # a few days: sqrt(min w) ~ 0.014
+    long_ = [0.09, 0.11, 0.2]             # two years at ~20% vol
+    assert sf._butterfly_pad(short) == pytest.approx(3 * math.sqrt(0.0002))
+    assert sf._butterfly_pad(long_) == pytest.approx(3 * math.sqrt(0.09))
+    assert sf._butterfly_pad([0.5, 0.8]) == sf.G_PAD  # never further than before
+
+
+def test_arbitrage_only_far_past_a_short_slice_is_not_rejected() -> None:
+    p, (lo, hi) = SHORT_REAL, SHORT_REAL_STRIKES
+    with pytest.raises(sf.SurfaceArbitrageError, match="butterfly"):
+        sf._check_butterfly(*p.values(), lo, hi)  # the old flat pad
+    w_min = p["a"] + p["b"] * p["sigma"] * math.sqrt(1 - p["rho"] ** 2)
+    pad = sf._butterfly_pad([w_min])
+    assert pad < 0.1
+    assert sf._check_butterfly(*p.values(), lo, hi, pad) >= 0.0
+
+
+def test_arbitrage_within_the_strikes_is_still_rejected() -> None:
+    """Narrowing the pad changes nothing inside the data."""
+    with pytest.raises(sf.SurfaceArbitrageError, match=r"strikes \[-0.600, 0.600\]"):
+        sf._check_butterfly(*BUTTERFLY_BAD.values(), -0.6, 0.6, pad=0.01)
+
+
 def test_butterfly_violating_chain_is_repaired_end_to_end() -> None:
     bars = _chain_bars(
         NEAR, T_NEAR, lambda k: math.sqrt(_true_w(math.log(k / F), BUTTERFLY_BAD) / T_NEAR))

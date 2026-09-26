@@ -700,10 +700,23 @@ def _backfill(s3: Any, settings: Settings, before: date,
     and burning the restart budget on a hole that is not going to close.
     history_audit already alerts weekly on a gap that persists, with the
     oracle to tell a hole from a holiday.
+
+    Always logs ``flatfile_backfill_swept`` and always returns counters, even
+    when it finds nothing. A silent no-op is the expected result on a healthy
+    archive, and without a record of it "the sweep ran and found nothing" and
+    "the sweep never ran" read identically in the log -- which made the
+    unattended verification this sweep was written for impossible to sign off.
+    The empty dict stays reserved for the sweep being *disabled* (an explicit
+    ``--date``, ``--no-backfill`` or a dry run), so the absence of a
+    ``backfilled`` key in ``job_end`` means something different from a zero.
     """
     days = incomplete_recent_days(Path(settings.data_root), before)
+    logger.log("flatfile_backfill_swept", lookback=BACKFILL_LOOKBACK,
+               before=before.isoformat(),
+               incomplete=[{"date": day.isoformat(), "datasets": missing}
+                           for day, missing in days])
     if not days:
-        return {}
+        return {"backfilled": 0, "backfill_failed": 0}
     filled = failed = 0
     for day, missing in days:
         for dataset in missing:

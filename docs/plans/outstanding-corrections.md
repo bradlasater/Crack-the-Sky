@@ -72,28 +72,34 @@ approval setting through the API (the endpoint 404s for this repo); the earlier
 plan recorded it as `first_time_contributors`, which gates only a contributor's
 *first* PR.
 
-**Recommended: make the repo private.** No Pages site depends on it. One
-command, and it restores the premise the risk note was written for:
+**The repo is public by design, and stays public** (Brad, 2026-09-22). It is
+linked from his website as a work sample for hiring managers reviewing him for
+a quant role, so public visibility is a requirement of the project rather than
+an oversight. Earlier drafts of this document recommended
+`gh repo edit --visibility private`; that recommendation is withdrawn, and no
+future audit should re-raise it.
 
-```
-gh repo edit --visibility private --accept-visibility-change-consequences
-```
+**Closed 2026-09-22** by stopping fork code from reaching the box, which costs
+nothing a reader of the repo would notice:
 
-If it is public on purpose, the alternative is to stop fork code reaching the
-box: drop `pull_request` from `box.yml`'s triggers (`push: branches: ["**"]`
-already covers your own branches, since pushing needs write access), or guard
-the job with
+- **`pull_request` is gone from `box.yml`'s triggers.** A fork PR now starts no
+  run on the box at all. Nothing is lost on our own branches — `push:
+  branches: ["**"]` already builds every branch and its run reports against the
+  PR head, so a pull request still shows the `live` check. It also retires a
+  real waste: `push` and `pull_request` had been firing two identical runs for
+  every PR.
+- **The `live` job additionally carries a same-repo `if:` guard.** With no
+  `pull_request` trigger it never fires today. That is the point — it is there
+  so re-adding the trigger later cannot silently reopen this.
+- **The accepted-risk note is rewritten** to say the repo is public on purpose,
+  and to stop offering a private repo as its mitigant.
 
-```yaml
-if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-```
+Still owed, and worth doing on its own account now that the repo is explicitly
+written to be read by strangers: replace the real IBKR account id in
+`tests/fixtures/flex_trades.xml` and `tests/test_ibkr_executions.py` with a
+fake one.
 
-Either way, rewrite the accepted-risk note to match what is actually true, and
-replace the real IBKR account id in `tests/fixtures/flex_trades.xml` and
-`tests/test_ibkr_executions.py` with a fake one.
-
-**Verify:** `gh repo view --json visibility` reports `PRIVATE`, or a test PR
-from a fork produces no `box` run.
+**Verify:** a test PR from a fork produces no `box` run.
 
 ---
 
@@ -260,22 +266,91 @@ trading days. The twelve runs sampled from 09-01 to 09-18 were all 2, but
 tonight's landed at 1. Both PASS; WARN still starts at 3, which remains the
 right line for "a run did not land".
 
+## Tuesday 2026-09-22 — the unattended runs verified
+
+Item 2's whole purpose. Read off the logs at 11:50 ET, on their own schedules,
+with nobody driving them:
+
+- **`flatfile_pull` 11:05** — all three datasets landed for 2026-09-21,
+  `datasets_ok: 3`, `job_end` in 37 s. The manifest gained exactly three
+  entries, whose `rows_kept` (3,339,841 / 382,569 / 17,895) match the rows the
+  run reported writing, and each dataset's partition carries exactly one
+  `flatfile_pull-*.parquet`. So #81's late-file handling and #82's
+  re-write suppression both hold on a real unattended run.
+- **`reconcile` 11:30** — green, 382,569 rows, `reconcile_overwritten`.
+- **`rates_sync` 08:20** — `rates_written` and `job_end`, on the first Tuesday
+  of the Mon–Fri schedule from #83.
+- The only `job_error` in the last two days remains the 22:00 hand-probe of
+  2026-09-21 that this document already accounts for.
+
+Live capture was healthy while this was read: `ws_minute_bars` at 1 connect and
+0 reconnects, `snapshot_sweep` `errors: 0`, and the session's 13 `ws_silence`
+events matching 09-16, 09-17, 09-18 and 09-21 exactly — so that count is the
+shape of a normal session, not a new symptom.
+
+### The heal sweep logged nothing, and now does
+
+Verifying the above turned up an observability hole rather than a bug. The
+sweep's expected result on a healthy archive is to find nothing — but
+`_backfill` returned `{}` and logged nothing in that case, so `job_end` carried
+no counters and the log held no trace. "The sweep ran and found nothing" and
+"the sweep never ran" were therefore the same log, which is precisely the
+question this verification had to answer. (It *was* running: `deploy/schedule.json`
+invokes `-m ingest.jobs.flatfile_pull` with no `--date`, so `args.backfill` is
+true — but that had to be established from the schedule, not the evidence.)
+
+Fixed: `_backfill` now always logs `flatfile_backfill_swept` with its lookback
+window and the dates it found short, and always returns counters. The empty
+dict is now reserved for the sweep being *disabled* — an explicit `--date`,
+`--no-backfill`, or a dry run — so an absent `backfilled` key in `job_end`
+means something different from `backfilled: 0`. Four tests pin it, all of which
+fail against the previous code.
+
+### The audit was grading a session before it existed
+
+The first morning pushes this repo has ever had turned up a second
+time-of-day bug, this one in CI rather than in a job. `box.yml` runs
+`coverage_audit` for T-1 on every push, but T-1's `vol_surface` partition is
+written by the surface job at 12:15 ET. Two pushes at 11:51 and 11:55 ET —
+including the merge of the docs-only PR #84, so `main` itself went red — failed
+on `vol_surface: partition missing or empty` for a partition that was twenty
+minutes from being written. Everything else passed, 24 of 25, `rate_curve`
+among them at 1 trading day.
+
+It had stayed hidden because the daily scheduled run fires at 22:17 UTC
+(18:17 ET) and every previous push in the repo's history also landed in the
+afternoon or evening ET. On the schedule the check was always sound.
+
+**Fixed** by having the audit default to the last *completed* session rather
+than to plain T-1: the newest trading day whose following day has passed
+12:15 ET. Brad chose this over keeping it strict and accepting red on morning
+pushes. Two properties are worth stating, because both were the reason for
+picking this shape:
+
+- It steps back by *processing* day, not by a fixed count, so Monday morning
+  still grades Friday — Friday's session is produced by Saturday's run. A
+  naive "go back two sessions before 12:15" would give up Friday for nothing.
+- **It never softens a check.** It moves only the date the audit defaults to.
+  Once a session is in scope it is graded exactly as strictly as before, and
+  the 12:30 run — the one the alarm actually rides on — still grades T-1 and
+  still fails if the surface job genuinely did not run.
+
 ## What is left
 
-1. **Item 1 — repo visibility.** Deferred by Brad 2026-09-21. Still the only
-   item with an attacker in the threat model, and still unchanged: `gh repo
-   view` reports PUBLIC, `box.yml` still triggers on `pull_request`, and the
-   runner still loads `.env`.
-2. **Tomorrow's scheduled runs** are the last unverified thing — see below.
+1. **The IBKR account id in the test fixtures**, which wants a fake value.
+   The last item carrying any exposure, and a small one.
+2. **Two scheduled runs still to watch:** today's `coverage_audit` at 12:30,
+   and Monday 2026-09-28's `rates_sync`.
 
 ## Verification when all of it is done
 
-- Tomorrow (Tue 09-22): `flatfile_pull` 11:05, `reconcile` 11:30 and
-  `coverage_audit` 12:30 all green on a scheduled run, with the new
-  `flatfile_partition[...]` checks passing and `rate_curve` reporting PASS.
+- Today (Tue 09-22) at 12:30: `coverage_audit` green on a scheduled run, with
+  the `flatfile_partition[...]` checks passing and `rate_curve` PASS at 2
+  trading days. (`flatfile_pull`, `reconcile` and `rates_sync` are done —
+  recorded above.)
 - Monday 2026-09-28: `rates_sync` logs `rates_written` and `job_end`, and that
   day's newest curve date is the prior Wednesday or later.
-- `gh repo view --json visibility` → `PRIVATE`, whenever item 1 is taken up.
+- A test PR from a fork produces no `box` run, whenever item 1 is taken up.
 - `venv/bin/python -m pytest` and `venv/bin/ruff check .` pass. (Both did at
   commit time: full suite green, lint clean.)
 - `git status` clean apart from what you mean to be there.

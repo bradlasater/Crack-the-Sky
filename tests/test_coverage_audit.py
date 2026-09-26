@@ -623,12 +623,73 @@ def test_main_keeps_an_equals_style_date(monkeypatch) -> None:
     assert seen["argv"] == ["--date=2026-08-28"]
 
 
-def test_main_defaults_date_to_the_previous_trading_day(monkeypatch) -> None:
+def test_main_defaults_date_to_the_last_completed_session(monkeypatch) -> None:
     seen: dict = {}
     monkeypatch.setattr(audit, "run_job",
                         lambda job, fn, argv: seen.setdefault("argv", argv))
     audit.main([])
     assert seen["argv"][0] == "--date"
+
+
+# ---------------------------------------------------------------------------
+# Which session the audit grades by default
+#
+# T-1 is only gradeable once the following day's pipeline has produced it, and
+# that chain ends with the surface job at 12:15 ET. Auditing plain T-1 before
+# then reports a hole where there is only a job that has not come due: a push
+# at 11:55 ET on 2026-09-22 failed the box workflow on vol_surface for
+# 2026-09-21, twenty minutes before that partition was due to be written.
+# ---------------------------------------------------------------------------
+
+def _et(y: int, m: int, d: int, hh: int, mm: int) -> datetime:
+    from ingest.common import market_gate
+
+    return datetime(y, m, d, hh, mm, tzinfo=market_gate.ET)
+
+
+def test_before_the_pipeline_finishes_it_grades_the_session_before(
+    tmp_path: Path,
+) -> None:
+    """The CI bug, pinned: 11:55 ET on Tuesday must not grade Monday."""
+    assert audit.last_completed_session(
+        tmp_path, now=_et(2026, 9, 22, 11, 55)
+    ) == date(2026, 9, 18)
+
+
+def test_once_the_pipeline_has_run_it_grades_t1(tmp_path: Path) -> None:
+    """And the 12:30 slot, which is the one that matters, is unaffected."""
+    assert audit.last_completed_session(
+        tmp_path, now=_et(2026, 9, 22, 12, 30)
+    ) == date(2026, 9, 21)
+
+
+def test_the_scheduled_evening_ci_run_still_grades_t1(tmp_path: Path) -> None:
+    """The 22:17 UTC scheduled box run lands at 18:17 ET, long after 12:15."""
+    assert audit.last_completed_session(
+        tmp_path, now=_et(2026, 9, 22, 18, 17)
+    ) == date(2026, 9, 21)
+
+
+def test_monday_morning_still_grades_friday(tmp_path: Path) -> None:
+    """Stepping back by processing day, not by a fixed count, matters here.
+
+    Friday's session is produced by Saturday's run, so by Monday morning it is
+    complete and stays the target. A naive "go back two sessions before 12:15"
+    would give up Friday for no reason and grade Thursday instead.
+    """
+    assert audit.last_completed_session(
+        tmp_path, now=_et(2026, 9, 21, 10, 0)
+    ) == date(2026, 9, 18)
+
+
+def test_the_boundary_is_1215_itself(tmp_path: Path) -> None:
+    """One minute either side of the surface job's slot."""
+    assert audit.last_completed_session(
+        tmp_path, now=_et(2026, 9, 22, 12, 14)
+    ) == date(2026, 9, 18)
+    assert audit.last_completed_session(
+        tmp_path, now=_et(2026, 9, 22, 12, 15)
+    ) == date(2026, 9, 21)
 
 
 def test_main_default_date_uses_the_configured_data_root(
@@ -655,7 +716,12 @@ def test_main_default_date_uses_the_configured_data_root(
     (tmp_path / ".env").write_text(f"DATA_ROOT={data}\n", encoding="utf-8")
     monkeypatch.delenv("DATA_ROOT", raising=False)
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(market_gate, "today_et", lambda: date(2026, 9, 8))
+    # Evening of Tuesday 2026-09-08, so the pipeline-completeness rule is not
+    # what is under test here -- the calendar the default is computed against
+    # is.
+    monkeypatch.setattr(
+        market_gate, "now_et",
+        lambda: datetime(2026, 9, 8, 18, 0, tzinfo=market_gate.ET))
 
     seen: dict = {}
     monkeypatch.setattr(audit, "run_job",

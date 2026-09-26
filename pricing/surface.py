@@ -173,6 +173,9 @@ CAL_TOL = 1e-10
 # whose data is itself arbitrageable (the calendar test's flat 0.30 vs 0.10
 # slices) needs ~1.2 and is rejected.
 REPAIR_MAX_REL_RMS = 0.5
+# Two T values closer than this name the same expiry. One session is
+# 1/252 ~ 4e-3 years, so this is nine orders of magnitude inside the grid.
+NODE_TOL = 1e-12
 
 
 class SurfaceError(RuntimeError):
@@ -551,6 +554,19 @@ class Slice:
         d = k - self.m
         return self.a + self.b * (self.rho * d + math.hypot(d, self.sigma))
 
+    def total_variance_derivatives(self, k: float) -> tuple[float, float, float]:
+        """``(w, dw/dk, d2w/dk2)`` at log-moneyness ``k``, in closed form.
+
+        Raw SVI: ``w' = b(rho + (k - m)/r)`` and ``w'' = b sigma^2 / r^3``,
+        with ``r = sqrt((k - m)^2 + sigma^2)``.
+        """
+        d = k - self.m
+        r = math.hypot(d, self.sigma)
+        w = self.a + self.b * (self.rho * d + r)
+        dw = self.b * (self.rho + d / r)
+        d2w = self.b * self.sigma * self.sigma / (r * r * r)
+        return w, dw, d2w
+
     def vol(self, K: float) -> float:
         """Implied vol at strike ``K`` on this slice's own expiry."""
         if K <= 0:
@@ -614,6 +630,69 @@ class Surface:
         w_hi = hi.total_variance(math.log(K / hi.forward))
         w = w_lo + (w_hi - w_lo) * (T - lo.t_years) / (hi.t_years - lo.t_years)
         return math.sqrt(w / T)
+
+    def bracket(self, T: float) -> tuple[Slice, Slice, float]:
+        """The fitted slices around ``T`` and the weight on the later one.
+
+        Returns ``(lo, hi, u)`` with ``lo.t_years <= T <= hi.t_years`` and
+        ``w(T) = (1 - u) w_lo + u w_hi``. On a fitted expiry ``lo is hi`` and
+        ``u == 0``, so the node is returned exactly. Unlike :meth:`vol`, which
+        holds the nearest slice flat, this **raises** outside the fitted term
+        range: a feature read off an extrapolated smile is a number the
+        surface never saw. It also refuses to interpolate across a change of
+        ``daycount`` -- a ``bus/252`` and an ``act/365`` slice measure T in
+        different units, so a straight line between them means nothing.
+        """
+        if T <= 0:
+            raise ValueError(f"T must be positive, got {T}")
+        ts = [s.t_years for s in self.slices]
+        # A tenor built as h/252 and a slice's sessions/252 are the same
+        # float when they name the same expiry, but snap within a hair so a
+        # rounding difference cannot turn a node into an interpolation.
+        for s in self.slices:
+            if math.isclose(s.t_years, T, rel_tol=0.0, abs_tol=NODE_TOL):
+                return s, s, 0.0
+        if not ts[0] <= T <= ts[-1]:
+            raise SurfaceError(
+                f"T={T:.6f} is outside the fitted term range "
+                f"[{ts[0]:.6f}, {ts[-1]:.6f}] of {self.underlying} {self.date}"
+            )
+        i = bisect.bisect_right(ts, T)  # ts[i-1] < T < ts[i]
+        lo, hi = self.slices[i - 1], self.slices[i]
+        if lo.daycount != hi.daycount:
+            raise SurfaceError(
+                f"T={T:.6f} falls between a {lo.daycount} slice "
+                f"({lo.expiration_date}) and a {hi.daycount} slice "
+                f"({hi.expiration_date}); their T values are not comparable"
+            )
+        return lo, hi, (T - lo.t_years) / (hi.t_years - lo.t_years)
+
+    def total_variance(self, k: float, T: float) -> float:
+        """Total variance ``w`` at fixed log-moneyness ``k`` and time ``T``.
+
+        See :meth:`total_variance_derivatives` for the interpolation rule.
+        """
+        return self.total_variance_derivatives(k, T)[0]
+
+    def total_variance_derivatives(self, k: float, T: float) -> tuple[float, float, float]:
+        """``(w, dw/dk, d2w/dk2)`` at fixed log-moneyness ``k`` and time ``T``.
+
+        Linear in total variance between the bracketing slices, at the same
+        ``k`` on both -- fixed moneyness, where :meth:`vol` fixes the strike.
+        ATM forward is ``k = 0`` on every slice whatever its forward, which is
+        what a constant-maturity feature needs. The k-derivatives interpolate
+        the same way, since the derivative of a linear blend is the blend of
+        the derivatives. Linear in ``w`` at fixed ``k`` is also what the
+        calendar guard protects (``w`` non-decreasing in ``T`` at every
+        ``k``), so the result is never a negative variance. Exact on a fitted
+        expiry; raises outside the fitted range (see :meth:`bracket`).
+        """
+        lo, hi, u = self.bracket(T)
+        if lo is hi:
+            return lo.total_variance_derivatives(k)
+        a = lo.total_variance_derivatives(k)
+        b = hi.total_variance_derivatives(k)
+        return tuple(x + (y - x) * u for x, y in zip(a, b, strict=True))  # type: ignore[return-value]
 
     def __len__(self) -> int:
         return len(self.slices)

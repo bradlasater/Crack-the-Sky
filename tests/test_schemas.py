@@ -34,6 +34,7 @@ DATASETS = [
     "vol_surface",
     "spy_spot",
     "rv_forecast",
+    "vol_features",
     "decision_log",
     "dividends",
     "splits",
@@ -261,6 +262,34 @@ def test_rv_forecast_schema_roundtrip() -> None:
     table = check_records("rv_forecast", records)
     assert table["horizon"].to_pylist() == [21]
     assert table["vol_ann_p10"].to_pylist()[0] < table["vol_ann"].to_pylist()[0]
+
+
+def test_vol_features_schema_roundtrip() -> None:
+    records = [{
+        "date": "2026-09-24",
+        "underlying": "SPXW",
+        "horizon": 32,
+        "t_years": 32 / 252,
+        "daycount": "bus/252",
+        "atm_vol": 0.152,
+        "atm_fwd_vol": 0.158,
+        "skew": -0.41,
+        "curvature": 1.9,
+        "rv_ann_5": 0.121,
+        "rv_ann_22": 0.118,
+        "fc_vol_ann": 0.134,
+        "fc_log_rv_mean": -9.62,
+        "fc_log_rv_sd": 0.37,
+        "vrp_var": 0.152**2 - 0.134**2,
+        "vrp_vol": 0.152 - 0.134,
+        "vrp_z": 0.9,
+        "on_node": False,
+        "exp_lo": "2026-11-06",
+        "exp_hi": "2026-11-13",
+    }]
+    table = check_records("vol_features", records)
+    assert table["on_node"].to_pylist() == [False]
+    assert table.schema.field("on_node").type == pa.bool_()
 
 
 def test_decision_log_schema_roundtrip() -> None:

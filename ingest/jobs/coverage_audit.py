@@ -519,14 +519,25 @@ def check_rv_forecast(settings: Settings, d: date) -> list[Check]:
         return []
     part = _clean_root(settings, "rv_forecast") / f"dt={d.isoformat()}"
     horizons: set[int] = set()
-    unpinned = 0
+    unpinned = null_horizons = 0
     for path in part.glob("*.parquet"):
         try:
             table = pq.read_table(path, columns=["horizon", "blas_threads"])
         except Exception:  # noqa: BLE001 - a corrupt file is a finding, not a crash
             return [Check("rv_forecast", FAIL, "unreadable parquet in partition", {})]
-        horizons.update(int(h) for h in table.column("horizon").to_pylist())
+        values = table.column("horizon").to_pylist()
+        null_horizons += sum(h is None for h in values)
+        horizons.update(int(h) for h in values if h is not None)
         unpinned += table.column("blas_threads").null_count
+    if null_horizons:
+        # The writer never emits one, so this is a malformed row. Name it
+        # rather than let int(None) turn the finding into a job error that
+        # writes no coverage.json.
+        return [Check(
+            "rv_forecast", FAIL,
+            f"{null_horizons} rows with a null horizon",
+            {"null_horizons": null_horizons, "horizons": sorted(horizons)},
+        )]
     if not horizons:
         return [Check("rv_forecast", FAIL, "partition missing or empty", {"rows": 0})]
     missing = [h for h in RV_HORIZONS if h not in horizons]

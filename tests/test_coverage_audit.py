@@ -563,6 +563,25 @@ def test_rv_forecast_warns_on_an_unpinned_fit(tmp_path: Path) -> None:
     assert got.data["unpinned"] == len(audit.RV_HORIZONS)
 
 
+def test_rv_forecast_fails_on_a_null_horizon_instead_of_crashing(tmp_path: Path) -> None:
+    """Written straight to parquet: the writer would never emit this row, which
+    is exactly why the audit has to name it rather than raise on int(None)."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from ingest.schemas import SCHEMAS
+
+    rows = _rv_forecast_rows(audit.RV_HORIZONS)
+    rows.append({**rows[0], "horizon": None})
+    part = tmp_path / "clean" / "rv_forecast" / f"dt={RUN_DATE.isoformat()}"
+    part.mkdir(parents=True)
+    pq.write_table(pa.Table.from_pylist(rows, schema=SCHEMAS["rv_forecast"]),
+                   part / "rv_forecast-malformed.parquet")
+    got = audit.check_rv_forecast(_settings(tmp_path), RUN_DATE)[0]
+    assert got.status == audit.FAIL
+    assert got.data["null_horizons"] == 1
+
+
 def test_rv_horizons_match_the_forecast_job() -> None:
     from signals.har_rv import HORIZONS
 

@@ -57,9 +57,11 @@ REQUIRED_NONNULL: dict[str, tuple[str, ...]] = {
     "underlying_minute_bars": ("ticker",),
     "underlying_day_bars": ("ticker",),
     "spy_spot": ("date", "spot", "src"),
-    # Every rv_forecast field is an intrinsic output of the fit; a null in
-    # any of them means the row was malformed at write, not a legitimate
-    # absence, so all nine are required.
+    # The nine fit outputs are intrinsic; a null in any of them means the row
+    # was malformed at write, not a legitimate absence, so all nine are
+    # required. blas_threads is deliberately not: like vol_surface's, it is
+    # null when the fit ran unpinned, which is a fact about the run to record
+    # (coverage_audit WARNs on it), not a malformed row.
     "rv_forecast": (
         "date",
         "horizon",

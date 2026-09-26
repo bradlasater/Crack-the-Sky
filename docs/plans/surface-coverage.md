@@ -6,8 +6,8 @@ coverage"), which cannot run over history until this is fixed. Scope:
 `pricing/surface.py`, its tests, `coverage_audit`'s `vol_surface` check,
 a rebuild of `clean/vol_surface`, and the docs that describe the surface.
 
-Status: **decisions 1–5 resolved 2026-09-26, all as recommended. Step 1's
-per-expiry rerun still running; step 2 done.**
+Status: **decisions 1–5 resolved 2026-09-26; decision 6 (new, from step 1)
+open. Steps 1 and 2 done.**
 
 ---
 
@@ -48,21 +48,28 @@ Per root, over the 347: SPX fails in 225 (134 calendar, 69 butterfly, 22 did
 not converge); SPXW fails in 163 (56 calendar, 95 butterfly, 12 did not
 converge).
 
-**2. Nearly every failure is in a long-dated expiry's deep wing.**
+**2. The two roots fail in different places.** *Corrected by step 1.* The
+first version of this finding said nearly every failure was in a long-dated
+expiry. That is true of SPX and false of SPXW. The step 1 rerun names the
+failing expiry for every failure:
 
-- **Calendar rejections (190).** 97% sit at `|k| > 0.5`, median `|k|` 1.37.
-  In 112 of the 185 that name their pair, the earlier expiry is more than 180
-  days out; 18 are within a week. The other 5 are the fit-time repair giving
-  up ("calendar floor peaks at 32.3 ... no feasible seed"): the floor it was
-  asked to clear is the previous slice's extrapolated wing, where `w` reaches
-  32, three times the parameter bound.
-- **Butterfly rejections (164).** Every failing expiry's fitted range reaches
-  past `k = −0.5`; the median left edge is −1.62, the shape of a 181–400 DTE
-  expiry (landed slices in that band have median `k_min` −1.66, against −0.39
-  for 1–45 DTE). 48 of the 164 have `b` or `ρ` on its bound. Half fail by
-  very little (median min g(k) −0.06).
-- **Did not converge (34).** The fit exhausts `MAX_NFEV = 5000`. The message
-  does not name the expiry, so step 1 records it.
+| root, failure | 1–7 | 8–45 | 46–180 | 181–400 | >400 DTE |
+|---|---|---|---|---|---|
+| SPX butterfly | 0 | 5 | 14 | 23 | 27 |
+| SPX calendar (incl. floor) | 1 | 9 | 12 | 49 | 63 |
+| SPX did not converge | 0 | 0 | 0 | 2 | 20 |
+| SPXW butterfly | 27 | 62 | 4 | 2 | 0 |
+| SPXW calendar | 17 | 34 | 4 | 1 | 0 |
+| SPXW did not converge | 7 | 3 | 1 | 1 | 0 |
+
+SPX fails in its LEAPS. **SPXW fails inside the book: 150 of its 163
+failures are expiries of 45 days or less.** The earlier reading came from
+the moneyness range printed in the butterfly error, which is the *padded*
+check grid (finding 6), not the strikes the expiry was fit to.
+
+Calendar rejections still sit deep in the wings for both roots: 97% at
+`|k| > 0.5`, and the 51 SPXW ones in the book have a median `|k|` near 1.5,
+far outside any short expiry's strikes (finding 3).
 
 **3. The calendar check runs where no expiry has data.** Both the Surface
 guard and the fit-time calendar floor evaluate on the session's *union*
@@ -110,6 +117,31 @@ the daily sessions since did not, and no rebuild can reproduce a daily
 partition. A backtest's inputs would then quietly include a curve published
 after the decision it informs. **Decision 5.**
 
+**6. The butterfly check also runs far beyond the data.** It evaluates
+Gatheral's g(k) on the fitted strikes padded by `G_PAD = 1.0` in `k` on each
+side, a constant set in the first surface commit with no stated basis. For a
+3-day SPXW expiry, whose strikes span roughly `k ∈ [−0.15, 0.05]` and whose
+one-standard-deviation move is about 0.02 in `k`, that is a check out to
+strikes at 32% and 286% of the forward, dozens of standard deviations past
+any price. Recomputing the worst g(k) for each of the 95 SPXW butterfly
+failures, from the parameters in its error:
+
+| grid | pass |
+|---|---|
+| fitted strikes only | 83 / 95 |
+| strikes ± 3 sd of the slice (`3·√w_min`) | 81 / 95 |
+| strikes ± 0.25 | 50 / 95 |
+| strikes ± 0.5 | 32 / 95 |
+| strikes ± 1.0 (today) | 0 / 95 |
+
+So 81 of the 95 are arbitrage-free wherever the smile is within three of its
+own standard deviations of a quoted strike, and fail only in the
+extrapolation. The remaining 12–14 have genuine arbitrage inside or near the
+data, which is what dropping a slice (C) is for. These use the failing fit's
+parameters, so a refit under a narrower grid may land slightly elsewhere;
+step 6 measures the real outcome. 37 of the 95 also break Lee's asymptotic
+wing-slope bound, `b(1 + |ρ|) ≤ 2`, which only binds infinitely far out.
+
 ---
 
 ## The fix
@@ -156,9 +188,20 @@ job's behaviour is unchanged by construction. This is not coverage, but it
 has to land before step 7's rebuild, or the rebuilt archive carries the
 look-ahead forward. **Decision 5.**
 
-What is *not* proposed: loosening the butterfly tolerance, raising the
-arbitrage repair budget, or holding a failed slice's parameters from a
-neighbour. Each would land a slice that fails a check today.
+**F. Check the butterfly condition near the data, on the slice's own scale
+(finding 6).** Replace the flat `G_PAD = 1.0` with a pad of three of the
+slice's standard deviations, `3·√w_min` where `w_min` is the SVI minimum
+total variance, used by both the guard and the constrained refit. A 3-day
+expiry is then checked about 0.06 past its strikes, a two-year one at 18%
+vol about 0.75, close to today's pad. The cost is the same kind as B's: no butterfly promise
+in the far extrapolated wing of a short expiry. Lee's wing-slope bound stays
+a logged diagnostic, not a rejection. **Decision 6.**
+
+What is *not* proposed: loosening the butterfly tolerance (`G_TOL`),
+raising the arbitrage repair budget, or holding a failed slice's parameters
+from a neighbour. B and F do change what the checks promise: both stop
+enforcing no-arbitrage in extrapolated wings no price was observed in. Every
+slice that lands still passes both checks everywhere near its data.
 
 ---
 
@@ -173,9 +216,9 @@ the holiday horizon as it stood the next morning. Record the result here
 before any fix lands, because it decides whether the rebuild also needs a
 point-in-time calendar.
 
-**Step 1 results (2026-09-26).** The diagnostic is committed; the September
-refit settled finding 4 and surfaced finding 5. The per-expiry rerun of the
-347 sessions is recorded below when it finishes.
+**Step 1 results (2026-09-26). Done.** The diagnostic is committed. The
+September refit settled finding 4 and surfaced finding 5; the per-expiry
+rerun corrected finding 2 and surfaced finding 6.
 
 **Step 2 — A: independent roots.** `build_surfaces` catches a root's failure,
 logs it and continues; `build_for_date` raises only when no root fits.
@@ -193,6 +236,12 @@ the fit-time floor. Tests: a pair crossing only outside their overlap is
 accepted; a crossing inside the overlap is still rejected (the existing
 calendar tests must still pass unchanged); a disjoint pair (no overlap) is
 accepted with nothing to compare, and says so in the log.
+
+**Step 3b — F, if chosen: slice-scaled butterfly pad** in `_butterfly_grid`
+and its callers. Tests: a short slice with arbitrage only past three
+standard deviations of its strikes is accepted; arbitrage inside that range
+is still rejected, and still repaired where the repair holds; a long slice's
+pad stays near today's.
 
 **Step 4 — C: drop-a-slice.** Tests: a non-converging middle slice is
 dropped and the chain floors off its predecessor; a session whose every
@@ -242,3 +291,8 @@ gap as a found-and-fixed entry), and `features-v0.md`'s blocked section.
    before the rebuild? **Yes, as E** (resolved 2026-09-26). The surface
    rebuild is happening anyway, and doing it without E would bake the
    look-ahead into 1,020 fresh partitions.
+6. **Slice-scaled butterfly pad (open).** Check g(k) out to three of the
+   slice's standard deviations past its strikes, instead of a flat 1.0 in
+   `k`? *(Recommended: yes. It recovers about 81 of the 95 SPXW butterfly
+   failures, most of them inside the book, which C would otherwise drop and
+   leave as holes in the features' grid.)*

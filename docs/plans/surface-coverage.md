@@ -6,8 +6,8 @@ coverage"), which cannot run over history until this is fixed. Scope:
 `pricing/surface.py`, its tests, `coverage_audit`'s `vol_surface` check,
 a rebuild of `clean/vol_surface`, and the docs that describe the surface.
 
-Status: **decisions 1–5 resolved 2026-09-26; decision 6 (new, from step 1)
-open. Steps 1 and 2 done.**
+Status: **decisions 1–6 resolved 2026-09-26, all as recommended. Steps 1
+and 2 done; step 3 in progress.**
 
 ---
 
@@ -237,7 +237,7 @@ accepted; a crossing inside the overlap is still rejected (the existing
 calendar tests must still pass unchanged); a disjoint pair (no overlap) is
 accepted with nothing to compare, and says so in the log.
 
-**Step 3b — F, if chosen: slice-scaled butterfly pad** in `_butterfly_grid`
+**Step 3b — F: slice-scaled butterfly pad** in `_butterfly_grid`
 and its callers. Tests: a short slice with arbitrage only past three
 standard deviations of its strikes is accepted; arbitrage inside that range
 is still rejected, and still repaired where the repair holds; a long slice's
@@ -291,8 +291,8 @@ gap as a found-and-fixed entry), and `features-v0.md`'s blocked section.
    before the rebuild? **Yes, as E** (resolved 2026-09-26). The surface
    rebuild is happening anyway, and doing it without E would bake the
    look-ahead into 1,020 fresh partitions.
-6. **Slice-scaled butterfly pad (open).** Check g(k) out to three of the
+6. **Slice-scaled butterfly pad.** Check g(k) out to three of the
    slice's standard deviations past its strikes, instead of a flat 1.0 in
-   `k`? *(Recommended: yes. It recovers about 81 of the 95 SPXW butterfly
-   failures, most of them inside the book, which C would otherwise drop and
-   leave as holes in the features' grid.)*
+   `k`? **Yes, as F** (resolved 2026-09-26). It recovers about 81 of the 95
+   SPXW butterfly failures, most of them inside the book, which C would
+   otherwise drop and leave as holes in the features' grid.

@@ -5,8 +5,9 @@ Build plan for `PLAN.md` Week 2 item 5. Written 2026-09-26 against `main` at
 derived dataset, the job that writes it, its rebuild script, its audit check,
 and the docs that describe it. Nothing in `ingest/` capture changes.
 
-Status: **review questions 1–3 resolved 2026-09-26, all as recommended.
-Steps 0–3 done. Steps 4–9 not started.**
+Status: **steps 0–3 done; step 4 written, uncommitted. Blocked on surface
+coverage** (next section) before the remaining steps are worth running over
+history.
 
 Three decisions were agreed before this was drafted:
 
@@ -18,6 +19,24 @@ Three decisions were agreed before this was drafted:
 3. **v0 features.** `PLAN.md`'s list: realised vol, ATM level and slope, SVI
    skew and curvature, and the variance risk premium. Every value must be
    computable from data available that morning.
+
+---
+
+## Blocked on surface coverage (found 2026-09-26, during step 4)
+
+The scoping below checked the surface only in sessions where it exists, and
+missed that it is absent from a third of them: `vol_surface` has **673 of
+1,020 sessions**, while `option_day_bars`, `atm_term_structure` and
+`spy_spot` have all 1,020. The holes are scattered across every year and
+lean toward volatile markets: by trailing 22-session SPY realised vol, 29% of
+the calmest quartile is missing against 38% of the two upper quartiles. A
+backtest on features with these holes under-samples the sessions where a
+volatility strategy makes or loses the most.
+
+So the surface coverage is being fixed first, under its own plan
+(`docs/plans/surface-coverage.md`); features resume against the rebuilt
+archive. Steps 0–3 and the step 4 module stand as written: a session with
+no surface already yields no rows, with the reason.
 
 ---
 
@@ -37,8 +56,8 @@ Same sessions, same 252. Tenor `h` is `T = h/252`, full stop.
 beyond falls back to `act/365` (the hybrid convention past the holiday
 horizon). The longest tenor here is 32 sessions (~45 calendar days).
 
-**The SPXW surface always brackets the grid.** Across all 673 `vol_surface`
-sessions (2022-09-06 to 2026-09-24), every tenor falls between the SPXW
+**The SPXW surface always brackets the grid, where it exists.** Across all
+673 `vol_surface` sessions (2022-09-06 to 2026-09-24), every tenor falls between the SPXW
 surface's shortest and longest fitted expiry — no session would need
 extrapolation. Tenors 3, 5 and 10 land exactly on a fitted expiry in every
 session (SPXW lists daily expiries); 21 does in 662 of 673; 32 does in only
@@ -84,8 +103,9 @@ them on every row costs a few bytes and saves every consumer a join.
 **Every row is complete or absent.** No column above is nullable. A session
 where any input is missing gets no row for the affected tenor, rather than a
 row full of nulls that a backtest would silently drop or, worse, fill.
-Consequence: the archive starts at 2023-02-16, the first session where
-all five forecast horizons exist.
+Consequence: the archive can start no earlier than 2023-02-16, the first
+session where all five forecast horizons exist, and it has holes wherever
+the surface does (see "Blocked on surface coverage").
 
 ---
 

@@ -6,8 +6,8 @@ coverage"), which cannot run over history until this is fixed. Scope:
 `pricing/surface.py`, its tests, `coverage_audit`'s `vol_surface` check,
 a rebuild of `clean/vol_surface`, and the docs that describe the surface.
 
-Status: **decisions 1–6 resolved 2026-09-26, all as recommended. Steps 1
-and 2 done; step 3 built, real-data check running.**
+Status: **decisions 1–6 resolved 2026-09-26, all as recommended. Steps 1,
+2 and 3 done.**
 
 ---
 
@@ -254,6 +254,20 @@ accepted with nothing to compare, and says so in the log.
   property: floor and guard both evaluate only at multiples of
   `K_STEP = 0.0025` in `k` inside the relevant range, so a slice fit to
   clear the floor passes the guard at the same points.
+
+**Step 3 measured (2026-09-26).** Refit under the new code, in memory:
+
+- *30 randomly chosen landed sessions:* all 30 still fit, both roots.
+- *The 181 sessions with a calendar rejection:* SPXW now fits in 173 (110
+  before). By root: SPXW's 56 calendar failures leave 5; SPX's 134 (129
+  calendar, 5 floor) leave 6. Eighteen butterfly failures also clear,
+  because the refits land differently once the wing floor is gone.
+- *Remaining calendar failures (12, 5 of them SPXW)* are mostly inside the
+  data, e.g. 2022-09-21 SPX at 30 DTE drops 0.076 at `k = 0.015`. Those are
+  genuine crossings for C to drop.
+- *Two regressions, both SPX:* sessions that fit before and now fail the
+  all-pairs check, which finds crossings between non-adjacent expiries the
+  old adjacent check could not see. A missing SPX is a WARN.
 
 **Consequence for deploying.** The landed archive was fit against the old
 union grid's points, so the new guard rejects most of it on load (1,134 of

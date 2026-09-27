@@ -8,7 +8,7 @@ a rebuild of `clean/vol_surface`, and the docs that describe the surface.
 
 Status: **decisions 1–6 resolved 2026-09-26, 8 on 2026-09-27; decision 7
 reopened pending H's measurement. Steps 1–3c done, 3c measured;
-finding 7 corrected and finding 8 added 2026-09-27. Step 4 (C) built and measured; decision 9 open.**
+finding 7 corrected and finding 8 added 2026-09-27. Step 4 (C) built and measured; finding 9 added; decision 9 open.**
 
 ---
 
@@ -210,6 +210,44 @@ session. The wide pad was a lucky rescue, not a design. Lee's bound would
 not catch this one (its wing slope is 0.46). This is also the likeliest
 source of the odd shapes F lets through (34 of its 81 recovered slices
 break Lee's bound).
+
+
+**9. Book holes are half the quotes and half the fitter.** *Found
+2026-09-27, measuring step 4.* For the 377 measured sessions, each SPXW
+book expiry's filtered OTM points were tested model-free, with prices
+recomputed from the implied variances the fit sees: the share of
+three-strike butterflies below −0.10 index points, and the share of points
+whose call price at fixed forward-moneyness sits more than 0.10 below an
+earlier expiry's.
+
+| median per expiry | kept (9,662) | dropped: calendar (121) | dropped: butterfly (138) |
+|---|---|---|---|
+| butterflies below −0.10 | 35% | 41% | 15% |
+| points below an earlier expiry | 18% | 46% | 0% |
+
+The quotes are arbitrageable everywhere, kept slices included. Day-bar
+closes are each strike's last trade, often hours stale: on 2023-03-16 one
+strike's close implies 39% vol between neighbours at 27%. SVI smooths
+through that. The calendar drops are slices whose quotes cross earlier
+expiries far more than kept slices do at the same DTE (34% vs 5% at 6–15
+DTE, 53% vs 28% at 16–45), so dropping them follows the data. The butterfly
+drops are not: their quotes are cleaner than kept slices'. Refitting all 138
+on their own:
+
+| butterfly drop | ≤ 1 DTE | 2–5 DTE | 6–45 DTE | all |
+|---|---|---|---|---|
+| fits cleanly alone; fails only under the chain's calendar floor | 2 | 44 | 25 | 71 |
+| repair returns nothing feasible | 4 | 36 | 22 | 62 |
+| repair lands past `REPAIR_MAX_REL_RMS` | 4 | 0 | 1 | 5 |
+
+The 62 are an optimiser failure, not infeasibility: the flat slice
+satisfies the butterfly condition, so a feasible fit always exists, and
+SLSQP ends outside the feasible region. The 71 are the chain: an earlier
+slice fit to stale quotes sets a floor the later one cannot clear together
+with its own butterfly condition, and the later one is dropped whichever is
+wrong. `option_minute_bars` covers all 1,021 sessions, so synchronous marks
+(each strike's last trade in the closing minutes, the forward from parity
+in the same window) are possible for the whole history.
 
 ---
 

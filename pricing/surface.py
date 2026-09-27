@@ -74,6 +74,13 @@ arbitrage was in that extrapolation (docs/plans/surface-coverage.md, fix F);
 the cap keeps a long-dated slice's check where it was. Nothing is promised
 further out than the pad.
 
+**Between the grid points too.** The check evaluates g on the ``K_STEP``
+lattice over that range, then minimises it between the neighbours of every
+local minimum, so a negative-density band narrower than the spacing is
+still found. A fixed 201 points under the flat pad sat ~0.011 apart and let
+675 landed slices through with negative density inside their own strikes
+(docs/plans/surface-coverage.md, finding 8, fix H).
+
 **The calendar guard is chained through the build the same way.** Real day
 bars carry small genuine calendar inversions -- the raw ATM curve itself
 crosses on these sessions -- so the build fits slices in expiry order and a
@@ -127,7 +134,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from scipy.optimize import Bounds, NonlinearConstraint, least_squares, minimize
+from scipy.optimize import Bounds, NonlinearConstraint, least_squares, minimize, minimize_scalar
 
 from ingest.common import landing, market_gate
 from ingest.common.cli import run_job
@@ -180,9 +187,17 @@ MIN_TIME_VALUE_FRAC = 3e-5
 # butterfly failures measured on 2026-09-26 had no arbitrage inside their
 # strikes at all (docs/plans/surface-coverage.md, finding 6, fix F). Capping
 # at the old pad means this can only narrow the check, never widen it.
+#
+# The grid is the K_STEP lattice over that range, not a fixed point count,
+# and the guard then minimises g between lattice points around each local
+# minimum (_min_g). A fixed 201 points spaced ~0.011 apart under the flat
+# pad, and stepped over negative-density bands about 0.01 wide: 675 landed
+# slices, 633 of them inside the book, price a negative density inside their
+# own strikes (docs/plans/surface-coverage.md, finding 8, fix H). No lattice
+# alone closes it -- the last misses are near-tangent dips ~0.001 wide -- so
+# the refinement is what makes the check exact.
 G_PAD = 1.0
 G_PAD_SD = 3.0
-G_POINTS = 201
 G_TOL = 1e-8
 # The constrained refit is required to beat zero by this margin so the
 # guard's G_TOL check afterwards passes comfortably.
@@ -324,24 +339,52 @@ def _butterfly_pad(ws: Any) -> float:
 
 
 def _butterfly_grid(k_lo: float, k_hi: float, pad: float = G_PAD) -> np.ndarray:
-    """The padded k-grid the butterfly guard and the constrained refit share."""
-    return np.linspace(k_lo - pad, k_hi + pad, G_POINTS)
+    """The padded k-grid the butterfly guard and the constrained refit share.
+
+    The ``K_STEP`` lattice inside ``[k_lo - pad, k_hi + pad]`` plus both
+    ends, so the check reaches exactly as far as the pad says.
+    """
+    lo, hi = k_lo - pad, k_hi + pad
+    return np.unique(np.concatenate([[lo], _lattice(lo, hi), [hi]]))
+
+
+def _min_g_svi(grid: np.ndarray, a: float, b: float, rho: float, m: float, sigma: float) -> float:
+    """Smallest g(k) over the grid's range, not only at its points.
+
+    Evaluates the grid, then minimises g between the neighbours of every
+    local minimum on it: a negative-density band narrower than the spacing
+    sits inside the bracket of the nearest grid minimum. Deterministic.
+    """
+    g = _g(grid, a, b, rho, m, sigma)
+    best = float(np.min(g))
+    n = len(grid)
+    if n < 3:
+        return best
+    interior = np.flatnonzero((g[1:-1] <= g[:-2]) & (g[1:-1] <= g[2:])) + 1
+    for i in sorted({*interior.tolist(), int(np.argmin(g))}):
+        lo, hi = float(grid[max(i - 1, 0)]), float(grid[min(i + 1, n - 1)])
+        res = minimize_scalar(
+            lambda k: float(_g(np.array([k]), a, b, rho, m, sigma)[0]),
+            bounds=(lo, hi), method="bounded", options={"xatol": 1e-10},
+        )
+        best = min(best, float(res.fun))
+    return best
 
 
 def _min_g(grid: np.ndarray, p: np.ndarray) -> float:
-    """Smallest g(k) on the grid for fit parameters (w0, b, rho, m, sigma)."""
+    """:func:`_min_g_svi` for fit parameters (w0, b, rho, m, sigma)."""
     w0, b, rho, m, sigma = (float(v) for v in p)
     a = w0 - b * sigma * math.sqrt(1.0 - rho * rho)
-    return float(np.min(_g(grid, a, b, rho, m, sigma)))
+    return _min_g_svi(grid, a, b, rho, m, sigma)
 
 
 def _check_butterfly(
     a: float, b: float, rho: float, m: float, sigma: float, k_lo: float, k_hi: float,
     pad: float = G_PAD,
 ) -> float:
-    """Min of g(k) on the padded grid; SurfaceArbitrageError when negative."""
+    """Min of g(k) over the padded range; SurfaceArbitrageError when negative."""
     grid = _butterfly_grid(k_lo, k_hi, pad)
-    min_g = float(np.min(_g(grid, a, b, rho, m, sigma)))
+    min_g = _min_g_svi(grid, a, b, rho, m, sigma)
     if min_g < -G_TOL:
         raise SurfaceArbitrageError(
             f"butterfly arbitrage: min g(k) = {min_g:.6g} over "

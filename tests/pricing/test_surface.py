@@ -23,6 +23,9 @@ from pricing import term_structure as ts
 from pricing.bsm import price
 from pricing.daycount import ACT_365
 
+# An arbitrary calendar-grid size for tests that build one by hand.
+CAL_POINTS = 201
+
 DAY = date(2026, 8, 28)
 R = 0.04
 F = 7700.0
@@ -253,6 +256,55 @@ def test_arbitrage_only_far_past_a_short_slice_is_not_rejected() -> None:
     assert sf._check_butterfly(*p.values(), lo, hi, pad) >= 0.0
 
 
+# The butterfly check is exact over its range, not only at grid points (fix H).
+
+# 2022-11-29's SPXW 2022-12-07 expiry as a fixed 201-point grid let it land:
+# negative density in a band ~0.01 wide at k ~ -0.176 to -0.166, straddling
+# the last quoted put, between two of that grid's points ~0.011 apart.
+STEPPED_OVER = {"a": 0.000397112, "b": 0.0209383, "rho": -0.999, "m": -0.0909669, "sigma": 0.0586978}
+STEPPED_OVER_STRIKES = (-0.1667022, 0.0594220)
+
+# 2023-08-08's SPXW 1-day expiry, as landed: a near-tangent dip to
+# g ~ -2.9e-6 inside its strikes that even a 0.001 lattice misses.
+TANGENT_DIP = {"a": -0.000269700, "b": 0.0105933, "rho": -0.668726, "m": -0.0237484, "sigma": 0.0380497}
+TANGENT_DIP_STRIKES = (-0.0748541, 0.0144500)
+
+
+def test_butterfly_grid_is_the_lattice_plus_its_ends() -> None:
+    grid = sf._butterfly_grid(-0.1234, 0.0567, pad=0.05)
+    assert grid[0] == pytest.approx(-0.1734) and grid[-1] == pytest.approx(0.1067)
+    assert float(np.max(np.diff(grid))) <= sf.K_STEP + 1e-12
+    assert np.allclose(grid[1:-1] / sf.K_STEP, np.round(grid[1:-1] / sf.K_STEP))
+
+
+def test_a_band_between_the_old_grid_points_is_rejected() -> None:
+    p, (lo, hi) = STEPPED_OVER, STEPPED_OVER_STRIKES
+    old_grid = np.linspace(lo - sf.G_PAD, hi + sf.G_PAD, 201)
+    assert float(np.min(sf._g(old_grid, *p.values()))) >= 0.0  # what let it land
+    with pytest.raises(sf.SurfaceArbitrageError, match="butterfly"):
+        sf._check_butterfly(*p.values(), lo, hi, sf.G_PAD)
+
+
+def test_a_dip_narrower_than_any_lattice_is_rejected() -> None:
+    p, (lo, hi) = TANGENT_DIP, TANGENT_DIP_STRIKES
+    fine = np.arange(math.ceil(lo / 0.001), math.floor(hi / 0.001) + 1) * 0.001
+    assert float(np.min(sf._g(fine, *p.values()))) >= 0.0
+    # The guard's own grid points miss it too; the refinement between them
+    # is what finds it.
+    grid = sf._butterfly_grid(lo, hi, pad=0.0)
+    assert float(np.min(sf._g(grid, *p.values()))) >= 0.0
+    with pytest.raises(sf.SurfaceArbitrageError, match="butterfly"):
+        sf._check_butterfly(*p.values(), lo, hi, pad=0.0)
+
+
+def test_the_refinement_agrees_with_a_dense_grid_on_a_clean_smile() -> None:
+    a, b, rho, m, sigma = 0.02, 0.1, -0.4, 0.01, 0.12
+    grid = sf._butterfly_grid(-0.3, 0.3, pad=0.1)
+    dense = np.linspace(grid[0], grid[-1], 200001)
+    exact = float(np.min(sf._g(dense, a, b, rho, m, sigma)))
+    assert sf._min_g_svi(grid, a, b, rho, m, sigma) == pytest.approx(exact, abs=1e-9)
+
+
 def test_arbitrage_within_the_strikes_is_still_rejected() -> None:
     """Narrowing the pad changes nothing inside the data."""
     with pytest.raises(sf.SurfaceArbitrageError, match=r"strikes \[-0.600, 0.600\]"):
@@ -416,7 +468,7 @@ def test_calendar_wing_crossing_is_repaired_not_rejected() -> None:
     # cross in the wing only, the real-session pattern.
     floor = sf.SliceFit(a=0.0001, b=0.035, rho=-0.4, m=0.01, sigma=0.08,
                         rms_error=0.0, min_g=1.0)
-    cal_grid = np.linspace(float(ks[0]), float(ks[-1]), sf.G_POINTS)
+    cal_grid = np.linspace(float(ks[0]), float(ks[-1]), CAL_POINTS)
     floor_w = sf._svi_w(cal_grid, floor.a, floor.b, floor.rho, floor.m, floor.sigma)
     base_w = sf._svi_w(cal_grid, base.a, base.b, base.rho, base.m, base.sigma)
     assert float(np.min(base_w - floor_w)) < 0.0  # the fixture must cross
@@ -475,10 +527,10 @@ def test_flat_fallback_anchor_clears_the_floor_by_the_margin() -> None:
     ks = np.linspace(-0.05, 0.05, 21)
     ws = np.array([_true_w(float(k)) for k in ks])
     grid = sf._butterfly_grid(float(ks[0]), float(ks[-1]))
-    cal_grid = np.linspace(float(ks[0]), float(ks[-1]), sf.G_POINTS)
+    cal_grid = np.linspace(float(ks[0]), float(ks[-1]), CAL_POINTS)
     # A floor far above the data: every segment point short of the flat
     # anchor is infeasible, so the anchor itself is what must qualify.
-    w_floor = np.full(sf.G_POINTS, 0.5)
+    w_floor = np.full(CAL_POINTS, 0.5)
     lower = np.array([0.0, 0.0, -0.999, -3.0, 1e-4])
     upper = np.array([10.0, 10.0, 0.999, 3.0, 5.0])
     p0 = np.array([max(float(ws.min()), 1e-8), 0.02, -0.4, 0.01, 0.12])
@@ -496,8 +548,8 @@ def test_flat_fallback_raises_when_no_feasible_seed_exists() -> None:
     ks = np.linspace(-0.05, 0.05, 21)
     ws = np.array([_true_w(float(k)) for k in ks])
     grid = sf._butterfly_grid(float(ks[0]), float(ks[-1]))
-    cal_grid = np.linspace(float(ks[0]), float(ks[-1]), sf.G_POINTS)
-    w_floor = np.full(sf.G_POINTS, 20.0)  # past the w0 box bound (10.0)
+    cal_grid = np.linspace(float(ks[0]), float(ks[-1]), CAL_POINTS)
+    w_floor = np.full(CAL_POINTS, 20.0)  # past the w0 box bound (10.0)
     lower = np.array([0.0, 0.0, -0.999, -3.0, 1e-4])
     upper = np.array([10.0, 10.0, 0.999, 3.0, 5.0])
     p0 = np.array([max(float(ws.min()), 1e-8), 0.02, -0.4, 0.01, 0.12])

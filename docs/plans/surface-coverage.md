@@ -8,7 +8,7 @@ a rebuild of `clean/vol_surface`, and the docs that describe the surface.
 
 Status: **decisions 1–6 resolved 2026-09-26, 8 on 2026-09-27; decision 7
 reopened pending H's measurement. Steps 1–3c done, 3c measured;
-finding 7 corrected and finding 8 added 2026-09-27. Step 4 (C) built.**
+finding 7 corrected and finding 8 added 2026-09-27. Step 4 (C) built and measured; decision 9 open.**
 
 ---
 
@@ -418,7 +418,32 @@ last completed run's log and WARNs on an SPXW drop at ≤ 45 DTE (decision 3).
 log, and the diagnostic records them per session in place of the failing
 expiry.
 
-**Step 5 — D, if chosen.**
+**Step 4 measured (2026-09-27).** B + F + H + C, refit in memory:
+
+| | SPXW lands | SPX lands | SPXW sessions with a book drop (≤ 45 DTE) | SPXW book slices dropped |
+|---|---|---|---|---|
+| 347 missing sessions | **347** | 347 | 127 (37%) | 259 |
+| 30 landed sessions | 30 | 30 | 8 (27%) | 13 |
+
+The SPXW book drops in the missing sessions are 129 butterfly, 117
+calendar and 13 non-converging slices. SPX's 63 drops are all but two past
+the book. Which of them the features would feel, mapping each dropped
+expiry to its bus/252 session count against the five feature tenors (3, 5,
+10, 21 and 32 sessions):
+
+| | missing sessions | landed sample |
+|---|---|---|
+| a dropped slice exactly on a tenor | 49 (3: 34, 5: 12, 10: 3, 21: 6) | 5 (3: 3, 5: 2, 10: 1) |
+| a dropped slice within one session of a tenor | 93 | 6 |
+
+So C recovers every session, and step 6's 99% bar will pass by
+construction; it no longer measures what matters. What matters is the book
+holes: about a third of sessions lose a book slice, and one in seven loses
+one exactly on a feature tenor, mostly the 3-session tenor. The features
+then interpolate across the hole or report the tenor missing
+(`features-v0.md`, "complete or absent"). Whether that rate is acceptable,
+or needs a further fix before the rebuild, is decision 9. Refits took about
+16 s per session.
 
 **Step 5b — E:** the curve cut-off in `ingest/common/rates.py`,
 passed by `pricing.surface`, `pricing.term_structure` and `rate_for`'s
@@ -478,3 +503,10 @@ gap as a found-and-fixed entry), and `features-v0.md`'s blocked section.
 8. **Exact butterfly check.** Check g between grid points, not only at them
    (H), accepting that fits which only passed by aliasing will now fail and
    fall to C? **Yes, as H** (resolved 2026-09-27).
+9. **Book holes (open).** C lands SPXW in every measured session, but 37% of
+   the recovered sessions and 27% of the landed sample drop a book slice,
+   and 14% of the recovered sessions drop one exactly on a feature tenor.
+   Accept that and let the features interpolate or report the tenor
+   missing, or look for a further fix first? Step 6's acceptance bar needs
+   a book-hole limit either way, since the 99% landing bar now passes by
+   construction.

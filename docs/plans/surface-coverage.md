@@ -7,8 +7,8 @@ coverage"), which cannot run over history until this is fixed. Scope:
 a rebuild of `clean/vol_surface`, and the docs that describe the surface.
 
 Status: **decisions 1–6 resolved 2026-09-26, 8 on 2026-09-27; decision 7
-reopened pending H's measurement. Steps 1–3 done; 3b and 3c (H) built;
-finding 7 corrected and finding 8 added 2026-09-27.**
+reopened pending H's measurement. Steps 1–3c done, 3c measured;
+finding 7 corrected and finding 8 added 2026-09-27. Next: step 4 (C).**
 
 ---
 
@@ -379,7 +379,31 @@ pad stays near today's.
 2022-12-07 fit that stepped over the old grid is rejected; a real
 near-tangent dip that the grid's own points miss is rejected; on a clean
 smile the refined minimum matches a dense grid.
-**Built 2026-09-27.** Not yet measured on real sessions.
+**Built 2026-09-27.**
+
+**Step 3c measured (2026-09-27).** B + F + H, refit in memory:
+
+| | SPXW fits | SPX fits |
+|---|---|---|
+| 347 missing sessions, B + F | 280 | 309 |
+| 347 missing sessions, B + F + H | **204** (82 lost, 6 gained) | 295 (17 lost, 3 gained) |
+| 30 landed sessions, B + F + H | 21 | 28 |
+
+SPXW's 143 failures by cause and the failing expiry's DTE. The diagnostic
+records only the first failing expiry of each session, so a session may
+hold more:
+
+| | ≤ 5 DTE | 6–45 DTE | > 45 DTE |
+|---|---|---|---|
+| butterfly (90) | 67 | 23 | 0 |
+| calendar or no convergence (53) | 10 | 31 | 12 |
+
+So H costs what the check had been missing: the lost sessions are mostly
+fits that passed only between grid points, three-quarters of them expiries
+five days or less out. They are single slices, which C drops. What C leaves
+is holes at the short end of the book, and the features must interpolate
+across them or report the tenor missing. 2022-11-29, finding 7's session,
+now fits (34 slices). Fits take about 20% longer per session.
 
 **Step 4 — C: drop-a-slice.** Tests: a non-converging middle slice is
 dropped and the chain floors off its predecessor; a session whose every

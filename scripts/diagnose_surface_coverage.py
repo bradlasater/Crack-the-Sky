@@ -14,11 +14,13 @@ partition; ``--all`` selects every ``option_day_bars`` session; ``--dates``
 takes ``D`` or ``D1:D2``; ``--dates-file`` a list, one date per line. Re-running with the same ``--out`` resumes, skipping
 sessions already recorded.
 
-A failing record names the expiry whose fit raised (``expiry``, ``dte``) --
-the fit's own messages do not -- and, for a calendar rejection from the
-Surface guard, the pair and the log-moneyness it failed at. A passing record
-carries the slice count and, when a landed partition exists for the session,
-whether the refit reproduces it (``matches_landed``).
+A slice the build cannot fit is dropped rather than failing the root
+(docs/plans/surface-coverage.md, fix C), so a passing record carries the
+slice count, the ``dropped`` expiries with their DTE and reason, and, when a
+landed partition exists for the session, whether the refit reproduces it
+(``matches_landed``). A failing record is a root that kept no slice, or one
+the Surface guard rejected; for a calendar rejection it names the pair and
+the log-moneyness it failed at.
 
 The thread pin is set to production's 8 before numpy loads, because the fit's
 outcome depends on it (scripts/cronjob.sh has the measurement). Workers run
@@ -56,30 +58,6 @@ CALENDAR = re.compile(
 PARAMS = ("a", "b", "rho", "m", "sigma")
 
 
-class _SliceFailure(Exception):
-    """Carries the expiry whose fit raised, around the original error."""
-
-    def __init__(self, expiry: str, dte: int, error: Exception) -> None:
-        super().__init__(str(error))
-        self.expiry, self.dte, self.error = expiry, dte, error
-
-
-def _named_fit_expiry(real):  # noqa: ANN001, ANN202
-    """Wrap ``_fit_expiry`` so a failure says which expiry it was."""
-    def wrapper(expiry, dte, *args, **kwargs):  # noqa: ANN001, ANN202
-        try:
-            return real(expiry, dte, *args, **kwargs)
-        except Exception as exc:  # noqa: BLE001 - re-raised with its expiry
-            raise _SliceFailure(str(expiry), int(dte), exc) from exc
-    return wrapper
-
-
-# At import, not in main(): workers may be started by forkserver or spawn
-# (the Python 3.14 default on Linux), which re-import this module rather than
-# inheriting the parent's patched state.
-sf._fit_expiry = _named_fit_expiry(sf._fit_expiry)
-
-
 def _settings() -> Settings:
     return Settings(massive_api_key="unused", data_root=default_data_root())
 
@@ -105,9 +83,6 @@ def refit(iso: str) -> list[dict[str, Any]]:
         t0 = time.time()
         try:
             surfaces = sf.build_for_date(settings, d, roots=(root,))
-        except _SliceFailure as exc:
-            rec.update(ok=False, stage="slice", err=type(exc.error).__name__,
-                       msg=str(exc.error)[:300], expiry=exc.expiry, dte=exc.dte)
         except Exception as exc:  # noqa: BLE001 - the Surface guard, or anything else
             rec.update(ok=False, stage="surface", err=type(exc).__name__,
                        msg=str(exc)[:300])
@@ -122,6 +97,10 @@ def refit(iso: str) -> list[dict[str, Any]]:
                 rec["err"] = "no chain"
             else:
                 rec["slices"] = len(surf)
+                rec["dropped"] = [
+                    {"expiry": x.expiration_date, "dte": x.dte, "reason": x.reason[:200]}
+                    for x in surf.dropped
+                ]
                 landed = _landed(settings, d, root)
                 if landed is not None:
                     got = [

@@ -532,6 +532,63 @@ def test_coverage_surface_roots_match_the_fitter() -> None:
     assert audit.SURFACE_ROOTS == SURFACE_ROOTS
 
 
+def _surface_log(tmp_path: Path, epoch: int, drops: list[tuple[str, int]],
+                 root: str = "SPXW", completed: bool = True) -> None:
+    """A surface run log for RUN_DATE, as pricing.surface._main_fn writes it."""
+    import json
+
+    path = tmp_path / "logs" / audit.SURFACE_JOB / f"dt={RUN_DATE.isoformat()}" / f"{epoch}.log"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [{"event": "surface_slice_dropped", "root": root, "expiry": e, "dte": dte,
+              "reason": "SurfaceError: SVI fit did not converge"} for e, dte in drops]
+    if completed:
+        lines.append({"event": "surface", "slices": 40})
+    path.write_text("".join(json.dumps(x) + "\n" for x in lines), encoding="utf-8")
+
+
+def _both_roots_landed(tmp_path: Path) -> None:
+    landing.write_clean("vol_surface", RUN_DATE,
+                        [_vol_surface_row("SPX"), _vol_surface_row("SPXW")],
+                        job="surface", data_root=tmp_path)
+
+
+def test_vol_surface_warns_on_a_dropped_slice_inside_the_book(tmp_path: Path) -> None:
+    _both_roots_landed(tmp_path)
+    _surface_log(tmp_path, 100, [("2026-09-02", 5), ("2027-12-17", 476)])
+    got = audit.check_vol_surface(_settings(tmp_path), RUN_DATE)[0]
+    assert got.status == audit.WARN
+    assert got.data["dropped"] == 2
+    assert got.data["dropped_in_book"] == ["SPXW 2026-09-02 (5d)"]
+
+
+def test_vol_surface_passes_a_drop_past_the_book_or_on_spx(tmp_path: Path) -> None:
+    _both_roots_landed(tmp_path)
+    _surface_log(tmp_path, 100, [("2027-12-17", 476)])
+    got = audit.check_vol_surface(_settings(tmp_path), RUN_DATE)[0]
+    assert got.status == audit.PASS
+    assert "1 dropped past the book" in got.detail
+    _surface_log(tmp_path, 200, [("2026-09-18", 21)], root="SPX")
+    assert audit.check_vol_surface(_settings(tmp_path), RUN_DATE)[0].status == audit.PASS
+
+
+def test_vol_surface_reads_the_last_completed_run(tmp_path: Path) -> None:
+    """A rerun that dropped nothing supersedes an earlier one; a run that
+    failed before its summary is not what landed."""
+    _both_roots_landed(tmp_path)
+    _surface_log(tmp_path, 100, [("2026-09-02", 5)])
+    _surface_log(tmp_path, 200, [])
+    _surface_log(tmp_path, 300, [("2026-09-03", 6)], completed=False)
+    got = audit.check_vol_surface(_settings(tmp_path), RUN_DATE)[0]
+    assert got.status == audit.PASS
+    assert got.data["dropped"] == 0
+
+
+def test_surface_job_name_matches_the_fitter() -> None:
+    from pricing.surface import JOB
+
+    assert audit.SURFACE_JOB == JOB
+
+
 def test_vol_surface_is_part_of_the_daily_run(tmp_path: Path) -> None:
     names = {c.name for c in audit.run_checks(_settings(tmp_path), RUN_DATE, _logger())}
     assert "vol_surface" in names

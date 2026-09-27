@@ -378,11 +378,64 @@ def test_svi_w_jac_matches_finite_differences() -> None:
 
 
 def test_calendar_arbitrage_is_detected() -> None:
-    """The near slice richer in total variance than the far one is free money."""
+    """The near slice richer in total variance than the far one is free money.
+
+    The Surface guard rejects the pair; the build, fitting in expiry order,
+    drops the far slice that cannot clear the near one's floor (fix C).
+    """
     bars = (_chain_bars(NEAR, T_NEAR, lambda k: 0.30)
             + _chain_bars(FAR, T_FAR, lambda k: 0.10))
+    near = sf.build_surfaces(_chain_bars(NEAR, T_NEAR, lambda k: 0.30), DAY, roots=("SPXW",),
+                             rate_fn=_flat_rate, daycount=ACT_365)["SPXW"].slices[0]
+    far = sf.build_surfaces(_chain_bars(FAR, T_FAR, lambda k: 0.10), DAY, roots=("SPXW",),
+                            rate_fn=_flat_rate, daycount=ACT_365)["SPXW"].slices[0]
     with pytest.raises(sf.SurfaceArbitrageError, match="calendar"):
-        sf.build_surfaces(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)
+        sf.Surface(DAY, "SPXW", [near, far])
+
+    surf = sf.build_surfaces(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)["SPXW"]
+    assert [s.expiration_date for s in surf.slices] == [NEAR.isoformat()]
+    [dropped] = surf.dropped
+    assert dropped.expiration_date == FAR.isoformat()
+    assert dropped.dte == (FAR - DAY).days
+    assert dropped.reason.startswith("SurfaceArbitrageError: calendar arbitrage")
+
+
+# A slice that cannot be fit is dropped, not the root (fix C).
+
+def _notched(expiry: date, t: float) -> list[dict]:
+    """A chain with one quoted strike's vol halved: no SVI curve converges on it."""
+    return _chain_bars(expiry, t, lambda K: _true_vol(K, t) * (0.5 if K == 7725 else 1.0))
+
+
+def _clean(expiry: date, t: float) -> list[dict]:
+    return _chain_bars(expiry, t, lambda K: _true_vol(K, t))
+
+
+def test_a_slice_that_cannot_be_fit_is_dropped_not_the_root() -> None:
+    bars = _clean(NEAR, T_NEAR) + _notched(MID, T_MID) + _clean(FAR, T_FAR)
+    surf = sf.build_surfaces(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)["SPXW"]
+    assert [s.expiration_date for s in surf.slices] == [NEAR.isoformat(), FAR.isoformat()]
+    [dropped] = surf.dropped
+    assert (dropped.expiration_date, dropped.dte) == (MID.isoformat(), (MID - DAY).days)
+    assert dropped.reason.startswith("SurfaceError: SVI fit did not converge")
+    # The chain continues from the kept slices: the far slice is floored by
+    # the near one alone, exactly as if the middle expiry had never quoted.
+    without = sf.build_surfaces(_clean(NEAR, T_NEAR) + _clean(FAR, T_FAR), DAY, roots=("SPXW",),
+                                rate_fn=_flat_rate, daycount=ACT_365)["SPXW"]
+    assert surf.slices == without.slices
+    assert without.dropped == ()
+
+
+def test_a_root_that_keeps_no_slice_still_raises() -> None:
+    with pytest.raises(sf.SurfaceError, match=r"every SPXW slice on 2026-08-28 was dropped: 2026-10-30 "):
+        sf.build_surfaces(_notched(MID, T_MID), DAY, roots=("SPXW",),
+                          rate_fn=_flat_rate, daycount=ACT_365)
+
+
+def test_a_surface_read_back_has_no_dropped_slices() -> None:
+    surf = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate,
+                             daycount=ACT_365)["SPXW"]
+    assert sf.Surface.from_rows(sf.rows_from_surfaces({"SPXW": surf})).dropped == ()
 
 
 # Calendar checks compare two slices only where both have data (fix B).
@@ -773,6 +826,26 @@ def test_job_writes_the_root_that_fit_and_logs_the_other(tmp_path, monkeypatch) 
         sf.load_surface(_settings(tmp_path), DAY, "SPX")
     failed = [f for e, f in events if e == "surface_root_failed"]
     assert [f["root"] for f in failed] == ["SPX"]
+
+
+def test_job_logs_each_dropped_slice(tmp_path, monkeypatch) -> None:
+    """coverage_audit reads these events back (decision 3)."""
+    from ingest.common.logging_utils import JsonlLogger
+
+    bars = _clean(NEAR, T_NEAR) + _notched(MID, T_MID)
+    monkeypatch.setattr(sf, "read_day_bars", lambda _s, _d: bars)
+    monkeypatch.setattr(sf, "load_curve", lambda _d, _root=None: _FlatCurve())
+    monkeypatch.setattr(sf, "hybrid_for", lambda _root=None: ACT_365)
+    logger = JsonlLogger(path=None, echo=False)
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(logger, "log", lambda e, **f: events.append((e, f)) or {})
+    summary = sf._main_fn(_job_args(underlying="SPXW"), _settings(tmp_path), logger)
+    assert summary["slices_dropped"] == 1
+    [drop] = [f for e, f in events if e == "surface_slice_dropped"]
+    assert (drop["root"], drop["expiry"], drop["dte"]) == ("SPXW", MID.isoformat(), (MID - DAY).days)
+    assert drop["reason"].startswith("SurfaceError: ")
+    assert [s.expiration_date for s in sf.load_surface(_settings(tmp_path), DAY, "SPXW").slices] \
+        == [NEAR.isoformat()]
 
 
 def test_job_fails_naming_each_root_when_none_fits(tmp_path, monkeypatch) -> None:

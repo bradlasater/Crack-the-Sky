@@ -104,6 +104,14 @@ constrained refit -- or whose only feasible refits are rejected by that bound
 :class:`Surface`): a genuinely broken smile, not noise. Fail-loud is kept;
 what changed is that noise is repaired, not fatal.
 
+**A slice that cannot be fit is dropped, not the root.** The build catches a
+slice's failure -- no convergence, butterfly arbitrage even after repair, or
+a calendar floor it cannot clear -- records it on :attr:`Surface.dropped`
+and continues the chain from the slices it kept, so everything that lands
+passed the same guards. A root that keeps no slice still raises. The job
+logs each drop and ``coverage_audit`` WARNs on one inside the book
+(docs/plans/surface-coverage.md, fix C).
+
 **Evaluation.** :meth:`Surface.vol` interpolates *linearly in total variance*
 between the bracketing expiries -- the arb-preserving choice -- each slice at
 its own forward's log-moneyness, and holds the nearest slice flat outside the
@@ -324,6 +332,23 @@ def _calendar_floor(
     if not keep.any():
         return None
     return grid[keep], floor[keep]
+
+
+def _check_floor(sl: Any, grid: np.ndarray, w_floor: np.ndarray) -> None:
+    """SurfaceArbitrageError when a fitted slice dips below its calendar floor.
+
+    The same comparison :class:`Surface` makes afterwards, on the same lattice
+    points, made here so the build can drop the one slice rather than the
+    root. Reachable when the constrained refit could not clear the floor
+    within ``REPAIR_MAX_REL_RMS``: the crossing is in the data.
+    """
+    diff = _svi_w(grid, sl.a, sl.b, sl.rho, sl.m, sl.sigma) - w_floor
+    i = int(np.argmin(diff))
+    if float(diff[i]) < -CAL_TOL:
+        raise SurfaceArbitrageError(
+            f"calendar arbitrage: total variance drops {-float(diff[i]):.6g} at "
+            f"k={float(grid[i]):.4f} below the slices before {sl.expiration_date}"
+        )
 
 
 def _butterfly_pad(ws: Any) -> float:
@@ -705,6 +730,15 @@ class Slice:
         return math.sqrt(self.total_variance(math.log(K / self.forward)) / self.t_years)
 
 
+@dataclass(frozen=True)
+class DroppedSlice:
+    """An expiry the build could not fit, and why; the rest of the root still lands."""
+
+    expiration_date: str
+    dte: int
+    reason: str  # "ErrorType: message"
+
+
 class Surface:
     """The fitted slices of one (date, root): calendar-checked, evaluable.
 
@@ -712,12 +746,18 @@ class Surface:
     in T at every k across the fitted slices, else SurfaceArbitrageError.
     """
 
-    def __init__(self, d: date, underlying: str, slices: list[Slice]) -> None:
+    def __init__(
+        self, d: date, underlying: str, slices: list[Slice],
+        dropped: tuple[DroppedSlice, ...] = (),
+    ) -> None:
         if not slices:
             raise SurfaceError(f"no fitted slices for {underlying} on {d}")
         self.date = d.isoformat()
         self.underlying = underlying
         self.slices = sorted(slices, key=lambda s: s.t_years)
+        # The build's record of expiries it could not fit (fix C); a surface
+        # read back from the warehouse has none, since only kept slices land.
+        self.dropped = tuple(dropped)
         self._check_calendar()
 
     def _check_calendar(self) -> None:
@@ -989,15 +1029,33 @@ def build_surfaces(
                 continue
             pending.append((fwd["expiration_date"], dte, T, F, r, ks, ws, stamp))
 
+        # A slice that cannot be fit is dropped, not the root (fix C): one
+        # that fails to converge, fails the butterfly guard even after repair,
+        # or cannot clear the calendar floor of the slices already kept. The
+        # chain continues from the kept slices, so every slice that lands has
+        # passed the same guards as before. A root that keeps none raises.
         slices: list[Slice] = []
+        dropped: list[DroppedSlice] = []
         for expiry, dte, T, F, r, ks, ws, stamp in pending:
             cal = _calendar_floor(ks[0], ks[-1], slices)
-            sl = _fit_expiry(expiry, dte, T, F, r, ks, ws, stamp, blas,
-                             cal_grid=None if cal is None else cal[0],
-                             w_floor=None if cal is None else cal[1])
+            try:
+                sl = _fit_expiry(expiry, dte, T, F, r, ks, ws, stamp, blas,
+                                 cal_grid=None if cal is None else cal[0],
+                                 w_floor=None if cal is None else cal[1])
+                if cal is not None:
+                    _check_floor(sl, *cal)
+            except SurfaceError as exc:
+                dropped.append(DroppedSlice(
+                    str(expiry)[:10], dte, f"{type(exc).__name__}: {exc}"))
+                continue
             slices.append(sl)
+        if pending and not slices:
+            raise SurfaceError(
+                f"every {root} slice on {d} was dropped: "
+                + "; ".join(f"{x.expiration_date} {x.reason}" for x in dropped)
+            )
         if slices:
-            surfaces[root] = Surface(d, root, slices)
+            surfaces[root] = Surface(d, root, slices, tuple(dropped))
     return surfaces
 
 
@@ -1171,6 +1229,17 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger):
                          f"{MIN_STRIKES} OTM strikes for roots {list(roots)}")
         )
 
+    # coverage_audit reads these back: a dropped slice inside the book is a
+    # WARN on the session (docs/plans/surface-coverage.md, decision 3).
+    dropped = 0
+    for root in sorted(surfaces):
+        for x in surfaces[root].dropped:
+            dropped += 1
+            logger.log("surface_slice_dropped", date=d.isoformat(), root=root,
+                       expiry=x.expiration_date, dte=x.dte, reason=x.reason)
+            print(f"DROP  {root} {x.expiration_date} dte={x.dte}  {x.reason}",
+                  file=sys.stderr)
+
     rows = rows_from_surfaces(surfaces)
     by_root = {root: len(s.slices) for root, s in surfaces.items()}
     logger.log("surface", date=d.isoformat(), slices=len(rows), by_root=by_root)
@@ -1188,7 +1257,8 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger):
         print(f"PASS  wrote {path}", file=sys.stderr)
     # A root that failed still lands the others and exits 0; coverage_audit
     # is what makes a missing SPXW loud (FAIL) and a missing SPX visible (WARN).
-    return {"rows": len(rows), "roots": len(surfaces), "roots_failed": len(build.failures)}
+    return {"rows": len(rows), "roots": len(surfaces), "roots_failed": len(build.failures),
+            "slices_dropped": dropped}
 
 
 def main(argv: list[str] | None = None) -> int:

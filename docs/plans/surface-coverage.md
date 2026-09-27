@@ -8,7 +8,7 @@ a rebuild of `clean/vol_surface`, and the docs that describe the surface.
 
 Status: **decisions 1–6 resolved 2026-09-26, 8 on 2026-09-27; decision 7
 reopened pending H's measurement. Steps 1–3c done, 3c measured;
-finding 7 corrected and finding 8 added 2026-09-27. Next: step 4 (C).**
+finding 7 corrected and finding 8 added 2026-09-27. Step 4 (C) built.**
 
 ---
 
@@ -408,6 +408,15 @@ now fits (34 slices). Fits take about 20% longer per session.
 **Step 4 — C: drop-a-slice.** Tests: a non-converging middle slice is
 dropped and the chain floors off its predecessor; a session whose every
 slice fails still raises; dropped book-tenor slices surface in the audit.
+**Built 2026-09-27.** `build_surfaces` drops a slice that raises
+`SurfaceError` or cannot clear the calendar floor of the slices already
+kept, and records it on `Surface.dropped`. The floor case drops the *later*
+slice of a crossing pair, because the chain is fit in expiry order. The job
+logs a `surface_slice_dropped` event per drop; `coverage_audit` reads the
+last completed run's log and WARNs on an SPXW drop at ≤ 45 DTE (decision 3).
+`scripts/build_surface.py` prints each drop, since a rebuild writes no run
+log, and the diagnostic records them per session in place of the failing
+expiry.
 
 **Step 5 — D, if chosen.**
 

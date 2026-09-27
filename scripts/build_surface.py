@@ -87,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
         sessions = [d for d in sessions if d <= args.end]
 
     print(f"[surface] {len(sessions)} sessions, roots={','.join(roots)}", flush=True)
-    ok = skipped = empty = failed = partial = 0
+    ok = skipped = empty = failed = partial = dropped = 0
     bad: list[str] = []
     t0 = time.time()
 
@@ -122,6 +122,13 @@ def main(argv: list[str] | None = None) -> int:
             bad.append(iso)
             print(f"[surface] {iso} EMPTY", file=sys.stderr, flush=True)
             continue
+        # A rebuild writes no run log for coverage_audit to read, so the
+        # slices the fit dropped are named here instead.
+        for root in sorted(surfaces):
+            for x in surfaces[root].dropped:
+                dropped += 1
+                print(f"[surface] {iso} {root} DROPPED {x.expiration_date} dte={x.dte} "
+                      f"{x.reason}", file=sys.stderr, flush=True)
         # write_rows replaces this job's prior output for the date, so a
         # --force rebuild cannot leave two files in the partition and have a
         # whole-partition read return every (date, root, expiry) key twice.
@@ -131,7 +138,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[surface] ({i}/{len(sessions)}) {iso}  ok={ok} skipped={skipped} "
                   f"empty={empty} failed={failed}  {time.time() - t0:.0f}s", flush=True)
 
-    print(f"[surface] complete: {ok} written ({partial} with a root failed), "
+    print(f"[surface] complete: {ok} written ({partial} with a root failed, "
+          f"{dropped} slices dropped), "
           f"{skipped} already present, {empty} empty, "
           f"{failed} failed in {time.time() - t0:.0f}s", flush=True)
     if bad:

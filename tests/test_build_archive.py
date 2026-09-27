@@ -17,6 +17,13 @@ import pytest
 from ingest.common.config import Settings
 from pricing.surface import SessionBuild, SurfaceArbitrageError
 
+
+class _Landed:
+    """Stands in for a fitted Surface: the script reads only what it dropped."""
+
+    dropped = ()
+
+
 ROOT = Path(__file__).resolve().parents[1]
 SESSIONS = ["2026-08-26", "2026-08-27", "2026-08-28"]
 CALENDAR = dict.fromkeys(SESSIONS, True)
@@ -63,10 +70,10 @@ def _install(mod, monkeypatch, tmp_path, behaviour):
         failed = {"SPX": "SurfaceArbitrageError: calendar arbitrage: test"}
         return {
             "empty": SessionBuild({}, {}),
-            "spx_failed": SessionBuild({"SPXW": object()}, failed),
+            "spx_failed": SessionBuild({"SPXW": _Landed()}, failed),
             "all_failed": SessionBuild(
                 {}, {**failed, "SPXW": "SurfaceError: SVI fit did not converge"}),
-        }.get(what, SessionBuild({"SPXW": object()}, {}))
+        }.get(what, SessionBuild({"SPXW": _Landed()}, {}))
 
     monkeypatch.setattr(mod, "build_session" if is_surface else "build_for_date", fake_build)
     if is_surface:
@@ -161,7 +168,7 @@ def test_surface_session_with_a_failed_root_is_still_written(
     assert [d.isoformat() for d in written] == SESSIONS
     captured = capsys.readouterr()
     assert "2026-08-27 SPX FAILED SurfaceArbitrageError" in captured.err
-    assert "(1 with a root failed)" in captured.out
+    assert "(1 with a root failed, 0 slices dropped)" in captured.out
 
 
 def test_surface_session_with_every_root_failed_is_a_failure(

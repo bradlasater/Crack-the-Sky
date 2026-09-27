@@ -305,6 +305,29 @@ def test_the_refinement_agrees_with_a_dense_grid_on_a_clean_smile() -> None:
     assert sf._min_g_svi(grid, a, b, rho, m, sigma) == pytest.approx(exact, abs=1e-9)
 
 
+def _sharp_vertex_smile() -> tuple[np.ndarray, np.ndarray]:
+    """A short-dated smile with a sharp vertex and a deterministic ripple, the
+    shape whose constrained refit clears every lattice point with g dipping
+    below zero between two of them (finding 9). Chosen because it does so at
+    both 1 and 8 BLAS threads; the fit's outcome depends on the count."""
+    ks = np.linspace(-0.15, 0.08, 61)
+    p = {"a": -0.0002, "b": 0.0166, "rho": -0.66, "m": -0.06, "sigma": 0.02}
+    ws = np.array([_true_w(float(k), p) for k in ks])
+    return ks, ws * (1 + 0.02 * np.sin(np.arange(ks.size) * 1.7))
+
+
+def test_the_repair_constrains_a_dip_between_lattice_points(monkeypatch) -> None:
+    ks, ws = _sharp_vertex_smile()
+    monkeypatch.setattr(sf, "REPAIR_EXCHANGES", 0)
+    with pytest.raises(sf.SurfaceArbitrageError, match="butterfly"):
+        sf.fit_slice(ks, ws)
+    monkeypatch.undo()
+    fit = sf.fit_slice(ks, ws)
+    assert fit.min_g >= -sf.G_TOL
+    assert fit.rms_error <= sf.REPAIR_MAX_REL_RMS * float(np.mean(ws))
+    assert fit == sf.fit_slice(ks, ws)  # deterministic
+
+
 def test_arbitrage_within_the_strikes_is_still_rejected() -> None:
     """Narrowing the pad changes nothing inside the data."""
     with pytest.raises(sf.SurfaceArbitrageError, match=r"strikes \[-0.600, 0.600\]"):

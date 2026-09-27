@@ -229,6 +229,9 @@ K_STEP = 0.0025
 # whose data is itself arbitrageable (the calendar test's flat 0.30 vs 0.10
 # slices) needs ~1.2 and is rejected.
 REPAIR_MAX_REL_RMS = 0.5
+# How many times a constrained refit that ends with g dipping between its
+# constrained points adds the dip and resumes (see _repair_fit).
+REPAIR_EXCHANGES = 5
 
 
 class SurfaceError(RuntimeError):
@@ -373,27 +376,36 @@ def _butterfly_grid(k_lo: float, k_hi: float, pad: float = G_PAD) -> np.ndarray:
     return np.unique(np.concatenate([[lo], _lattice(lo, hi), [hi]]))
 
 
-def _min_g_svi(grid: np.ndarray, a: float, b: float, rho: float, m: float, sigma: float) -> float:
-    """Smallest g(k) over the grid's range, not only at its points.
+def _argmin_g_svi(
+    grid: np.ndarray, a: float, b: float, rho: float, m: float, sigma: float,
+) -> tuple[float, float]:
+    """Smallest g(k) over the grid's range, not only at its points, and where.
 
     Evaluates the grid, then minimises g between the neighbours of every
     local minimum on it: a negative-density band narrower than the spacing
     sits inside the bracket of the nearest grid minimum. Deterministic.
     """
     g = _g(grid, a, b, rho, m, sigma)
-    best = float(np.min(g))
+    i0 = int(np.argmin(g))
+    best, where = float(g[i0]), float(grid[i0])
     n = len(grid)
     if n < 3:
-        return best
+        return best, where
     interior = np.flatnonzero((g[1:-1] <= g[:-2]) & (g[1:-1] <= g[2:])) + 1
-    for i in sorted({*interior.tolist(), int(np.argmin(g))}):
+    for i in sorted({*interior.tolist(), i0}):
         lo, hi = float(grid[max(i - 1, 0)]), float(grid[min(i + 1, n - 1)])
         res = minimize_scalar(
             lambda k: float(_g(np.array([k]), a, b, rho, m, sigma)[0]),
             bounds=(lo, hi), method="bounded", options={"xatol": 1e-10},
         )
-        best = min(best, float(res.fun))
-    return best
+        if float(res.fun) < best:
+            best, where = float(res.fun), float(res.x)
+    return best, where
+
+
+def _min_g_svi(grid: np.ndarray, a: float, b: float, rho: float, m: float, sigma: float) -> float:
+    """Smallest g(k) over the grid's range; see :func:`_argmin_g_svi`."""
+    return _argmin_g_svi(grid, a, b, rho, m, sigma)[0]
 
 
 def _min_g(grid: np.ndarray, p: np.ndarray) -> float:
@@ -509,6 +521,14 @@ def _repair_fit(
     data seed, and keeps the feasible candidate with the lower cost. Returns
     None when neither run reaches feasibility -- :func:`fit_slice` then lets
     the post-fit guards raise.
+
+    SLSQP constrains g only at the grid's points, and the guard checks it
+    between them too, so a run can end clear at every point with a dip in
+    between. Each run is therefore an exchange loop: the worst dip's location
+    joins the constrained points, with a dense patch around it, and the run
+    resumes from its projection, up to ``REPAIR_EXCHANGES`` times. Of the 138 SPXW book slices dropped for
+    butterfly arbitrage on 2026-09-27, 62 were exactly this
+    (docs/plans/surface-coverage.md, finding 9).
     """
     def objective(p: np.ndarray) -> float:
         r = residuals(p)
@@ -517,13 +537,28 @@ def _repair_fit(
     def objective_jac(p: np.ndarray) -> np.ndarray:
         return _svi_w_jac(ks, p).T @ residuals(p)
 
-    def constraint(p: np.ndarray) -> np.ndarray:
+    def guard_on(points: np.ndarray) -> NonlinearConstraint:
+        def constraint(p: np.ndarray) -> np.ndarray:
+            w0, b, rho, m, sigma = (float(v) for v in p)
+            a = w0 - b * sigma * math.sqrt(1.0 - rho * rho)
+            parts = [_g(points, a, b, rho, m, sigma)]
+            if w_floor is not None:
+                parts.append(_svi_w(cal_grid, a, b, rho, m, sigma) - w_floor)
+            return np.concatenate(parts)
+
+        # The margin applies to the butterfly rows only. Calendar rows need
+        # just w >= w_prev: broadcasting the margin to them would
+        # cumulatively lift total variance across chained repairs and can
+        # push an otherwise clean repair past the relative-RMS bound.
+        lb = np.full(len(points), G_REPAIR_MARGIN)
+        if w_floor is not None:
+            lb = np.concatenate([lb, np.zeros(len(cal_grid))])
+        return NonlinearConstraint(constraint, lb, np.inf, jac="3-point")
+
+    def dip(p: np.ndarray) -> float:
         w0, b, rho, m, sigma = (float(v) for v in p)
         a = w0 - b * sigma * math.sqrt(1.0 - rho * rho)
-        parts = [_g(grid, a, b, rho, m, sigma)]
-        if w_floor is not None:
-            parts.append(_svi_w(cal_grid, a, b, rho, m, sigma) - w_floor)
-        return np.concatenate(parts)
+        return _argmin_g_svi(grid, a, b, rho, m, sigma)[1]
 
     def feasible(p: np.ndarray) -> bool:
         if _min_g(grid, p) < -G_TOL:
@@ -535,24 +570,28 @@ def _repair_fit(
                 return False
         return True
 
-    # The margin applies to the butterfly rows only. Calendar rows need just
-    # w >= w_prev: broadcasting the margin to them would cumulatively lift
-    # total variance across chained repairs and can push an otherwise clean
-    # repair past the relative-RMS acceptance bound.
-    lb = np.full(len(grid), G_REPAIR_MARGIN)
-    if w_floor is not None:
-        lb = np.concatenate([lb, np.zeros(len(cal_grid))])
-    guard = NonlinearConstraint(constraint, lb, np.inf, jac="3-point")
     candidates: list[tuple[float, np.ndarray]] = []
     for start in (x0, seed):
-        res = minimize(
-            objective,
-            _project_to_feasible(start, ws, grid, lower, upper, w_floor, cal_grid),
-            method="SLSQP", jac=objective_jac, bounds=Bounds(lower, upper),
-            constraints=[guard], options={"ftol": 1e-12, "maxiter": 1000},
-        )
-        if feasible(res.x):
-            candidates.append((objective(res.x), res.x))
+        points = grid
+        p = start
+        for _ in range(REPAIR_EXCHANGES + 1):
+            res = minimize(
+                objective,
+                _project_to_feasible(p, ws, points, lower, upper, w_floor, cal_grid),
+                method="SLSQP", jac=objective_jac, bounds=Bounds(lower, upper),
+                constraints=[guard_on(points)], options={"ftol": 1e-12, "maxiter": 1000},
+            )
+            if feasible(res.x):
+                candidates.append((objective(res.x), res.x))
+                break
+            if _min_g(points, res.x) >= G_REPAIR_MARGIN / 2 and w_floor is not None:
+                break  # a calendar shortfall, which more butterfly points cannot fix
+            # A patch around the dip, not the one point: a narrow dip pinned
+            # at one point moves to the next gap, and the loop cycles.
+            k = dip(res.x)
+            patch = k + np.linspace(-K_STEP, K_STEP, 21)
+            points = np.union1d(points, patch[(patch >= grid[0]) & (patch <= grid[-1])])
+            p = res.x
     if not candidates:
         return None
     candidates.sort(key=lambda c: c[0])

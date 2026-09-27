@@ -327,6 +327,29 @@ than loosening it, so it will cost coverage before C recovers it, and it
 changes fits in sessions that land today, so it lands before the rebuild.
 **Decision 8.**
 
+**I. Fit synchronous marks, not day-bar closes (finding 9).** Build each
+strike's price from `option_minute_bars` inside a closing window, and imply
+the forward from parity in the same window. Measured on 40 sampled
+sessions (113,682 book strikes the fit uses today, 99% present in the
+minute bars): a strike's last trade is a median 36 minutes before the
+close, and 10% are over five hours stale.
+
+| | last trade to close, median | traded in the last 15 / 30 min |
+|---|---|---|
+| ≤ 5 DTE | 2 min | 78% / 84% |
+| 6–15 DTE | 20 min | 45% / 57% |
+| 16–45 DTE | 75 min | 22% / 33% |
+
+| window | strikes kept | book expiries still fittable (of 1,039) |
+|---|---|---|
+| last 15 min | 37% | 882 |
+| last 30 min | 47% | 963 |
+| last 60 min | 59% | 1,007 |
+
+The stalest band, 16–45 DTE, is where 97 of the 121 calendar drops sit.
+The cost is thinner chains, most of all past two weeks, and every fitted
+number changes. **Decision 10.**
+
 What is *not* proposed: loosening the butterfly tolerance (`G_TOL`),
 raising the arbitrage repair budget, or holding a failed slice's parameters
 from a neighbour. B and F do change what the checks promise: both stop
@@ -548,3 +571,12 @@ gap as a found-and-fixed entry), and `features-v0.md`'s blocked section.
    missing, or look for a further fix first? Step 6's acceptance bar needs
    a book-hole limit either way, since the 99% landing bar now passes by
    construction.
+10. **Synchronous marks (open).** Adopt I before the rebuild? If so: the
+    window (15, 30 or 60 minutes, early closes on their own close); the mark
+    in it (last minute close, VWAP, or median); strikes with no trade in it
+    (drop, or fall back to the day close); the forward rule for an expiry
+    with too few pairs; and whether `atm_term_structure` moves with it.
+    *(Recommended: yes, before the rebuild; 30 minutes; last minute close;
+    drop, not fall back; skip an expiry without enough pairs; move
+    `atm_term_structure` too. Decided on a measurement over the same 377
+    sessions before the rebuild commits to it.)*

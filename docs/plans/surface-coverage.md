@@ -6,8 +6,9 @@ coverage"), which cannot run over history until this is fixed. Scope:
 `pricing/surface.py`, its tests, `coverage_audit`'s `vol_surface` check,
 a rebuild of `clean/vol_surface`, and the docs that describe the surface.
 
-Status: **decisions 1–6 resolved 2026-09-26; decision 7 (new, from step 3b)
-open. Steps 1–3 done; 3b built, and its measurement surfaced finding 7.**
+Status: **decisions 1–6 resolved 2026-09-26, 8 on 2026-09-27; decision 7
+reopened pending H's measurement. Steps 1–3 done; 3b and 3c (H) built;
+finding 7 corrected and finding 8 added 2026-09-27.**
 
 ---
 
@@ -142,16 +143,60 @@ parameters, so a refit under a narrower grid may land slightly elsewhere;
 step 6 measures the real outcome. 37 of the 95 also break Lee's asymptotic
 wing-slope bound, `b(1 + |ρ|) ≤ 2`, which only binds infinitely far out.
 
-**7. The unconstrained fit can stop in a poor local optimum, and the wide
-butterfly pad was hiding it.** *Found measuring step 3b.* With B and F
-together, SPXW fits in 280 of the 347 missing sessions (93.4% coverage
-before C), but 6 of the 30 previously good sessions in the check sample now
-fail SPXW (and 3 SPX), all on calendar crossings inside the data at
-`k ≈ 0.06–0.24`. Under B alone all 30 fit. Traced on 2022-11-29, expiry
-2022-12-07:
+**7. F's regressions are fits the old check should never have passed.**
+*Found measuring step 3b; corrected 2026-09-27.* With B and F together,
+SPXW fits in 280 of the 347 missing sessions (93.4% coverage before C), but
+6 of the 30 previously good sessions in the check sample now fail SPXW (and
+3 SPX), all on calendar crossings inside the data at `k ≈ 0.06–0.24`. Under
+B alone all 30 fit. Traced on 2022-11-29, expiry 2022-12-07, fit under its
+real calendar floor:
 
-| | fit kept | a | b | ρ | σ | rms |
-|---|---|---|---|---|---|---|
+| | fit kept | a | b | ρ | σ | rms | min g, exact |
+|---|---|---|---|---|---|---|---|
+| unconstrained | — (goes to repair) | 0.0004 | 0.022 | −0.999 | 0.061 | 4.3e-5 | −0.010 |
+| B alone | the repair's refit | 0.0004 | 0.021 | −0.999 | 0.059 | 4.4e-5 | −0.0004 |
+| B + F | the repair's refit | −0.750 | 0.392 | −0.162 | 1.942 | 1.04e-4 | ≥ 0 |
+
+The first version of this finding read the table the other way: that
+`least_squares` stopped in a poor basin that F's narrower check let through,
+and that the wide pad had rescued the better one. Tracing the fit showed
+the opposite. The unconstrained fit is in the low-rms basin and violates
+the butterfly condition under either pad, so both builds repair it. Under
+B alone the repair kept a fit in that basin that still prices a negative
+density, in a band at `k ≈ −0.176` to `−0.166` straddling the last quoted
+put. The flat pad's 201 points sat 0.011 apart and stepped over it (finding
+8). F's grid is five times denser over this slice, rejects that fit, and the
+best feasible refit is the wide parabola. Its right edge sits too high for
+the next expiry to clear inside the data, so the session fails at 12-08.
+
+So G, which proposed keeping the best of the two candidates, would not
+help: here both SLSQP starts are projected to the same flat anchor (the
+calendar floor, peaking at 0.0038, admits no nearer point on either
+segment), and both land in the parabola. Decision 7 waits on the
+measurement after H.
+
+**8. The butterfly check misses bands of negative density between its grid
+points.** *Found 2026-09-27, tracing finding 7.* The check evaluated g(k)
+at a fixed 201 points, whatever the range. Across the landed archive, on a
+reference grid at 2e-5 spacing:
+
+| | landed slices |
+|---|---|
+| all | 37,815 |
+| negative density inside their own strikes | **675** (607 SPXW), in 331 sessions |
+| of which inside the book (≤ 45 DTE) | 633 |
+| negative density within the old 1.0 pad | 22,936 |
+
+The worst are 2-day SPXW expiries, down to g = −0.0086 inside the data. A
+denser lattice alone does not close it: over each slice's F range, a 0.0025
+lattice still misses 97 of the 3,722 slices that violate there, 0.001
+misses 22, and 0.0005 misses 8. The last misses are near-tangent dips about
+0.001 wide (median g ≈ −5e-7), not tied to σ, so no fixed spacing is safe.
+Minimising g between the neighbours of each grid-local minimum finds all
+3,722 at the 0.0025 lattice, at 1.6 local minima per slice on average and
+3 at most.
+
+---|---|---|---|---|---|---|
 | B alone | the repair's refit | 0.0004 | 0.021 | −0.999 | 0.059 | 4.4e-5 |
 | B + F | the first fit | −0.750 | 0.392 | −0.162 | 1.942 | 1.04e-4 |
 
@@ -229,7 +274,20 @@ the guards. Deterministic, since the seeds are. The cost is an SLSQP solve
 per slice instead of only per violating slice, so fits get slower; step 6
 measures by how much. It changes the parameters of any slice where the
 repair's basin is better, including slices in sessions that fit today, so
-it lands before the rebuild like everything else here. **Decision 7.**
+it lands before the rebuild like everything else here. **Decision 7.** *Its premise did not survive tracing (finding 7,
+corrected): it does not recover the traced session. Built but not committed;
+kept or dropped on the step 6 numbers after H.*
+
+**H. Make the butterfly check exact over its range (finding 8).** Evaluate
+g on the `K_STEP` lattice across the padded range, plus both ends, instead
+of a fixed 201 points, and minimise g between the neighbours of every local
+minimum on it. The guard, the feasibility checks and the repair's seed
+projection all use that minimum. The constrained refit still constrains g
+at the lattice points, with its margin; a refit that dips below zero
+between them is infeasible and is not kept. This tightens the check rather
+than loosening it, so it will cost coverage before C recovers it, and it
+changes fits in sessions that land today, so it lands before the rebuild.
+**Decision 8.**
 
 What is *not* proposed: loosening the butterfly tolerance (`G_TOL`),
 raising the arbitrage repair budget, or holding a failed slice's parameters
@@ -316,6 +374,13 @@ standard deviations of its strikes is accepted; arbitrage inside that range
 is still rejected, and still repaired where the repair holds; a long slice's
 pad stays near today's.
 
+**Step 3c — H: exact butterfly check** in `_butterfly_grid`, `_min_g` and
+`_check_butterfly`. Tests: the grid is the lattice plus its ends; the
+2022-12-07 fit that stepped over the old grid is rejected; a real
+near-tangent dip that the grid's own points miss is rejected; on a clean
+smile the refined minimum matches a dense grid.
+**Built 2026-09-27.** Not yet measured on real sessions.
+
 **Step 4 — C: drop-a-slice.** Tests: a non-converging middle slice is
 dropped and the chain floors off its predecessor; a session whose every
 slice fails still raises; dropped book-tenor slices surface in the audit.
@@ -348,7 +413,7 @@ gap as a found-and-fixed entry), and `features-v0.md`'s blocked section.
 
 ---
 
-## Decisions — resolved 2026-09-26
+## Decisions — resolved 2026-09-26 and 2026-09-27
 
 1. **Per-root landing.** Land whichever roots fit; FAIL on missing SPXW,
    WARN on missing SPX? **Yes.**
@@ -369,8 +434,14 @@ gap as a found-and-fixed entry), and `features-v0.md`'s blocked section.
    `k`? **Yes, as F** (resolved 2026-09-26). It recovers about 81 of the 95
    SPXW butterfly failures, most of them inside the book, which C would
    otherwise drop and leave as holes in the features' grid.
-7. **Best-of-candidates fit (open).** Keep the lowest-RMS feasible fit across
+7. **Best-of-candidates fit (reopened).** Keep the lowest-RMS feasible fit across
    both starting points, rather than the first fit that passes (G)?
    *(Recommended: yes. Without it, F trades one kind of failure for another
    and keeps poor fits, and the alternative is reverting F and letting C drop
    the 95 SPXW slices, most of them inside the book.)*
+   *(2026-09-27: resolved yes, then reopened. Tracing the case it was for
+   showed the better fit prices a negative density (finding 7, corrected),
+   so G does not recover it. Revisit on step 6's numbers after H.)*
+8. **Exact butterfly check.** Check g between grid points, not only at them
+   (H), accepting that fits which only passed by aliasing will now fail and
+   fall to C? **Yes, as H** (resolved 2026-09-27).

@@ -91,6 +91,33 @@ def test_decision_log_required_nulls_fail() -> None:
     assert not any(c.name.startswith("ticker_") for c in checks)
 
 
+def test_every_vol_features_column_is_required() -> None:
+    """Complete or absent: the job writes no row rather than a null, so a
+    null anywhere means a malformed write. Pinned to the schema so a new
+    column cannot join the dataset without being classified."""
+    from marketdata.validate import REQUIRED_NONNULL
+
+    assert REQUIRED_NONNULL["vol_features"] == tuple(
+        f.name for f in SCHEMAS["vol_features"])
+
+
+def test_vol_features_null_fails() -> None:
+    schema = SCHEMAS["vol_features"]
+    rec = {f.name: None for f in schema} | {
+        "date": "2026-09-24", "underlying": "SPXW", "horizon": 5,
+        "t_years": 5 / 252, "daycount": "bus/252", "atm_vol": 0.14,
+        "atm_fwd_vol": 0.14, "skew": -0.4, "curvature": 1.5, "rv_ann_5": 0.12,
+        "rv_ann_22": 0.12, "fc_vol_ann": 0.13, "fc_log_rv_mean": -9.6,
+        "fc_log_rv_sd": 0.4, "vrp_var": 0.0027, "vrp_vol": 0.01, "vrp_z": 0.3,
+        "on_node": True, "exp_lo": "2026-10-01", "exp_hi": "2026-10-01",
+    }
+    rec["vrp_z"] = None
+    table = pa.Table.from_pylist([rec], schema=schema)
+    checks = validate_table(table, "vol_features")
+    assert next(c for c in checks if c.name == "required[vrp_z]").status == FAIL
+    assert next(c for c in checks if c.name == "required[atm_vol]").status == PASS
+
+
 def test_empty_table_fails() -> None:
     table = SCHEMAS["option_snapshots"].empty_table()
     checks = validate_table(table, "option_snapshots")

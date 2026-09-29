@@ -381,11 +381,28 @@ def test_flat_fallback_raises_when_no_feasible_seed_exists() -> None:
 # ---------------------------------------------------------------------------
 
 def _three_expiry_surface() -> sf.Surface:
-    """Flat slices at rising vols: calendar-clean, and w is known exactly."""
-    bars = (_chain_bars(NEAR, T_NEAR, lambda k: 0.16)
-            + _chain_bars(MID, T_MID, lambda k: 0.20)
-            + _chain_bars(FAR, T_FAR, lambda k: 0.24))
-    return sf.build_surfaces(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)["SPXW"]
+    """Flat slices at rising vols: calendar-clean, and w is known exactly.
+
+    Built from explicit flat Slices rather than a fit of synthetic flat
+    chains: the interpolation contract asserted below is exact, and perfectly
+    flat data is the SVI parameterisation's most degenerate case -- which of
+    the many equivalent near-flat optima the solver stops at depends on the
+    parameter bounds (fitting flat data once relied on a free ``m``), which
+    is the fitter's business, not interpolation's.
+    """
+    def flat_slice(expiry: date, t: float, vol: float) -> sf.Slice:
+        return sf.Slice(
+            expiration_date=expiry.isoformat(), dte=(expiry - DAY).days,
+            t_years=t, forward=F, a=vol * vol * t, b=0.0, rho=0.0, m=0.0,
+            sigma=0.1, k_min=math.log(STRIKES[0] / F), k_max=math.log(STRIKES[-1] / F),
+            n_strikes=len(STRIKES), rms_error=0.0, min_g=1.0, rate=R,
+            daycount="act/365",
+        )
+    return sf.Surface(DAY, "SPXW", [
+        flat_slice(NEAR, T_NEAR, 0.16),
+        flat_slice(MID, T_MID, 0.20),
+        flat_slice(FAR, T_FAR, 0.24),
+    ])
 
 
 def test_term_interpolation_is_exact_at_fitted_expiries() -> None:

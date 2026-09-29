@@ -239,6 +239,28 @@ def test_repair_is_deterministic() -> None:
     assert sf.fit_slice(ks, ws) == sf.fit_slice(ks, ws)
 
 
+# A smile whose center sits right of the quoted window: over the window the
+# curve is its left-wing asymptote, so the unconstrained optimum recovers the
+# center outside the data. This is the 2026-09-28 SPXW basin (m=+0.82 with
+# the last quote at k=0.057) that priced negative density in the wing.
+CENTER_BEYOND_QUOTES = {"a": 0.0002, "b": 0.3, "rho": 0.6, "m": 0.4, "sigma": 0.25}
+
+
+def test_m_cannot_escape_the_quoted_strikes() -> None:
+    """The m bound is what closes the spurious basin: data whose unconstrained
+    optimum parks the smile's center past the last quote must come back with
+    m inside the quoted range, still arbitrage-clean. Against the old [-3, 3]
+    m bounds this fit returns m ~= 0.39, so the test pins the regression."""
+    ks = np.linspace(-0.12, 0.06, 40)
+    ws = np.array([_true_w(float(k), CENTER_BEYOND_QUOTES) for k in ks])
+    # The premise: the generating center is genuinely outside the window, so
+    # the unconstrained optimum has somewhere to escape to.
+    assert CENTER_BEYOND_QUOTES["m"] > ks[-1]
+    fit = sf.fit_slice(ks, ws)
+    assert ks[0] <= fit.m <= ks[-1]
+    assert fit.min_g >= 0.0
+
+
 def test_interior_inconsistent_smile_fails_loud() -> None:
     """A smile no SVI curve can fit -- an interior notch pricing a negative
     butterfly spread at a quoted strike -- is not repairable wing noise: the

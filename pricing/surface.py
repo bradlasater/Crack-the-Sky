@@ -42,7 +42,11 @@ with ``scipy.optimize.least_squares`` over the five parameters. The domain
 constraint for non-negative total variance, ``a + b*sigma*sqrt(1-rho^2) >= 0``
 (that expression *is* the minimum of the curve), is enforced exactly by
 fitting that minimum ``w0`` in place of ``a`` under the box bound ``w0 >= 0``
-and recovering ``a`` afterwards. The seed is deterministic and data-derived
+and recovering ``a`` afterwards. ``m`` is additionally bounded to the quoted
+strikes: outside them the smile's center is unidentifiable, and a free ``m``
+is what lets the optimizer escape to a spurious positive-``rho`` basin whose
+extrapolated wing prices negative density (the 2026-09-28 SPXW near-dates).
+The seed is deterministic and data-derived
 -- minimum observed w, ATM k for m, wing slopes for b, rho = -0.5, sigma =
 0.1 -- so refitting the same slice reproduces the same parameters. The
 evaluation budget is raised to ``MAX_NFEV`` because real chains exhaust
@@ -459,8 +463,15 @@ def fit_slice(
         float(ks[np.argmin(np.abs(ks))]),  # m at the strike nearest F
         0.1,                               # sigma
     ])
-    lower = np.array([0.0, 0.0, -0.999, -3.0, 1e-4])
-    upper = np.array([10.0, 10.0, 0.999, 3.0, 5.0])
+    # m is bounded to the quoted strikes: outside them it is unidentifiable
+    # extrapolation, and a free m is where the spurious basin lives -- the
+    # 2026-09-28 SPXW near-dates had the unconstrained fit park m at +0.82
+    # with rho pinned at +0.98, a fit as good in-range as the sane smile but
+    # with a wing that prices negative density, and the repair machinery then
+    # accepted the same shape for the prior slice, whose inflated wing became
+    # an unsatisfiable calendar floor for the next.
+    lower = np.array([0.0, 0.0, -0.999, float(ks[0]), 1e-4])
+    upper = np.array([10.0, 10.0, 0.999, float(ks[-1]), 5.0])
     seed = np.clip(seed, lower, upper)
 
     def residuals(p: np.ndarray) -> np.ndarray:

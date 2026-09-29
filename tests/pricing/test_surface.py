@@ -239,6 +239,28 @@ def test_repair_is_deterministic() -> None:
     assert sf.fit_slice(ks, ws) == sf.fit_slice(ks, ws)
 
 
+# A smile whose center sits right of the quoted window: over the window the
+# curve is its left-wing asymptote, so the unconstrained optimum recovers the
+# center outside the data. This is the 2026-09-28 SPXW basin (m=+0.82 with
+# the last quote at k=0.057) that priced negative density in the wing.
+CENTER_BEYOND_QUOTES = {"a": 0.0002, "b": 0.3, "rho": 0.6, "m": 0.4, "sigma": 0.25}
+
+
+def test_m_cannot_escape_the_quoted_strikes() -> None:
+    """The m bound is what closes the spurious basin: data whose unconstrained
+    optimum parks the smile's center past the last quote must come back with
+    m inside the quoted range, still arbitrage-clean. Against the old [-3, 3]
+    m bounds this fit returns m ~= 0.39, so the test pins the regression."""
+    ks = np.linspace(-0.12, 0.06, 40)
+    ws = np.array([_true_w(float(k), CENTER_BEYOND_QUOTES) for k in ks])
+    # The premise: the generating center is genuinely outside the window, so
+    # the unconstrained optimum has somewhere to escape to.
+    assert CENTER_BEYOND_QUOTES["m"] > ks[-1]
+    fit = sf.fit_slice(ks, ws)
+    assert ks[0] <= fit.m <= ks[-1]
+    assert fit.min_g >= 0.0
+
+
 def test_interior_inconsistent_smile_fails_loud() -> None:
     """A smile no SVI curve can fit -- an interior notch pricing a negative
     butterfly spread at a quoted strike -- is not repairable wing noise: the
@@ -381,11 +403,28 @@ def test_flat_fallback_raises_when_no_feasible_seed_exists() -> None:
 # ---------------------------------------------------------------------------
 
 def _three_expiry_surface() -> sf.Surface:
-    """Flat slices at rising vols: calendar-clean, and w is known exactly."""
-    bars = (_chain_bars(NEAR, T_NEAR, lambda k: 0.16)
-            + _chain_bars(MID, T_MID, lambda k: 0.20)
-            + _chain_bars(FAR, T_FAR, lambda k: 0.24))
-    return sf.build_surfaces(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)["SPXW"]
+    """Flat slices at rising vols: calendar-clean, and w is known exactly.
+
+    Built from explicit flat Slices rather than a fit of synthetic flat
+    chains: the interpolation contract asserted below is exact, and perfectly
+    flat data is the SVI parameterisation's most degenerate case -- which of
+    the many equivalent near-flat optima the solver stops at depends on the
+    parameter bounds (fitting flat data once relied on a free ``m``), which
+    is the fitter's business, not interpolation's.
+    """
+    def flat_slice(expiry: date, t: float, vol: float) -> sf.Slice:
+        return sf.Slice(
+            expiration_date=expiry.isoformat(), dte=(expiry - DAY).days,
+            t_years=t, forward=F, a=vol * vol * t, b=0.0, rho=0.0, m=0.0,
+            sigma=0.1, k_min=math.log(STRIKES[0] / F), k_max=math.log(STRIKES[-1] / F),
+            n_strikes=len(STRIKES), rms_error=0.0, min_g=1.0, rate=R,
+            daycount="act/365",
+        )
+    return sf.Surface(DAY, "SPXW", [
+        flat_slice(NEAR, T_NEAR, 0.16),
+        flat_slice(MID, T_MID, 0.20),
+        flat_slice(FAR, T_FAR, 0.24),
+    ])
 
 
 def test_term_interpolation_is_exact_at_fitted_expiries() -> None:

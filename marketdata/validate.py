@@ -73,6 +73,31 @@ REQUIRED_NONNULL: dict[str, tuple[str, ...]] = {
         "vol_ann_p90",
         "n_train",
     ),
+    # Every column: a vol_features row is complete or absent, by construction
+    # in signals.vol_features. tests/marketdata/test_validate.py pins this
+    # tuple to the schema, so a new column has to be added here on purpose.
+    "vol_features": (
+        "date",
+        "underlying",
+        "horizon",
+        "t_years",
+        "daycount",
+        "atm_vol",
+        "atm_fwd_vol",
+        "skew",
+        "curvature",
+        "rv_ann_5",
+        "rv_ann_22",
+        "fc_vol_ann",
+        "fc_log_rv_mean",
+        "fc_log_rv_sd",
+        "vrp_var",
+        "vrp_vol",
+        "vrp_z",
+        "on_node",
+        "exp_lo",
+        "exp_hi",
+    ),
     "decision_log": (
         "decision_id",
         "session_date",

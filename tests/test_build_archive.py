@@ -15,7 +15,14 @@ from pathlib import Path
 import pytest
 
 from ingest.common.config import Settings
-from pricing.surface import SurfaceArbitrageError
+from pricing.surface import SessionBuild, SurfaceArbitrageError
+
+
+class _Landed:
+    """Stands in for a fitted Surface: the script reads only what it dropped."""
+
+    dropped = ()
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SESSIONS = ["2026-08-26", "2026-08-27", "2026-08-28"]
@@ -56,11 +63,19 @@ def _install(mod, monkeypatch, tmp_path, behaviour):
         what = behaviour(d)
         if isinstance(what, BaseException):
             raise what
-        if what == "empty":
-            return {} if is_surface else []
-        return {"SPXW": object()} if is_surface else [{"underlying": "SPXW"}]
+        if not is_surface:
+            return [] if what == "empty" else [{"underlying": "SPXW"}]
+        # The surface script goes through build_session, which reports a
+        # root's failure beside the roots that landed instead of raising.
+        failed = {"SPX": "SurfaceArbitrageError: calendar arbitrage: test"}
+        return {
+            "empty": SessionBuild({}, {}),
+            "spx_failed": SessionBuild({"SPXW": _Landed()}, failed),
+            "all_failed": SessionBuild(
+                {}, {**failed, "SPXW": "SurfaceError: SVI fit did not converge"}),
+        }.get(what, SessionBuild({"SPXW": _Landed()}, {}))
 
-    monkeypatch.setattr(mod, "build_for_date", fake_build)
+    monkeypatch.setattr(mod, "build_session" if is_surface else "build_for_date", fake_build)
     if is_surface:
         monkeypatch.setattr(mod, "rows_from_surfaces", lambda _s: [{"underlying": "SPXW"}])
 
@@ -135,3 +150,36 @@ def test_missing_calendar_fails(archive, tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(archive.Settings, "load", lambda: _settings(tmp_path))
     monkeypatch.setattr(archive, "load_calendar", lambda _root: {})
     assert archive.main([]) == 1
+
+
+def _surface_archive():  # noqa: ANN202
+    return _load("build_surface.py")
+
+
+def test_surface_session_with_a_failed_root_is_still_written(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """SPXW lands even when SPX fails, and the run says which root failed."""
+    mod = _surface_archive()
+    calls, written = _install(
+        mod, monkeypatch, tmp_path,
+        lambda d: "spx_failed" if d.isoformat() == "2026-08-27" else "ok")
+    assert mod.main([]) == 0
+    assert [d.isoformat() for d in written] == SESSIONS
+    captured = capsys.readouterr()
+    assert "2026-08-27 SPX FAILED SurfaceArbitrageError" in captured.err
+    assert "(1 with a root failed, 0 slices dropped)" in captured.out
+
+
+def test_surface_session_with_every_root_failed_is_a_failure(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    mod = _surface_archive()
+    calls, written = _install(
+        mod, monkeypatch, tmp_path,
+        lambda d: "all_failed" if d.isoformat() == "2026-08-27" else "ok")
+    assert mod.main([]) == 1
+    assert [d.isoformat() for d in written] == ["2026-08-26", "2026-08-28"]
+    captured = capsys.readouterr()
+    assert "2026-08-27 SPXW FAILED SurfaceError" in captured.err
+    assert "1 failed" in captured.out

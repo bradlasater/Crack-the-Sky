@@ -4,20 +4,22 @@ Build plan for `PLAN.md` Week 1 item 2. Written 2026-09-06 against `main` at
 `8c4a422`. Scope: make time-to-expiry trading-day aware, before the HAR-RV
 forecast (item 4) and the event replay (item 7) bake ACT/365 in deeper.
 
-Status: **steps 1–3 landed and the daycount swap is done; the `blas_threads`
-recut is landed in code, and its staging rebuild + swap is the remaining owner
-operation.** Production `clean/atm_term_structure` and `clean/vol_surface`
-were swapped to the stamped hybrid archive on 2026-09-07; the pre-swap ACT/365
-trees are retained as `clean/atm_term_structure.act365` and
-`clean/vol_surface.act365`. The *code* now also stamps `blas_threads` on every
-`vol_surface` row it writes (finding 7 — the fit is reproducible only while
-the pinned thread count is recorded with the row). No production partition
-carries that column yet: the schema is fail-loud on a missing column, so
-every production `vol_surface` partition is unreadable under the new code
-until the decision-5 procedure runs a second time for the recut —
-see "Second pass" under decision 5. `atm_term_structure` needs no second pass:
-it is a scalar Brent inversion with no BLAS underneath, so there is no thread
-count to record.
+Status: **steps 1–3 landed; both production swaps are done.** The daycount
+swap ran on 2026-09-07. The `blas_threads` recut ran on 2026-09-08: the
+archive was rebuilt at the pinned 8 threads and swapped in, so every
+production `vol_surface` partition carries the stamp (660 of today's
+partitions are that rebuild's files). The `.act365` and `.pre-blas-stamp`
+rollback trees have since been deleted. `atm_term_structure` needed no second
+pass: it is a scalar Brent inversion with no BLAS underneath, so there is no
+thread count to record.
+
+The one exception was 2026-09-14. `repair.sh` rewrote that session by hand
+on 2026-09-19, outside `cronjob.sh`, and its 60 rows landed unpinned (null
+`blas_threads`). It was refit under the pin on 2026-09-26: the same 60 slices,
+every SVI parameter bit-for-bit unchanged, so only the stamp moved. The
+archive has no unpinned rows left.
+
+What remains open is step 4 (the live path), gated on decision 2.
 
 Three things had already cleared before this cutover: the BLAS thread pin
 (finding 7) makes the archive reproducible enough to diff a rebuild against,
@@ -258,8 +260,7 @@ blocks the default flip.
    were (a) merge then rebuild in place, accepting a multi-hour window where
    every reader raises, and (c) drop the stamp and lose the ability to tell
    the conventions apart; (a) degrades the box for the duration and (c) is the
-   silent mixing this plan exists to prevent. The remaining owner action is
-   the rename itself.
+   silent mixing this plan exists to prevent.
 
    Procedure (do not run the swap while `term_structure` / `surface` /
    `coverage_audit` / `prune` can fire; those are Tue–Sat 12:00–12:30 ET,
@@ -293,7 +294,8 @@ blocks the default flip.
 
    **Executed 2026-09-07** for the daycount schema, exactly as above.
 
-   **Second pass — the `blas_threads` recut (owner operation, pending).**
+   **Second pass — the `blas_threads` recut. Executed 2026-09-08.** The
+   checklist below is kept as the record of how it was run.
 
    **The count moved from 1 to 8 (2026-09-08), and production's existing
    archive turns out to be unpinned.** The first pass ran with the pin already
@@ -315,8 +317,8 @@ blocks the default flip.
    the fallback the line happened to carry. The pin is now 8 in
    `scripts/cronjob.sh`, `scripts/build_surface.py` and
    `scripts/build_rv_forecast.py`, with `tests/test_thread_pin.py` asserting
-   all three agree -- `rv_forecast` has no `blas_threads` column, so a drift
-   between its rebuild script and the scheduled job would mix silently.
+   all three agree. (`rv_forecast` gained its own `blas_threads` stamp and a
+   pinned scheduled writer on 2026-09-25, PR #86.)
    `vol_surface` gained a `blas_threads` column (the pinned BLAS thread count
    the fit ran under; null when unpinned). Because
    `catalog.validate_arrow_schema` is fail-loud on missing *and* extra columns
@@ -516,7 +518,7 @@ The two tests worth keeping in mind for step 3 are
 must move `t_years` to sessions/252 and must leave every tenor handed to
 `rate_fn` on ACT/365.
 
-**Step 3 — business-day T on the day-bar path. — LANDED (staging rebuild; production swap pending).**
+**Step 3 — business-day T on the day-bar path. — DONE (production swapped 2026-09-07).**
 
 `DEFAULT_DAYCOUNT` is the hybrid. `build_for_date` binds `hybrid_for(settings.data_root)`
 so a staging warehouse is not priced on the box calendar. Every landed

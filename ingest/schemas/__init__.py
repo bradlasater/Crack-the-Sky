@@ -348,6 +348,36 @@ def _build_schemas() -> dict[str, Any]:
         pa.field("blas_threads", pa.int64()),      # BLAS pin the fit ran under; null = unpinned
     ]
 
+    # One row per (date, horizon): the SPXW surface read at constant maturity
+    # beside SPY realised vol and the rv_forecast row for the same horizon,
+    # plus the variance risk premium between them (docs/plans/features-v0.md).
+    # horizon is rv_forecast's session grid, so t_years = horizon / 252 lands
+    # on the same sessions the forecast averages over. Every column is
+    # required: a tenor with a missing input gets no row, never a row of
+    # nulls. Inputs are session d's close, so a row is usable from d+1.
+    vol_features_fields = [
+        pa.field("date", pa.string()),             # session d; inputs are d's close
+        pa.field("underlying", pa.string()),       # surface root: SPXW
+        pa.field("horizon", pa.int64()),           # tenor in sessions: 3/5/10/21/32
+        pa.field("t_years", pa.float64()),         # horizon / 252
+        pa.field("daycount", pa.string()),         # 'bus/252'
+        pa.field("atm_vol", pa.float64()),         # sqrt(w(0, T) / T)
+        pa.field("atm_fwd_vol", pa.float64()),     # forward ATM vol from the previous tenor
+        pa.field("skew", pa.float64()),            # d sigma / dk at k = 0
+        pa.field("curvature", pa.float64()),       # d2 sigma / dk2 at k = 0
+        pa.field("rv_ann_5", pa.float64()),        # trailing 5-session SPY realised vol
+        pa.field("rv_ann_22", pa.float64()),       # trailing 22-session SPY realised vol
+        pa.field("fc_vol_ann", pa.float64()),      # rv_forecast.vol_ann, same horizon
+        pa.field("fc_log_rv_mean", pa.float64()),  # rv_forecast.log_rv_mean
+        pa.field("fc_log_rv_sd", pa.float64()),    # rv_forecast.log_rv_sd
+        pa.field("vrp_var", pa.float64()),         # atm_vol^2 - fc_vol_ann^2
+        pa.field("vrp_vol", pa.float64()),         # atm_vol - fc_vol_ann
+        pa.field("vrp_z", pa.float64()),           # implied daily var in forecast sd units
+        pa.field("on_node", pa.bool_()),           # tenor landed on a fitted expiry
+        pa.field("exp_lo", pa.string()),           # bracketing expiries; equal on a node
+        pa.field("exp_hi", pa.string()),
+    ]
+
     # One row per decision event (entry / exit / roll / no-trade). Append-only:
     # never quarantine, never as-of (last file would hide earlier events).
     # Nested inputs / signal values / extra version pins are JSON objects,
@@ -377,6 +407,7 @@ def _build_schemas() -> dict[str, Any]:
         "vol_surface": pa.schema(vol_surface_fields),
         "spy_spot": pa.schema(spy_spot_fields),
         "rv_forecast": pa.schema(rv_forecast_fields),
+        "vol_features": pa.schema(vol_features_fields),
         "decision_log": pa.schema(decision_log_fields),
         "contracts": contracts_schema,
         "contracts_expired": contracts_schema,  # same schema as contracts

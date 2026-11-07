@@ -287,3 +287,40 @@ def test_on_calendar_fires_at_the_same_instants_as_cron(unit: dict) -> None:
         assert actual == expected, (
             f"{unit['unit']}: cron {cron_expr!r} and on_calendar {cal_expr!r} diverge"
         )
+
+
+# Jobs that read what flatfile_pull lands (option_day_bars, the manifest).
+FLATFILE_DOWNSTREAM = ("term_structure", "surface", "coverage_audit")
+
+
+def _first_fire(unit: dict) -> datetime:
+    (spec,) = unit["on_calendar"]
+    hh, mm, ss = (int(x) for x in spec.split()[-1].split(":"))
+    return datetime.combine(date(2026, 11, 4), time(hh, mm, ss))
+
+
+def _last_start(unit: dict, first_run_ends: datetime | None = None) -> datetime:
+    """Latest start the restart budget allows: burst starts, sec apart, the
+    first restart counted from when the first run exits."""
+    r = unit["restart"]
+    end = first_run_ends or _first_fire(unit)
+    return end + timedelta(seconds=r["sec"] * (r.get("burst", 3) - 1))
+
+
+def test_flatfile_downstream_retries_outlast_flatfile_pull() -> None:
+    """On 2026-11-04 flatfile_pull landed the late Nov 3 aggs on its 12:30
+    retry, but term_structure / surface / coverage_audit had spent a 120s x 3
+    budget by ~12:36: the session kept no vol_surface or atm_term_structure.
+    Each downstream job's last retry must land after flatfile_pull's last."""
+    from ingest.jobs.flatfile_pull import RETRY_UNTIL_ET
+
+    by_job = {u["job"]: u for u in UNITS if u.get("healthchecks")}
+    ff = by_job["flatfile_pull"]
+    # The first flatfile_pull run waits in-job until the cutoff before failing.
+    ff_last = _last_start(ff, datetime.combine(date(2026, 11, 4), RETRY_UNTIL_ET))
+    for job in FLATFILE_DOWNSTREAM:
+        last = _last_start(by_job[job])
+        assert last > ff_last, (
+            f"{job}: last retry {last:%H:%M} does not outlast "
+            f"flatfile_pull's last retry {ff_last:%H:%M}"
+        )

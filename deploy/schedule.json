@@ -1,5 +1,5 @@
 {
-  "$comment": "The one canonical job schedule. Ansible reads this with include_vars and templates the systemd user timers from it (deploy/ansible/templates/), scripts/setup_healthchecks.py reads the healthchecks blocks, and the cron forms are kept as the readable statement of each schedule. Every entry carries the schedule twice -- cron and on_calendar -- and tests/test_schedule.py asserts the two fire at the same instants. Nothing installs the cron column any more (the pre-timer crontab was removed 2026-09-10); it stays because 'Mon-Fri 10..15:00..59:00' is not a string anyone reads correctly on sight and '* 10-15 * * 1-5' is, so it is the oracle a mistyped OnCalendar gets caught against. Times are America/New_York wall clock (the box's system timezone; OnCalendar always fires in local time). Units whose job shares a name with another unit (the --expired / --eod passes) share that job's lock and Healthchecks check, so they carry no healthchecks block of their own. restart: null means the unit gets no Restart= line -- pointless when the next tick is seconds away. restart.burst and restart.interval_sec are optional and default to 3 and 1800; interval_sec must exceed burst x sec or the start limit never trips and the unit restarts forever instead of failing and alerting. flatfile_pull carries a wide budget on purpose: a dataset the vendor publishes after the 12:00 ET in-job cutoff now fails the run, and 8 starts 1800s apart carry the 11:05 fire through ~15:30 before the 9th trips the limit and alerts. rates_sync is Mon-Fri, not Tue-Sat like the T-1 morning jobs it sits between: it is not a T-1 job at all -- it fetches the latest published curve and stamps it with the run date -- so a Saturday fire only ever hit run_job's market gate and exited 0 having landed nothing (2026-09-19 logged job_start and no job_end), while the missing Monday run left everything priced that day discounting off a curve 3 trading days old. JSON, not YAML, so both Ansible and the Python stdlib read it with no new dependency.",
+  "$comment": "The one canonical job schedule. Ansible reads this with include_vars and templates the systemd user timers from it (deploy/ansible/templates/), scripts/setup_healthchecks.py reads the healthchecks blocks, and the cron forms are kept as the readable statement of each schedule. Every entry carries the schedule twice -- cron and on_calendar -- and tests/test_schedule.py asserts the two fire at the same instants. Nothing installs the cron column any more (the pre-timer crontab was removed 2026-09-10); it stays because 'Mon-Fri 10..15:00..59:00' is not a string anyone reads correctly on sight and '* 10-15 * * 1-5' is, so it is the oracle a mistyped OnCalendar gets caught against. Times are America/New_York wall clock (the box's system timezone; OnCalendar always fires in local time). Units whose job shares a name with another unit (the --expired / --eod passes) share that job's lock and Healthchecks check, so they carry no healthchecks block of their own. restart: null means the unit gets no Restart= line -- pointless when the next tick is seconds away. restart.burst and restart.interval_sec are optional and default to 3 and 1800; interval_sec must exceed burst x sec or the start limit never trips and the unit restarts forever instead of failing and alerting. flatfile_pull carries a wide budget on purpose: a dataset the vendor publishes after the 12:00 ET in-job cutoff now fails the run, and 8 starts 1800s apart carry the 11:05 fire through ~15:30 before the 9th trips the limit and alerts. term_structure, surface and coverage_audit read what flatfile_pull lands, so their retries must outlast its last one: on 2026-11-04 the Nov 3 minute/day aggs published after the cutoff, flatfile_pull landed them on its 12:30 retry, but the three downstream jobs had already spent a 120s x 3 budget by ~12:36 and the day was left with no vol_surface or atm_term_structure until rebuilt by hand. They now carry 9 starts 1800s apart, so each one's last retry (16:00, 16:15, 16:30) lands after flatfile_pull's last (~15:30); tests/test_schedule.py asserts that ordering. rates_sync is Mon-Fri, not Tue-Sat like the T-1 morning jobs it sits between: it is not a T-1 job at all -- it fetches the latest published curve and stamps it with the run date -- so a Saturday fire only ever hit run_job's market gate and exited 0 having landed nothing (2026-09-19 logged job_start and no job_end), while the missing Monday run left everything priced that day discounting off a curve 3 trading days old. JSON, not YAML, so both Ansible and the Python stdlib read it with no new dependency.",
   "units": [
     {
       "job": "contracts_sync",
@@ -152,7 +152,7 @@
       "cron": ["00 12 * * 2-6"],
       "on_calendar": ["Tue-Sat 12:00:00"],
       "healthchecks": {"schedule": "0 12 * * 2-6", "grace_min": 120, "desc": "ATM vol term structure from T-1 day bars (derived, rebuildable)"},
-      "restart": {"sec": 120}
+      "restart": {"sec": 1800, "burst": 9, "interval_sec": 21600}
     },
     {
       "job": "spy_spot",
@@ -179,7 +179,7 @@
       "cron": ["15 12 * * 2-6"],
       "on_calendar": ["Tue-Sat 12:15:00"],
       "healthchecks": {"schedule": "15 12 * * 2-6", "grace_min": 120, "desc": "SVI vol surface from T-1 day bars (derived, rebuildable)"},
-      "restart": {"sec": 120}
+      "restart": {"sec": 1800, "burst": 9, "interval_sec": 21600}
     },
     {
       "job": "coverage_audit",
@@ -188,7 +188,7 @@
       "cron": ["30 12 * * 2-6"],
       "on_calendar": ["Tue-Sat 12:30:00"],
       "healthchecks": {"schedule": "30 12 * * 2-6", "grace_min": 180, "desc": "Did yesterday actually land? Fails loudly if not"},
-      "restart": {"sec": 120}
+      "restart": {"sec": 1800, "burst": 9, "interval_sec": 21600}
     },
     {
       "job": "history_audit",

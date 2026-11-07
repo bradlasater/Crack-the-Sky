@@ -66,14 +66,33 @@ always exists on that segment -- because SLSQP started infeasible slides to
 the degenerate flat slice instead of the good feasible fit next to the data.
 The feasible candidate with the lower cost wins.
 
+**How far past the strikes.** The guard grid pads each slice's strike range
+by three of its own standard deviations (``sqrt`` of its smallest observed
+total variance), capped at 1.0 in ``k``. A flat 1.0 checked a 3-day expiry
+dozens of standard deviations past any price, and rejected smiles whose only
+arbitrage was in that extrapolation (docs/plans/surface-coverage.md, fix F);
+the cap keeps a long-dated slice's check where it was. Nothing is promised
+further out than the pad.
+
+**Between the grid points too.** The check evaluates g on the ``K_STEP``
+lattice over that range, then minimises it between the neighbours of every
+local minimum, so a negative-density band narrower than the spacing is
+still found. A fixed 201 points under the flat pad sat ~0.011 apart and let
+675 landed slices through with negative density inside their own strikes
+(docs/plans/surface-coverage.md, finding 8, fix H).
+
 **The calendar guard is chained through the build the same way.** Real day
 bars carry small genuine calendar inversions -- the raw ATM curve itself
 crosses on these sessions -- so the build fits slices in expiry order and a
-slice whose unconstrained fit dips below its predecessor's total variance on
-the calendar guard's union grid is refit with ``w(k) >= w_prev(k)`` on that
-grid as a second hard constraint. The union grid is known before any fitting
-(filtering and eligibility are data-determined), so the constraint covers
-exactly the domain :class:`Surface` re-checks afterwards.
+slice whose unconstrained fit dips below an earlier slice's total variance
+is refit with ``w(k) >= w_floor(k)`` as a second hard constraint. Both the
+constraint and the :class:`Surface` guard compare two slices only where both
+were fit to prices -- the overlap of their strike ranges -- and compare every
+pair, not only neighbours. They used to compare neighbours on the union of
+every expiry's range, which the LEAPS set, so short expiries were judged far
+out in extrapolated wings: 97% of the 190 calendar rejections measured on
+2026-09-26 sat at ``|k| > 0.5`` (docs/plans/surface-coverage.md, finding 3). The surface therefore makes no
+calendar promise in a wing no price was observed in.
 
 **Repairs must still explain the slice.** A constrained refit is accepted
 only while its rms stays within ``REPAIR_MAX_REL_RMS`` of the mean total
@@ -84,6 +103,14 @@ constrained refit -- or whose only feasible refits are rejected by that bound
 (per-slice butterfly in :func:`fit_slice`, cross-slice calendar in
 :class:`Surface`): a genuinely broken smile, not noise. Fail-loud is kept;
 what changed is that noise is repaired, not fatal.
+
+**A slice that cannot be fit is dropped, not the root.** The build catches a
+slice's failure -- no convergence, butterfly arbitrage even after repair, or
+a calendar floor it cannot clear -- records it on :attr:`Surface.dropped`
+and continues the chain from the slices it kept, so everything that lands
+passed the same guards. A root that keeps no slice still raises. The job
+logs each drop and ``coverage_audit`` WARNs on one inside the book
+(docs/plans/surface-coverage.md, fix C).
 
 **Evaluation.** :meth:`Surface.vol` interpolates *linearly in total variance*
 between the bracketing expiries -- the arb-preserving choice -- each slice at
@@ -115,7 +142,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from scipy.optimize import Bounds, NonlinearConstraint, least_squares, minimize
+from scipy.optimize import Bounds, NonlinearConstraint, least_squares, minimize, minimize_scalar
 
 from ingest.common import landing, market_gate
 from ingest.common.cli import run_job
@@ -160,15 +187,40 @@ MAX_NFEV = 5000
 # noise (see the module docstring). 3e-5 is ~$0.23 at F ~ 7700.
 MIN_TIME_VALUE_FRAC = 3e-5
 
-# Butterfly guard grid: g(k) is checked this far (in k) past the quoted
-# strikes. Calendar comparison shares the grid resolution.
+# Butterfly guard grid: g(k) is checked past the quoted strikes by
+# G_PAD_SD of the slice's own standard deviations -- sqrt of its smallest
+# observed total variance -- and never further than G_PAD. A flat pad of 1.0
+# in k was, for a 3-day expiry, a check out to strikes at 32% and 286% of the
+# forward, dozens of standard deviations past any price; 83 of the 95 SPXW
+# butterfly failures measured on 2026-09-26 had no arbitrage inside their
+# strikes at all (docs/plans/surface-coverage.md, finding 6, fix F). Capping
+# at the old pad means this can only narrow the check, never widen it.
+#
+# The grid is the K_STEP lattice over that range, not a fixed point count,
+# and the guard then minimises g between lattice points around each local
+# minimum (_min_g). A fixed 201 points spaced ~0.011 apart under the flat
+# pad, and stepped over negative-density bands about 0.01 wide: 675 landed
+# slices, 633 of them inside the book, price a negative density inside their
+# own strikes (docs/plans/surface-coverage.md, finding 8, fix H). No lattice
+# alone closes it -- the last misses are near-tangent dips ~0.001 wide -- so
+# the refinement is what makes the check exact.
 G_PAD = 1.0
-G_POINTS = 201
+G_PAD_SD = 3.0
 G_TOL = 1e-8
 # The constrained refit is required to beat zero by this margin so the
 # guard's G_TOL check afterwards passes comfortably.
 G_REPAIR_MARGIN = 1e-6
 CAL_TOL = 1e-10
+# The calendar floor and the calendar guard evaluate total variance only at
+# multiples of this step in k. Sharing one lattice is what makes them agree:
+# a slice fit to clear the floor at a set of points is then checked at
+# exactly those points. Sampling the two on different grids finds hairline
+# crossings between one grid's points that the other never constrained --
+# on 2026-09-26 that was 1,106 of the 1,346 landed root-surfaces, with drops
+# of 1e-7 to 6e-6 in total variance. 0.0025 in k is about a tenth of a
+# 1-day expiry's standard deviation, and puts ~900 points across the widest
+# SPXW session.
+K_STEP = 0.0025
 
 # A repair is accepted only when it still explains the slice: rms within this
 # multiple of the mean total variance. Past it, the arbitrage is in the data
@@ -177,6 +229,9 @@ CAL_TOL = 1e-10
 # whose data is itself arbitrageable (the calendar test's flat 0.30 vs 0.10
 # slices) needs ~1.2 and is rejected.
 REPAIR_MAX_REL_RMS = 0.5
+# How many times a constrained refit that ends with g dipping between its
+# constrained points adds the dip and resumes (see _repair_fit).
+REPAIR_EXCHANGES = 5
 
 
 class SurfaceError(RuntimeError):
@@ -237,28 +292,140 @@ def _g(k: np.ndarray, a: float, b: float, rho: float, m: float, sigma: float) ->
     return (1.0 - k * dw / (2.0 * w)) ** 2 - (dw * dw / 4.0) * (1.0 / w + 0.25) + d2w / 2.0
 
 
-def _butterfly_grid(k_lo: float, k_hi: float) -> np.ndarray:
-    """The padded k-grid the butterfly guard and the constrained refit share."""
-    return np.linspace(k_lo - G_PAD, k_hi + G_PAD, G_POINTS)
+def _lattice(k_lo: float, k_hi: float) -> np.ndarray:
+    """The ``K_STEP`` lattice points in ``[k_lo, k_hi]``, bit-identical across calls."""
+    n_lo = math.ceil(k_lo / K_STEP)
+    n_hi = math.floor(k_hi / K_STEP)
+    return np.arange(n_lo, n_hi + 1, dtype=float) * K_STEP
+
+
+def _overlap(a_lo: float, a_hi: float, b_lo: float, b_hi: float) -> tuple[float, float] | None:
+    """The k-range two fitted slices both have data on, or None if disjoint."""
+    lo, hi = max(a_lo, b_lo), min(a_hi, b_hi)
+    return (lo, hi) if lo < hi else None
+
+
+def _calendar_floor(
+    k_lo: float, k_hi: float, earlier: list[Any]
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Where a new slice must clear the slices before it, and by how much.
+
+    The calendar condition -- total variance non-decreasing in T at fixed k --
+    is only enforced where both slices were fit to prices. For each
+    ``K_STEP`` lattice point in the new slice's own strike range, the floor is the highest total variance
+    of any earlier slice whose strikes also reach that point; points no
+    earlier slice covers carry no constraint and are dropped. Returns
+    ``(grid, w_floor)``, or None when no earlier slice overlaps at all.
+
+    This replaced a floor on the union of every expiry's range, evaluated off
+    the predecessor alone (docs/plans/surface-coverage.md, fix B): that grid
+    is set by the LEAPS, so a short expiry was held to its predecessor's
+    extrapolated wing far past either one's data, and a middle slice could
+    not vouch for two slices that overlap where it does not.
+    """
+    grid = _lattice(k_lo, k_hi)
+    floor = np.full(grid.shape, -np.inf)
+    for s in earlier:
+        covered = (grid >= s.k_min) & (grid <= s.k_max)
+        if covered.any():
+            floor[covered] = np.maximum(
+                floor[covered], _svi_w(grid[covered], s.a, s.b, s.rho, s.m, s.sigma)
+            )
+    keep = np.isfinite(floor)
+    if not keep.any():
+        return None
+    return grid[keep], floor[keep]
+
+
+def _check_floor(sl: Any, grid: np.ndarray, w_floor: np.ndarray) -> None:
+    """SurfaceArbitrageError when a fitted slice dips below its calendar floor.
+
+    The same comparison :class:`Surface` makes afterwards, on the same lattice
+    points, made here so the build can drop the one slice rather than the
+    root. Reachable when the constrained refit could not clear the floor
+    within ``REPAIR_MAX_REL_RMS``: the crossing is in the data.
+    """
+    diff = _svi_w(grid, sl.a, sl.b, sl.rho, sl.m, sl.sigma) - w_floor
+    i = int(np.argmin(diff))
+    if float(diff[i]) < -CAL_TOL:
+        raise SurfaceArbitrageError(
+            f"calendar arbitrage: total variance drops {-float(diff[i]):.6g} at "
+            f"k={float(grid[i]):.4f} below the slices before {sl.expiration_date}"
+        )
+
+
+def _butterfly_pad(ws: Any) -> float:
+    """How far past its strikes a slice's butterfly condition is checked.
+
+    ``G_PAD_SD`` standard deviations of the slice, taking ``sqrt(min w)`` over
+    its observed total variances as the standard deviation in ``k`` -- known
+    before the fit, so the grid stays fixed through the constrained refit --
+    and capped at ``G_PAD``.
+    """
+    w_min = float(np.min(np.asarray(ws, dtype=float)))
+    return min(G_PAD, G_PAD_SD * math.sqrt(max(w_min, 0.0)))
+
+
+def _butterfly_grid(k_lo: float, k_hi: float, pad: float = G_PAD) -> np.ndarray:
+    """The padded k-grid the butterfly guard and the constrained refit share.
+
+    The ``K_STEP`` lattice inside ``[k_lo - pad, k_hi + pad]`` plus both
+    ends, so the check reaches exactly as far as the pad says.
+    """
+    lo, hi = k_lo - pad, k_hi + pad
+    return np.unique(np.concatenate([[lo], _lattice(lo, hi), [hi]]))
+
+
+def _argmin_g_svi(
+    grid: np.ndarray, a: float, b: float, rho: float, m: float, sigma: float,
+) -> tuple[float, float]:
+    """Smallest g(k) over the grid's range, not only at its points, and where.
+
+    Evaluates the grid, then minimises g between the neighbours of every
+    local minimum on it: a negative-density band narrower than the spacing
+    sits inside the bracket of the nearest grid minimum. Deterministic.
+    """
+    g = _g(grid, a, b, rho, m, sigma)
+    i0 = int(np.argmin(g))
+    best, where = float(g[i0]), float(grid[i0])
+    n = len(grid)
+    if n < 3:
+        return best, where
+    interior = np.flatnonzero((g[1:-1] <= g[:-2]) & (g[1:-1] <= g[2:])) + 1
+    for i in sorted({*interior.tolist(), i0}):
+        lo, hi = float(grid[max(i - 1, 0)]), float(grid[min(i + 1, n - 1)])
+        res = minimize_scalar(
+            lambda k: float(_g(np.array([k]), a, b, rho, m, sigma)[0]),
+            bounds=(lo, hi), method="bounded", options={"xatol": 1e-10},
+        )
+        if float(res.fun) < best:
+            best, where = float(res.fun), float(res.x)
+    return best, where
+
+
+def _min_g_svi(grid: np.ndarray, a: float, b: float, rho: float, m: float, sigma: float) -> float:
+    """Smallest g(k) over the grid's range; see :func:`_argmin_g_svi`."""
+    return _argmin_g_svi(grid, a, b, rho, m, sigma)[0]
 
 
 def _min_g(grid: np.ndarray, p: np.ndarray) -> float:
-    """Smallest g(k) on the grid for fit parameters (w0, b, rho, m, sigma)."""
+    """:func:`_min_g_svi` for fit parameters (w0, b, rho, m, sigma)."""
     w0, b, rho, m, sigma = (float(v) for v in p)
     a = w0 - b * sigma * math.sqrt(1.0 - rho * rho)
-    return float(np.min(_g(grid, a, b, rho, m, sigma)))
+    return _min_g_svi(grid, a, b, rho, m, sigma)
 
 
 def _check_butterfly(
-    a: float, b: float, rho: float, m: float, sigma: float, k_lo: float, k_hi: float
+    a: float, b: float, rho: float, m: float, sigma: float, k_lo: float, k_hi: float,
+    pad: float = G_PAD,
 ) -> float:
-    """Min of g(k) on the padded grid; SurfaceArbitrageError when negative."""
-    grid = _butterfly_grid(k_lo, k_hi)
-    min_g = float(np.min(_g(grid, a, b, rho, m, sigma)))
+    """Min of g(k) over the padded range; SurfaceArbitrageError when negative."""
+    grid = _butterfly_grid(k_lo, k_hi, pad)
+    min_g = _min_g_svi(grid, a, b, rho, m, sigma)
     if min_g < -G_TOL:
         raise SurfaceArbitrageError(
             f"butterfly arbitrage: min g(k) = {min_g:.6g} over "
-            f"[{k_lo - G_PAD:.3f}, {k_hi + G_PAD:.3f}] for "
+            f"[{k_lo - pad:.3f}, {k_hi + pad:.3f}] (strikes [{k_lo:.3f}, {k_hi:.3f}]) for "
             f"a={a:.6g} b={b:.6g} rho={rho:.4f} m={m:.4f} sigma={sigma:.4f}"
         )
     return min_g
@@ -346,13 +513,22 @@ def _repair_fit(
     """Constrained refit: same objective, plus the guards as hard constraints.
 
     Butterfly: g(k) >= G_REPAIR_MARGIN on this slice's padded guard grid.
-    Calendar (when the build path chains a previous slice): w(k) >= w_prev(k)
-    on the calendar guard's union grid. Runs SLSQP (analytic objective
+    Calendar (when the build path chains earlier slices): w(k) >= w_floor(k)
+    on ``cal_grid``, the points of this slice's strike range that an earlier
+    slice's strikes also reach (:func:`_calendar_floor`). Runs SLSQP (analytic objective
     Jacobian, 3-point finite-difference constraint Jacobian) from the
     feasibility-projected unconstrained optimum and the feasibility-projected
     data seed, and keeps the feasible candidate with the lower cost. Returns
     None when neither run reaches feasibility -- :func:`fit_slice` then lets
     the post-fit guards raise.
+
+    SLSQP constrains g only at the grid's points, and the guard checks it
+    between them too, so a run can end clear at every point with a dip in
+    between. Each run is therefore an exchange loop: the worst dip's location
+    joins the constrained points, with a dense patch around it, and the run
+    resumes from its projection, up to ``REPAIR_EXCHANGES`` times. Of the 138 SPXW book slices dropped for
+    butterfly arbitrage on 2026-09-27, 62 were exactly this
+    (docs/plans/surface-coverage.md, finding 9).
     """
     def objective(p: np.ndarray) -> float:
         r = residuals(p)
@@ -361,13 +537,28 @@ def _repair_fit(
     def objective_jac(p: np.ndarray) -> np.ndarray:
         return _svi_w_jac(ks, p).T @ residuals(p)
 
-    def constraint(p: np.ndarray) -> np.ndarray:
+    def guard_on(points: np.ndarray) -> NonlinearConstraint:
+        def constraint(p: np.ndarray) -> np.ndarray:
+            w0, b, rho, m, sigma = (float(v) for v in p)
+            a = w0 - b * sigma * math.sqrt(1.0 - rho * rho)
+            parts = [_g(points, a, b, rho, m, sigma)]
+            if w_floor is not None:
+                parts.append(_svi_w(cal_grid, a, b, rho, m, sigma) - w_floor)
+            return np.concatenate(parts)
+
+        # The margin applies to the butterfly rows only. Calendar rows need
+        # just w >= w_prev: broadcasting the margin to them would
+        # cumulatively lift total variance across chained repairs and can
+        # push an otherwise clean repair past the relative-RMS bound.
+        lb = np.full(len(points), G_REPAIR_MARGIN)
+        if w_floor is not None:
+            lb = np.concatenate([lb, np.zeros(len(cal_grid))])
+        return NonlinearConstraint(constraint, lb, np.inf, jac="3-point")
+
+    def dip(p: np.ndarray) -> float:
         w0, b, rho, m, sigma = (float(v) for v in p)
         a = w0 - b * sigma * math.sqrt(1.0 - rho * rho)
-        parts = [_g(grid, a, b, rho, m, sigma)]
-        if w_floor is not None:
-            parts.append(_svi_w(cal_grid, a, b, rho, m, sigma) - w_floor)
-        return np.concatenate(parts)
+        return _argmin_g_svi(grid, a, b, rho, m, sigma)[1]
 
     def feasible(p: np.ndarray) -> bool:
         if _min_g(grid, p) < -G_TOL:
@@ -379,24 +570,28 @@ def _repair_fit(
                 return False
         return True
 
-    # The margin applies to the butterfly rows only. Calendar rows need just
-    # w >= w_prev: broadcasting the margin to them would cumulatively lift
-    # total variance across chained repairs and can push an otherwise clean
-    # repair past the relative-RMS acceptance bound.
-    lb = np.full(len(grid), G_REPAIR_MARGIN)
-    if w_floor is not None:
-        lb = np.concatenate([lb, np.zeros(len(cal_grid))])
-    guard = NonlinearConstraint(constraint, lb, np.inf, jac="3-point")
     candidates: list[tuple[float, np.ndarray]] = []
     for start in (x0, seed):
-        res = minimize(
-            objective,
-            _project_to_feasible(start, ws, grid, lower, upper, w_floor, cal_grid),
-            method="SLSQP", jac=objective_jac, bounds=Bounds(lower, upper),
-            constraints=[guard], options={"ftol": 1e-12, "maxiter": 1000},
-        )
-        if feasible(res.x):
-            candidates.append((objective(res.x), res.x))
+        points = grid
+        p = start
+        for _ in range(REPAIR_EXCHANGES + 1):
+            res = minimize(
+                objective,
+                _project_to_feasible(p, ws, points, lower, upper, w_floor, cal_grid),
+                method="SLSQP", jac=objective_jac, bounds=Bounds(lower, upper),
+                constraints=[guard_on(points)], options={"ftol": 1e-12, "maxiter": 1000},
+            )
+            if feasible(res.x):
+                candidates.append((objective(res.x), res.x))
+                break
+            if _min_g(points, res.x) >= G_REPAIR_MARGIN / 2 and w_floor is not None:
+                break  # a calendar shortfall, which more butterfly points cannot fix
+            # A patch around the dip, not the one point: a narrow dip pinned
+            # at one point moves to the next gap, and the loop cycles.
+            k = dip(res.x)
+            patch = k + np.linspace(-K_STEP, K_STEP, 21)
+            points = np.union1d(points, patch[(patch >= grid[0]) & (patch <= grid[-1])])
+            p = res.x
     if not candidates:
         return None
     candidates.sort(key=lambda c: c[0])
@@ -419,6 +614,7 @@ class SliceFit:
 def fit_slice(
     ks: Any, ws: Any,
     floor: Any = None, cal_grid: np.ndarray | None = None,
+    w_floor: np.ndarray | None = None,
 ) -> SliceFit:
     """Raw-SVI fit of one expiry's total variances; loud on thin input.
 
@@ -427,11 +623,13 @@ def fit_slice(
     MIN_STRIKES points or a solver failure, and :class:`SurfaceArbitrageError`
     when even the arbitrage-constrained refit prices a negative density.
 
-    The build path chains slices in expiry order: ``floor`` is the previously
-    fitted slice (anything with the five SVI attributes -- a :class:`Slice`
-    or :class:`SliceFit`) and ``cal_grid`` the calendar guard's union grid,
-    so a slice whose fit dips below its predecessor's total variance is refit
-    under that constraint too. Standalone callers (no floor) get the
+    The build path chains slices in expiry order and passes ``cal_grid`` with
+    ``w_floor``, the total variance the slice must clear at each of those
+    points (:func:`_calendar_floor`: the earlier slices, where their data
+    overlaps this one's), so a slice whose fit dips below them is refit under
+    that constraint too. ``floor`` -- one slice with the five SVI attributes,
+    evaluated on ``cal_grid`` -- is the older single-predecessor form, kept
+    for callers that have exactly one. Standalone callers (no floor) get the
     butterfly guard only; the calendar backstop lives in :class:`Surface`
     either way.
     """
@@ -494,10 +692,12 @@ def fit_slice(
         raise SurfaceError(f"SVI fit did not converge: {fit.message}")
 
     x = fit.x
-    grid = _butterfly_grid(float(ks[0]), float(ks[-1]))
-    w_floor = None
-    if floor is not None and cal_grid is not None:
+    pad = _butterfly_pad(ws)
+    grid = _butterfly_grid(float(ks[0]), float(ks[-1]), pad)
+    if w_floor is None and floor is not None and cal_grid is not None:
         w_floor = _svi_w(cal_grid, floor.a, floor.b, floor.rho, floor.m, floor.sigma)
+    if cal_grid is None:
+        w_floor = None
 
     def violates(p: np.ndarray) -> bool:
         if _min_g(grid, p) < -G_TOL:
@@ -529,7 +729,7 @@ def fit_slice(
     rms = float(np.sqrt(np.mean(residuals(x) ** 2)))
     # The guard still raises after the fit -- the loud backstop for a slice
     # the constrained refit could not repair either.
-    min_g = _check_butterfly(a, b, rho, m, sigma, float(ks[0]), float(ks[-1]))
+    min_g = _check_butterfly(a, b, rho, m, sigma, float(ks[0]), float(ks[-1]), pad)
     return SliceFit(a=a, b=b, rho=rho, m=m, sigma=sigma, rms_error=rms, min_g=min_g)
 
 
@@ -569,6 +769,15 @@ class Slice:
         return math.sqrt(self.total_variance(math.log(K / self.forward)) / self.t_years)
 
 
+@dataclass(frozen=True)
+class DroppedSlice:
+    """An expiry the build could not fit, and why; the rest of the root still lands."""
+
+    expiration_date: str
+    dte: int
+    reason: str  # "ErrorType: message"
+
+
 class Surface:
     """The fitted slices of one (date, root): calendar-checked, evaluable.
 
@@ -576,31 +785,54 @@ class Surface:
     in T at every k across the fitted slices, else SurfaceArbitrageError.
     """
 
-    def __init__(self, d: date, underlying: str, slices: list[Slice]) -> None:
+    def __init__(
+        self, d: date, underlying: str, slices: list[Slice],
+        dropped: tuple[DroppedSlice, ...] = (),
+    ) -> None:
         if not slices:
             raise SurfaceError(f"no fitted slices for {underlying} on {d}")
         self.date = d.isoformat()
         self.underlying = underlying
         self.slices = sorted(slices, key=lambda s: s.t_years)
+        # The build's record of expiries it could not fit (fix C); a surface
+        # read back from the warehouse has none, since only kept slices land.
+        self.dropped = tuple(dropped)
         self._check_calendar()
 
     def _check_calendar(self) -> None:
-        lo = min(s.k_min for s in self.slices)
-        hi = max(s.k_max for s in self.slices)
-        grid = np.linspace(lo, hi, G_POINTS)
-        for earlier, later in zip(self.slices, self.slices[1:], strict=False):
-            diff = (
-                _svi_w(grid, later.a, later.b, later.rho, later.m, later.sigma)
-                - _svi_w(grid, earlier.a, earlier.b, earlier.rho, earlier.m, earlier.sigma)
+        """Total variance non-decreasing in T wherever two slices both have data.
+
+        Every pair is compared at the ``K_STEP`` lattice points in the overlap
+        of their fitted strike ranges (:func:`_overlap`) -- the same points the
+        fit-time floor constrained (:func:`_calendar_floor`); a pair with no
+        overlap has nothing to compare. No
+        promise is made in an extrapolated wing no price was observed in --
+        the trade decided in docs/plans/surface-coverage.md (decision 2).
+        Every pair, not only adjacent ones: on overlaps, a middle slice cannot
+        vouch for two slices that overlap where it does not.
+        """
+        for j, later in enumerate(self.slices):
+            for earlier in self.slices[:j]:
+                span = _overlap(earlier.k_min, earlier.k_max, later.k_min, later.k_max)
+                if span is None:
+                    continue
+                grid = _lattice(*span)
+                if grid.size:
+                    self._check_pair(earlier, later, grid)
+
+    def _check_pair(self, earlier: Slice, later: Slice, grid: np.ndarray) -> None:
+        diff = (
+            _svi_w(grid, later.a, later.b, later.rho, later.m, later.sigma)
+            - _svi_w(grid, earlier.a, earlier.b, earlier.rho, earlier.m, earlier.sigma)
+        )
+        worst = float(np.min(diff))
+        if worst < -CAL_TOL:
+            raise SurfaceArbitrageError(
+                f"calendar arbitrage: total variance drops {abs(worst):.6g} at "
+                f"k={float(grid[np.argmin(diff)]):.4f} between "
+                f"{earlier.expiration_date} (T={earlier.t_years:.4f}) and "
+                f"{later.expiration_date} (T={later.t_years:.4f})"
             )
-            worst = float(np.min(diff))
-            if worst < -CAL_TOL:
-                raise SurfaceArbitrageError(
-                    f"calendar arbitrage: total variance drops {abs(worst):.6g} at "
-                    f"k={float(grid[np.argmin(diff)]):.4f} between "
-                    f"{earlier.expiration_date} (T={earlier.t_years:.4f}) and "
-                    f"{later.expiration_date} (T={later.t_years:.4f})"
-                )
 
     def vol(self, K: float, T: float) -> float:
         """Implied vol at strike ``K`` and time ``T`` years.
@@ -738,19 +970,19 @@ def _fit_expiry(
     expiry: str, dte: int, T: float, F: float, r: float,
     ks: list[float], ws: list[float],
     stamp: str, blas_threads: int | None,
-    floor: Any = None, cal_grid: np.ndarray | None = None,
+    cal_grid: np.ndarray | None = None, w_floor: np.ndarray | None = None,
 ) -> Slice:
     """Fit one expiry's filtered OTM points and assemble its Slice.
 
-    ``floor``/``cal_grid`` chain the calendar constraint from the previously
-    fitted slice; see :func:`fit_slice`. ``stamp`` is ``name_for`` of the
+    ``cal_grid``/``w_floor`` carry the calendar constraint from the slices
+    already fitted; see :func:`_calendar_floor` and :func:`fit_slice`. ``stamp`` is ``name_for`` of the
     convention that produced ``T`` -- stamped at fit time so a later rebuild
     of the calendar cannot relabel the row. ``blas_threads`` is the thread
     pin the fit runs under -- stamped for the same reason: the optimum moves
     with the thread count, so the row is reproducible only if the count is
     recorded with it.
     """
-    fit = fit_slice(ks, ws, floor=floor, cal_grid=cal_grid)
+    fit = fit_slice(ks, ws, cal_grid=cal_grid, w_floor=w_floor)
     return Slice(
         expiration_date=expiry, dte=dte, t_years=T, forward=F,
         a=fit.a, b=fit.b, rho=fit.rho, m=fit.m, sigma=fit.sigma,
@@ -804,10 +1036,11 @@ def build_surfaces(
 
         # Two passes. The first computes each expiry's filtered OTM points,
         # which decides eligibility (>= MIN_STRIKES; thin expiries are skipped
-        # -- day bars hold only contracts that traded) and the union k-range
-        # the calendar guard checks. The second fits in expiry order with the
-        # calendar constraint chained off the previous slice on exactly that
-        # grid, so the Surface guard afterwards sees no crossing to raise on.
+        # -- day bars hold only contracts that traded). The second fits in
+        # expiry order, each slice floored by every slice already fitted
+        # wherever their strikes overlap (_calendar_floor) -- the same
+        # comparison the Surface guard makes afterwards, so it has no
+        # crossing to raise on.
         pending = []
         for fwd in forwards:
             expiry = date.fromisoformat(str(fwd["expiration_date"])[:10])
@@ -835,23 +1068,33 @@ def build_surfaces(
                 continue
             pending.append((fwd["expiration_date"], dte, T, F, r, ks, ws, stamp))
 
-        cal_grid = None
-        if pending:
-            cal_grid = np.linspace(
-                min(p[5][0] for p in pending),
-                max(p[5][-1] for p in pending),
-                G_POINTS,
-            )
-
+        # A slice that cannot be fit is dropped, not the root (fix C): one
+        # that fails to converge, fails the butterfly guard even after repair,
+        # or cannot clear the calendar floor of the slices already kept. The
+        # chain continues from the kept slices, so every slice that lands has
+        # passed the same guards as before. A root that keeps none raises.
         slices: list[Slice] = []
-        prev: Slice | None = None
+        dropped: list[DroppedSlice] = []
         for expiry, dte, T, F, r, ks, ws, stamp in pending:
-            sl = _fit_expiry(expiry, dte, T, F, r, ks, ws, stamp, blas,
-                             floor=prev, cal_grid=cal_grid)
-            prev = sl
+            cal = _calendar_floor(ks[0], ks[-1], slices)
+            try:
+                sl = _fit_expiry(expiry, dte, T, F, r, ks, ws, stamp, blas,
+                                 cal_grid=None if cal is None else cal[0],
+                                 w_floor=None if cal is None else cal[1])
+                if cal is not None:
+                    _check_floor(sl, *cal)
+            except SurfaceError as exc:
+                dropped.append(DroppedSlice(
+                    str(expiry)[:10], dte, f"{type(exc).__name__}: {exc}"))
+                continue
             slices.append(sl)
+        if pending and not slices:
+            raise SurfaceError(
+                f"every {root} slice on {d} was dropped: "
+                + "; ".join(f"{x.expiration_date} {x.reason}" for x in dropped)
+            )
         if slices:
-            surfaces[root] = Surface(d, root, slices)
+            surfaces[root] = Surface(d, root, slices, tuple(dropped))
     return surfaces
 
 
@@ -908,6 +1151,50 @@ def build_for_date(
         rate_fn=lambda _as_of, T: curve.at(T),
         daycount=daycount,
     )
+
+
+@dataclass(frozen=True)
+class SessionBuild:
+    """What one session's fit produced: the roots that landed, and why the rest did not."""
+
+    surfaces: dict[str, Surface]
+    failures: dict[str, str]  # root -> "ErrorType: message"
+
+
+def build_session(
+    settings: Settings, d: date, roots: tuple[str, ...] = SURFACE_ROOTS,
+    daycount: DayCount | None = None,
+) -> SessionBuild:
+    """Fit each root on its own, so one root's failure cannot discard another.
+
+    :func:`build_for_date` fits every root in one call and any failure escapes
+    it, which is how a session where SPXW fit cleanly was lost whenever SPX
+    did not -- 184 of the 347 sessions missing from the archive on 2026-09-26
+    (``docs/plans/surface-coverage.md``). Here a root that raises
+    :class:`SurfaceError` (arbitrage guards included) is recorded in
+    ``failures`` and the others still land. Day bars and the curve are read
+    once for the session. A root with no chain is in neither map, as before.
+
+    The scheduled job and the archive rebuild go through this.
+    :func:`build_for_date` stays strict, for callers that want the exception
+    itself (``scripts/diagnose_surface_coverage.py``).
+    """
+    if daycount is None:
+        daycount = hybrid_for(settings.data_root)
+    curve = load_curve(d, settings.data_root)
+    bars = read_day_bars(settings, d)
+    surfaces: dict[str, Surface] = {}
+    failures: dict[str, str] = {}
+    for root in roots:
+        try:
+            surfaces.update(build_surfaces(
+                bars, d, (root,), settings.data_root,
+                rate_fn=lambda _as_of, T: curve.at(T),
+                daycount=daycount,
+            ))
+        except SurfaceError as exc:
+            failures[root] = f"{type(exc).__name__}: {exc}"
+    return SessionBuild(surfaces, failures)
 
 
 def write_rows(settings: Settings, d: date, rows: list[dict[str, Any]]) -> Path:
@@ -968,12 +1255,29 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger):
     d = date.fromisoformat(args.date)
     roots = tuple(parse_underlyings(args.underlying, list(SURFACE_ROOTS)))
 
-    surfaces = build_for_date(settings, d, roots)
+    build = build_session(settings, d, roots)
+    surfaces = build.surfaces
+    for root, why in sorted(build.failures.items()):
+        logger.log("surface_root_failed", date=d.isoformat(), root=root, error=why)
+        print(f"FAIL  {root}  {why}", file=sys.stderr)
     if not surfaces:
+        failed = "; ".join(f"{r}: {w}" for r, w in sorted(build.failures.items()))
         raise SurfaceError(
-            f"no surface for {d}: no option_day_bars, or no expiry quoting at "
-            f"least {MIN_STRIKES} OTM strikes for roots {list(roots)}"
+            f"no surface for {d}: "
+            + (failed or f"no option_day_bars, or no expiry quoting at least "
+                         f"{MIN_STRIKES} OTM strikes for roots {list(roots)}")
         )
+
+    # coverage_audit reads these back: a dropped slice inside the book is a
+    # WARN on the session (docs/plans/surface-coverage.md, decision 3).
+    dropped = 0
+    for root in sorted(surfaces):
+        for x in surfaces[root].dropped:
+            dropped += 1
+            logger.log("surface_slice_dropped", date=d.isoformat(), root=root,
+                       expiry=x.expiration_date, dte=x.dte, reason=x.reason)
+            print(f"DROP  {root} {x.expiration_date} dte={x.dte}  {x.reason}",
+                  file=sys.stderr)
 
     rows = rows_from_surfaces(surfaces)
     by_root = {root: len(s.slices) for root, s in surfaces.items()}
@@ -990,7 +1294,10 @@ def _main_fn(args, settings: Settings, logger: JsonlLogger):
     if not args.dry_run:
         path = write_rows(settings, d, rows)
         print(f"PASS  wrote {path}", file=sys.stderr)
-    return {"rows": len(rows), "roots": len(surfaces)}
+    # A root that failed still lands the others and exits 0; coverage_audit
+    # is what makes a missing SPXW loud (FAIL) and a missing SPX visible (WARN).
+    return {"rows": len(rows), "roots": len(surfaces), "roots_failed": len(build.failures),
+            "slices_dropped": dropped}
 
 
 def main(argv: list[str] | None = None) -> int:

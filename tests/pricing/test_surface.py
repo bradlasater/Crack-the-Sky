@@ -23,6 +23,9 @@ from pricing import term_structure as ts
 from pricing.bsm import price
 from pricing.daycount import ACT_365
 
+# An arbitrary calendar-grid size for tests that build one by hand.
+CAL_POINTS = 201
+
 DAY = date(2026, 8, 28)
 R = 0.04
 F = 7700.0
@@ -225,6 +228,112 @@ def test_butterfly_violating_smile_is_repaired_not_rejected() -> None:
     assert fit.rms_error < 1e-3
 
 
+# The butterfly check reaches three of the slice's standard deviations past
+# its strikes, not a flat 1.0 in k (fix F).
+
+# A real SPXW slice: 2022-09-02's 7-day expiry, strikes k in [-0.270, 0.069].
+# Its unconstrained fit is arbitrage-free there and for several standard
+# deviations beyond, and fails only far out in the extrapolated wing.
+SHORT_REAL = {"a": -0.00211003, "b": 1.72961, "rho": -0.999, "m": -0.2991, "sigma": 0.0293}
+SHORT_REAL_STRIKES = (-0.270, 0.069)
+
+
+def test_butterfly_pad_scales_with_the_slice_and_is_capped() -> None:
+    short = [0.0002, 0.0004, 0.0009]      # a few days: sqrt(min w) ~ 0.014
+    long_ = [0.09, 0.11, 0.2]             # two years at ~20% vol
+    assert sf._butterfly_pad(short) == pytest.approx(3 * math.sqrt(0.0002))
+    assert sf._butterfly_pad(long_) == pytest.approx(3 * math.sqrt(0.09))
+    assert sf._butterfly_pad([0.5, 0.8]) == sf.G_PAD  # never further than before
+
+
+def test_arbitrage_only_far_past_a_short_slice_is_not_rejected() -> None:
+    p, (lo, hi) = SHORT_REAL, SHORT_REAL_STRIKES
+    with pytest.raises(sf.SurfaceArbitrageError, match="butterfly"):
+        sf._check_butterfly(*p.values(), lo, hi)  # the old flat pad
+    w_min = p["a"] + p["b"] * p["sigma"] * math.sqrt(1 - p["rho"] ** 2)
+    pad = sf._butterfly_pad([w_min])
+    assert pad < 0.1
+    assert sf._check_butterfly(*p.values(), lo, hi, pad) >= 0.0
+
+
+# The butterfly check is exact over its range, not only at grid points (fix H).
+
+# 2022-11-29's SPXW 2022-12-07 expiry as a fixed 201-point grid let it land:
+# negative density in a band ~0.01 wide at k ~ -0.176 to -0.166, straddling
+# the last quoted put, between two of that grid's points ~0.011 apart.
+STEPPED_OVER = {"a": 0.000397112, "b": 0.0209383, "rho": -0.999, "m": -0.0909669, "sigma": 0.0586978}
+STEPPED_OVER_STRIKES = (-0.1667022, 0.0594220)
+
+# 2023-08-08's SPXW 1-day expiry, as landed: a near-tangent dip to
+# g ~ -2.9e-6 inside its strikes that even a 0.001 lattice misses.
+TANGENT_DIP = {"a": -0.000269700, "b": 0.0105933, "rho": -0.668726, "m": -0.0237484, "sigma": 0.0380497}
+TANGENT_DIP_STRIKES = (-0.0748541, 0.0144500)
+
+
+def test_butterfly_grid_is_the_lattice_plus_its_ends() -> None:
+    grid = sf._butterfly_grid(-0.1234, 0.0567, pad=0.05)
+    assert grid[0] == pytest.approx(-0.1734) and grid[-1] == pytest.approx(0.1067)
+    assert float(np.max(np.diff(grid))) <= sf.K_STEP + 1e-12
+    assert np.allclose(grid[1:-1] / sf.K_STEP, np.round(grid[1:-1] / sf.K_STEP))
+
+
+def test_a_band_between_the_old_grid_points_is_rejected() -> None:
+    p, (lo, hi) = STEPPED_OVER, STEPPED_OVER_STRIKES
+    old_grid = np.linspace(lo - sf.G_PAD, hi + sf.G_PAD, 201)
+    assert float(np.min(sf._g(old_grid, *p.values()))) >= 0.0  # what let it land
+    with pytest.raises(sf.SurfaceArbitrageError, match="butterfly"):
+        sf._check_butterfly(*p.values(), lo, hi, sf.G_PAD)
+
+
+def test_a_dip_narrower_than_any_lattice_is_rejected() -> None:
+    p, (lo, hi) = TANGENT_DIP, TANGENT_DIP_STRIKES
+    fine = np.arange(math.ceil(lo / 0.001), math.floor(hi / 0.001) + 1) * 0.001
+    assert float(np.min(sf._g(fine, *p.values()))) >= 0.0
+    # The guard's own grid points miss it too; the refinement between them
+    # is what finds it.
+    grid = sf._butterfly_grid(lo, hi, pad=0.0)
+    assert float(np.min(sf._g(grid, *p.values()))) >= 0.0
+    with pytest.raises(sf.SurfaceArbitrageError, match="butterfly"):
+        sf._check_butterfly(*p.values(), lo, hi, pad=0.0)
+
+
+def test_the_refinement_agrees_with_a_dense_grid_on_a_clean_smile() -> None:
+    a, b, rho, m, sigma = 0.02, 0.1, -0.4, 0.01, 0.12
+    grid = sf._butterfly_grid(-0.3, 0.3, pad=0.1)
+    dense = np.linspace(grid[0], grid[-1], 200001)
+    exact = float(np.min(sf._g(dense, a, b, rho, m, sigma)))
+    assert sf._min_g_svi(grid, a, b, rho, m, sigma) == pytest.approx(exact, abs=1e-9)
+
+
+def _sharp_vertex_smile() -> tuple[np.ndarray, np.ndarray]:
+    """A short-dated smile with a sharp vertex and a deterministic ripple, the
+    shape whose constrained refit clears every lattice point with g dipping
+    below zero between two of them (finding 9). Chosen because it does so at
+    both 1 and 8 BLAS threads; the fit's outcome depends on the count."""
+    ks = np.linspace(-0.15, 0.08, 61)
+    p = {"a": -0.0002, "b": 0.0166, "rho": -0.66, "m": -0.06, "sigma": 0.02}
+    ws = np.array([_true_w(float(k), p) for k in ks])
+    return ks, ws * (1 + 0.02 * np.sin(np.arange(ks.size) * 1.7))
+
+
+def test_the_repair_constrains_a_dip_between_lattice_points(monkeypatch) -> None:
+    ks, ws = _sharp_vertex_smile()
+    monkeypatch.setattr(sf, "REPAIR_EXCHANGES", 0)
+    with pytest.raises(sf.SurfaceArbitrageError, match="butterfly"):
+        sf.fit_slice(ks, ws)
+    monkeypatch.undo()
+    fit = sf.fit_slice(ks, ws)
+    assert fit.min_g >= -sf.G_TOL
+    assert fit.rms_error <= sf.REPAIR_MAX_REL_RMS * float(np.mean(ws))
+    assert fit == sf.fit_slice(ks, ws)  # deterministic
+
+
+def test_arbitrage_within_the_strikes_is_still_rejected() -> None:
+    """Narrowing the pad changes nothing inside the data."""
+    with pytest.raises(sf.SurfaceArbitrageError, match=r"strikes \[-0.600, 0.600\]"):
+        sf._check_butterfly(*BUTTERFLY_BAD.values(), -0.6, 0.6, pad=0.01)
+
+
 def test_butterfly_violating_chain_is_repaired_end_to_end() -> None:
     bars = _chain_bars(
         NEAR, T_NEAR, lambda k: math.sqrt(_true_w(math.log(k / F), BUTTERFLY_BAD) / T_NEAR))
@@ -292,11 +401,135 @@ def test_svi_w_jac_matches_finite_differences() -> None:
 
 
 def test_calendar_arbitrage_is_detected() -> None:
-    """The near slice richer in total variance than the far one is free money."""
+    """The near slice richer in total variance than the far one is free money.
+
+    The Surface guard rejects the pair; the build, fitting in expiry order,
+    drops the far slice that cannot clear the near one's floor (fix C).
+    """
     bars = (_chain_bars(NEAR, T_NEAR, lambda k: 0.30)
             + _chain_bars(FAR, T_FAR, lambda k: 0.10))
+    near = sf.build_surfaces(_chain_bars(NEAR, T_NEAR, lambda k: 0.30), DAY, roots=("SPXW",),
+                             rate_fn=_flat_rate, daycount=ACT_365)["SPXW"].slices[0]
+    far = sf.build_surfaces(_chain_bars(FAR, T_FAR, lambda k: 0.10), DAY, roots=("SPXW",),
+                            rate_fn=_flat_rate, daycount=ACT_365)["SPXW"].slices[0]
     with pytest.raises(sf.SurfaceArbitrageError, match="calendar"):
-        sf.build_surfaces(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)
+        sf.Surface(DAY, "SPXW", [near, far])
+
+    surf = sf.build_surfaces(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)["SPXW"]
+    assert [s.expiration_date for s in surf.slices] == [NEAR.isoformat()]
+    [dropped] = surf.dropped
+    assert dropped.expiration_date == FAR.isoformat()
+    assert dropped.dte == (FAR - DAY).days
+    assert dropped.reason.startswith("SurfaceArbitrageError: calendar arbitrage")
+
+
+# A slice that cannot be fit is dropped, not the root (fix C).
+
+def _notched(expiry: date, t: float) -> list[dict]:
+    """A chain with one quoted strike's vol halved: no SVI curve converges on it."""
+    return _chain_bars(expiry, t, lambda K: _true_vol(K, t) * (0.5 if K == 7725 else 1.0))
+
+
+def _clean(expiry: date, t: float) -> list[dict]:
+    return _chain_bars(expiry, t, lambda K: _true_vol(K, t))
+
+
+def test_a_slice_that_cannot_be_fit_is_dropped_not_the_root() -> None:
+    bars = _clean(NEAR, T_NEAR) + _notched(MID, T_MID) + _clean(FAR, T_FAR)
+    surf = sf.build_surfaces(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)["SPXW"]
+    assert [s.expiration_date for s in surf.slices] == [NEAR.isoformat(), FAR.isoformat()]
+    [dropped] = surf.dropped
+    assert (dropped.expiration_date, dropped.dte) == (MID.isoformat(), (MID - DAY).days)
+    assert dropped.reason.startswith("SurfaceError: SVI fit did not converge")
+    # The chain continues from the kept slices: the far slice is floored by
+    # the near one alone, exactly as if the middle expiry had never quoted.
+    without = sf.build_surfaces(_clean(NEAR, T_NEAR) + _clean(FAR, T_FAR), DAY, roots=("SPXW",),
+                                rate_fn=_flat_rate, daycount=ACT_365)["SPXW"]
+    assert surf.slices == without.slices
+    assert without.dropped == ()
+
+
+def test_a_root_that_keeps_no_slice_still_raises() -> None:
+    with pytest.raises(sf.SurfaceError, match=r"every SPXW slice on 2026-08-28 was dropped: 2026-10-30 "):
+        sf.build_surfaces(_notched(MID, T_MID), DAY, roots=("SPXW",),
+                          rate_fn=_flat_rate, daycount=ACT_365)
+
+
+def test_a_surface_read_back_has_no_dropped_slices() -> None:
+    surf = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate,
+                             daycount=ACT_365)["SPXW"]
+    assert sf.Surface.from_rows(sf.rows_from_surfaces({"SPXW": surf})).dropped == ()
+
+
+# Calendar checks compare two slices only where both have data (fix B).
+
+def _ranged(expiry: str, sessions: int, k_min: float, k_max: float, **params: float) -> sf.Slice:
+    """A slice from known SVI parameters, fit (notionally) to ``[k_min, k_max]``."""
+    p = {**PARAMS, **params}
+    return sf.Slice(
+        expiration_date=expiry, dte=sessions, t_years=sessions / 252, forward=7700.0,
+        a=p["a"], b=p["b"], rho=p["rho"], m=p["m"], sigma=p["sigma"],
+        k_min=k_min, k_max=k_max, n_strikes=21, rms_error=0.0, min_g=0.5,
+        rate=R, daycount="bus/252",
+    )
+
+
+def test_a_crossing_outside_the_overlap_is_not_arbitrage() -> None:
+    """A short slice's steep left wing crosses a longer, flatter one far past
+    both slices' strikes. Nothing was priced there, so nothing is rejected."""
+    near = _ranged("2026-09-02", 3, -0.10, 0.05, a=0.0002, b=0.004, rho=-0.9, m=0.0, sigma=0.02)
+    far = _ranged("2026-09-11", 10, -0.10, 0.05, a=0.0012, b=0.003, rho=0.0, m=0.0, sigma=0.05)
+    inside = np.linspace(-0.10, 0.05, 51)
+    assert all(far.total_variance(k) > near.total_variance(k) for k in inside)
+    k = -1.0  # far outside [-0.10, 0.05]
+    assert near.total_variance(k) > far.total_variance(k)  # the wing crossing is real
+    assert len(sf.Surface(DAY, "SPXW", [near, far])) == 2
+
+
+def test_a_crossing_inside_the_overlap_is_still_rejected() -> None:
+    near = _ranged("2026-09-02", 3, -0.10, 0.05, a=0.0030)
+    far = _ranged("2026-09-11", 10, -0.10, 0.05, a=0.0008)
+    with pytest.raises(sf.SurfaceArbitrageError, match="calendar arbitrage"):
+        sf.Surface(DAY, "SPXW", [near, far])
+
+
+def test_disjoint_slices_have_nothing_to_compare() -> None:
+    near = _ranged("2026-09-02", 3, -0.10, -0.05, a=0.0030)
+    far = _ranged("2026-09-11", 10, 0.00, 0.05, a=0.0008)
+    assert len(sf.Surface(DAY, "SPXW", [near, far])) == 2
+
+
+def test_non_adjacent_slices_are_compared_where_they_overlap() -> None:
+    """The middle slice covers none of the region where the outer two cross,
+    so an adjacent-only check would pass them."""
+    first = _ranged("2026-09-02", 3, -0.30, -0.20, a=0.0030)
+    middle = _ranged("2026-09-04", 5, 0.00, 0.05, a=0.0040)
+    last = _ranged("2026-09-11", 10, -0.30, -0.20, a=0.0008)
+    with pytest.raises(sf.SurfaceArbitrageError, match="2026-09-02 .* and 2026-09-11"):
+        sf.Surface(DAY, "SPXW", [first, middle, last])
+
+
+def test_floor_and_guard_share_one_lattice() -> None:
+    """The fit constrains and the guard checks the same points, bit for bit;
+    two different samplings found hairline crossings between each other's
+    points on 1,106 landed root-surfaces."""
+    a = sf._lattice(-0.1234, 0.0567)
+    b = sf._lattice(-0.3, 0.2)
+    shared = np.intersect1d(a, b)
+    assert shared.size == a.size  # every point of the narrower range is in the wider
+    assert np.all(np.round(a / sf.K_STEP) * sf.K_STEP == a)
+
+
+def test_calendar_floor_is_the_highest_earlier_slice_where_it_has_data() -> None:
+    low = _ranged("2026-09-02", 3, -0.10, 0.00, a=0.0010)
+    high = _ranged("2026-09-04", 5, -0.05, 0.10, a=0.0020)
+    grid, floor = sf._calendar_floor(-0.20, 0.20, [low, high])
+    assert grid.min() >= -0.10 and grid.max() <= 0.10  # uncovered points dropped
+    both = (grid >= -0.05) & (grid <= 0.00)
+    assert np.allclose(floor[both], [high.total_variance(k) for k in grid[both]])
+    only_low = grid < -0.05
+    assert np.allclose(floor[only_low], [low.total_variance(k) for k in grid[only_low]])
+    assert sf._calendar_floor(0.5, 0.6, [low, high]) is None
 
 
 def test_calendar_wing_crossing_is_repaired_not_rejected() -> None:
@@ -311,7 +544,7 @@ def test_calendar_wing_crossing_is_repaired_not_rejected() -> None:
     # cross in the wing only, the real-session pattern.
     floor = sf.SliceFit(a=0.0001, b=0.035, rho=-0.4, m=0.01, sigma=0.08,
                         rms_error=0.0, min_g=1.0)
-    cal_grid = np.linspace(float(ks[0]), float(ks[-1]), sf.G_POINTS)
+    cal_grid = np.linspace(float(ks[0]), float(ks[-1]), CAL_POINTS)
     floor_w = sf._svi_w(cal_grid, floor.a, floor.b, floor.rho, floor.m, floor.sigma)
     base_w = sf._svi_w(cal_grid, base.a, base.b, base.rho, base.m, base.sigma)
     assert float(np.min(base_w - floor_w)) < 0.0  # the fixture must cross
@@ -327,8 +560,10 @@ def test_build_surfaces_chains_the_calendar_repair() -> None:
     """Copilot review on #49: cover the two-pass build wiring itself.
 
     A later slice whose unconstrained fit dips below the earlier slice must
-    be repaired inside build_surfaces -- forwarding the predecessor, the
-    union grid, and the expiry ordering -- not just inside fit_slice.
+    be repaired inside build_surfaces -- forwarding the earlier slices' floor
+    on the shared lattice, and the expiry ordering -- not just inside
+    fit_slice. Clean means clean at the lattice points where both slices
+    have data: that is what the fit constrains and the Surface guard checks.
     """
     delta = 2e-4
     lower_smile = {**PARAMS, "a": PARAMS["a"] - delta}
@@ -338,8 +573,8 @@ def test_build_surfaces_chains_the_calendar_repair() -> None:
     surf = sf.build_surfaces(bars, DAY, roots=("SPXW",), rate_fn=_flat_rate, daycount=ACT_365)["SPXW"]
     assert len(surf.slices) == 2
     near, far = surf.slices
-    grid = np.linspace(min(near.k_min, far.k_min), max(near.k_max, far.k_max),
-                       sf.G_POINTS)
+    grid = sf._lattice(*sf._overlap(near.k_min, near.k_max, far.k_min, far.k_max))
+    assert grid.size > 10
     near_w = sf._svi_w(grid, near.a, near.b, near.rho, near.m, near.sigma)
     far_w = sf._svi_w(grid, far.a, far.b, far.rho, far.m, far.sigma)
     assert float(np.min(far_w - near_w)) >= -sf.CAL_TOL  # calendar-clean
@@ -368,10 +603,10 @@ def test_flat_fallback_anchor_clears_the_floor_by_the_margin() -> None:
     ks = np.linspace(-0.05, 0.05, 21)
     ws = np.array([_true_w(float(k)) for k in ks])
     grid = sf._butterfly_grid(float(ks[0]), float(ks[-1]))
-    cal_grid = np.linspace(float(ks[0]), float(ks[-1]), sf.G_POINTS)
+    cal_grid = np.linspace(float(ks[0]), float(ks[-1]), CAL_POINTS)
     # A floor far above the data: every segment point short of the flat
     # anchor is infeasible, so the anchor itself is what must qualify.
-    w_floor = np.full(sf.G_POINTS, 0.5)
+    w_floor = np.full(CAL_POINTS, 0.5)
     lower = np.array([0.0, 0.0, -0.999, -3.0, 1e-4])
     upper = np.array([10.0, 10.0, 0.999, 3.0, 5.0])
     p0 = np.array([max(float(ws.min()), 1e-8), 0.02, -0.4, 0.01, 0.12])
@@ -389,8 +624,8 @@ def test_flat_fallback_raises_when_no_feasible_seed_exists() -> None:
     ks = np.linspace(-0.05, 0.05, 21)
     ws = np.array([_true_w(float(k)) for k in ks])
     grid = sf._butterfly_grid(float(ks[0]), float(ks[-1]))
-    cal_grid = np.linspace(float(ks[0]), float(ks[-1]), sf.G_POINTS)
-    w_floor = np.full(sf.G_POINTS, 20.0)  # past the w0 box bound (10.0)
+    cal_grid = np.linspace(float(ks[0]), float(ks[-1]), CAL_POINTS)
+    w_floor = np.full(CAL_POINTS, 20.0)  # past the w0 box bound (10.0)
     lower = np.array([0.0, 0.0, -0.999, -3.0, 1e-4])
     upper = np.array([10.0, 10.0, 0.999, 3.0, 5.0])
     p0 = np.array([max(float(ws.min()), 1e-8), 0.02, -0.4, 0.01, 0.12])
@@ -532,6 +767,117 @@ def test_from_rows_refuses_an_american_root() -> None:
     rows = [dict(sf.rows_from_surfaces({"SPXW": surf})[0], underlying="SPY")]
     with pytest.raises(sf.SurfaceError, match="European index roots"):
         sf.Surface.from_rows(rows)
+
+
+# ---------------------------------------------------------------------------
+# One root's failure must not discard another (surface-coverage step 2)
+# ---------------------------------------------------------------------------
+
+class _FlatCurve:
+    def at(self, _T: float) -> float:
+        return R
+
+
+def _session_inputs(monkeypatch, fail: tuple[str, ...]) -> None:  # noqa: ANN001
+    """Two clean chains, with the named roots forced to raise in the fit."""
+    bars = _svi_bars() + _chain_bars(NEAR, T_NEAR, lambda k: _true_vol(k, T_NEAR), root="SPX")
+    monkeypatch.setattr(sf, "read_day_bars", lambda _s, _d: bars)
+    monkeypatch.setattr(sf, "load_curve", lambda _d, _root=None: _FlatCurve())
+    real = sf.build_surfaces
+
+    def build(bars, d, roots, *args, **kwargs):  # noqa: ANN001, ANN202
+        if set(roots) & set(fail):
+            raise sf.SurfaceArbitrageError(f"calendar arbitrage in {roots}")
+        return real(bars, d, roots, *args, **kwargs)
+
+    monkeypatch.setattr(sf, "build_surfaces", build)
+
+
+def _settings(tmp_path):  # noqa: ANN001, ANN202
+    from ingest.common.config import Settings
+
+    return Settings(massive_api_key="k", data_root=tmp_path, log_root=tmp_path / "logs")
+
+
+def test_session_lands_spxw_when_spx_fails(tmp_path, monkeypatch) -> None:
+    """184 of the 347 missing sessions were exactly this: SPXW fit, SPX did
+    not, and the exception discarded both."""
+    _session_inputs(monkeypatch, fail=("SPX",))
+    got = sf.build_session(_settings(tmp_path), DAY, daycount=ACT_365)
+    assert set(got.surfaces) == {"SPXW"}
+    assert set(got.failures) == {"SPX"}
+    assert got.failures["SPX"].startswith("SurfaceArbitrageError: ")
+    # The root that landed is the same fit it would be on its own.
+    alone = sf.build_surfaces(_svi_bars(), DAY, roots=("SPXW",), rate_fn=_flat_rate,
+                              daycount=ACT_365)["SPXW"]
+    assert got.surfaces["SPXW"].slices == alone.slices
+
+
+def test_session_reports_every_root_when_none_fits(tmp_path, monkeypatch) -> None:
+    _session_inputs(monkeypatch, fail=("SPX", "SPXW"))
+    got = sf.build_session(_settings(tmp_path), DAY, daycount=ACT_365)
+    assert got.surfaces == {}
+    assert set(got.failures) == {"SPX", "SPXW"}
+
+
+def test_build_for_date_stays_strict(tmp_path, monkeypatch) -> None:
+    """The diagnostic relies on the exception itself, so the strict path stays."""
+    _session_inputs(monkeypatch, fail=("SPX",))
+    with pytest.raises(sf.SurfaceArbitrageError):
+        sf.build_for_date(_settings(tmp_path), DAY, daycount=ACT_365)
+
+
+def _job_args(**kw):  # noqa: ANN003, ANN202
+    import argparse
+
+    return argparse.Namespace(**{"date": DAY.isoformat(), "underlying": None,
+                                 "dry_run": False, **kw})
+
+
+def test_job_writes_the_root_that_fit_and_logs_the_other(tmp_path, monkeypatch) -> None:
+    from ingest.common.logging_utils import JsonlLogger
+
+    _session_inputs(monkeypatch, fail=("SPX",))
+    monkeypatch.setattr(sf, "hybrid_for", lambda _root=None: ACT_365)
+    logger = JsonlLogger(path=None, echo=False)
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(logger, "log", lambda e, **f: events.append((e, f)) or {})
+    summary = sf._main_fn(_job_args(), _settings(tmp_path), logger)
+    assert summary["roots"] == 1 and summary["roots_failed"] == 1
+    assert sf.load_surface(_settings(tmp_path), DAY, "SPXW")
+    with pytest.raises(sf.SurfaceError, match="no vol_surface rows for SPX"):
+        sf.load_surface(_settings(tmp_path), DAY, "SPX")
+    failed = [f for e, f in events if e == "surface_root_failed"]
+    assert [f["root"] for f in failed] == ["SPX"]
+
+
+def test_job_logs_each_dropped_slice(tmp_path, monkeypatch) -> None:
+    """coverage_audit reads these events back (decision 3)."""
+    from ingest.common.logging_utils import JsonlLogger
+
+    bars = _clean(NEAR, T_NEAR) + _notched(MID, T_MID)
+    monkeypatch.setattr(sf, "read_day_bars", lambda _s, _d: bars)
+    monkeypatch.setattr(sf, "load_curve", lambda _d, _root=None: _FlatCurve())
+    monkeypatch.setattr(sf, "hybrid_for", lambda _root=None: ACT_365)
+    logger = JsonlLogger(path=None, echo=False)
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(logger, "log", lambda e, **f: events.append((e, f)) or {})
+    summary = sf._main_fn(_job_args(underlying="SPXW"), _settings(tmp_path), logger)
+    assert summary["slices_dropped"] == 1
+    [drop] = [f for e, f in events if e == "surface_slice_dropped"]
+    assert (drop["root"], drop["expiry"], drop["dte"]) == ("SPXW", MID.isoformat(), (MID - DAY).days)
+    assert drop["reason"].startswith("SurfaceError: ")
+    assert [s.expiration_date for s in sf.load_surface(_settings(tmp_path), DAY, "SPXW").slices] \
+        == [NEAR.isoformat()]
+
+
+def test_job_fails_naming_each_root_when_none_fits(tmp_path, monkeypatch) -> None:
+    from ingest.common.logging_utils import JsonlLogger
+
+    _session_inputs(monkeypatch, fail=("SPX", "SPXW"))
+    monkeypatch.setattr(sf, "hybrid_for", lambda _root=None: ACT_365)
+    with pytest.raises(sf.SurfaceError, match=r"SPX: .*SPXW: "):
+        sf._main_fn(_job_args(), _settings(tmp_path), JsonlLogger(path=None, echo=False))
 
 
 def test_load_surface_reads_what_write_rows_landed(tmp_path) -> None:

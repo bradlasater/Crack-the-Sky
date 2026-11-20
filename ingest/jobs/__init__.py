@@ -458,8 +458,13 @@ def compute_watchlist(
     liquidity = _liquidity_index(snapshots) if require_liquidity else {}
     spy_ref = latest_spy_price(settings, run_date)
 
+    # Contracts are listed by underlying, and the vendor files non-standard
+    # roots under ours (SPXO under SPX, B1SPY under SPY, since 2026-11-09).
+    # Grouping by underlying alone admitted them; only OPTION_ROOTS are polled.
     groups: dict[str, list[dict[str, Any]]] = {}
     for rec in contracts:
+        if not keep_ticker(str(rec.get("ticker") or "")):
+            continue
         groups.setdefault(underlying_root(rec.get("underlying_ticker") or ""), []).append(rec)
 
     lo_d = run_date + timedelta(days=dte_min)

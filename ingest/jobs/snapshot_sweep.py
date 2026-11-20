@@ -43,7 +43,13 @@ from ingest.common.config import Settings
 from ingest.common.http_client import MassiveClient
 from ingest.common.logging_utils import JsonlLogger
 from ingest.common.rates import RateCurveError, load_curve
-from ingest.jobs import forward_from_parity, parse_underlyings, run_date_from_args, strip_flag
+from ingest.jobs import (
+    forward_from_parity,
+    keep_ticker,
+    parse_underlyings,
+    run_date_from_args,
+    strip_flag,
+)
 
 JOB = "snapshot_sweep"
 DEFAULT_UNDERLYINGS = ["SPY", "I:SPX", "VIX"]
@@ -95,7 +101,23 @@ def _sweep_underlying(
     finally:
         client.get = orig_get  # type: ignore[method-assign]
 
-    records = [schemas.flatten_snapshot(r) for r in raw_results]
+    # The vendor lists every root it files under an underlying in that
+    # underlying's chain: since 2026-11-09 that includes SPXO under I:SPX and
+    # B1SPY under SPY. Only OPTION_ROOTS belong in the clean dataset (and in
+    # the parity forwards, which would otherwise mix a second series into the
+    # same strikes). Raw keeps the vendor's full response.
+    records = []
+    foreign: dict[str, int] = {}
+    for rec in (schemas.flatten_snapshot(r) for r in raw_results):
+        if keep_ticker(rec.get("ticker") or ""):
+            records.append(rec)
+        else:
+            root = str(rec.get("ticker") or "")[2:6] or "?"
+            foreign[root] = foreign.get(root, 0) + 1
+    if foreign:
+        with log_lock:
+            logger.log("foreign_roots_dropped", underlying=underlying,
+                       rows=sum(foreign.values()), by_prefix=foreign)
 
     # Parity gives C - P = e^{-rT}(F - K), so the spread must be undiscounted
     # to get the forward. Without a curve the r=0 approximation is used and

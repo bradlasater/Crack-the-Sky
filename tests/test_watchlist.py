@@ -391,3 +391,31 @@ def test_zero_rate_makes_both_forms_agree() -> None:
     b = forward_from_parity(rows, rate_for_expiry=lambda _d: 0.0,
                             asof_date=date(2026, 9, 1))[0]["forward"]
     assert a == pytest.approx(b)
+
+
+def test_watchlist_excludes_roots_listed_under_our_underlyings(tmp_path: Path) -> None:
+    """Since 2026-11-09 the vendor lists SPXO under SPX and B1SPY under SPY.
+
+    Grouping by underlying alone put both on the watchlist, and
+    trades_watchlist then landed SPXO prints in option_trades, failing the
+    coverage audit's ticker_purity check every day.
+    """
+    settings = _settings(tmp_path)
+    exp = RUN_DATE + timedelta(days=14)
+    contracts, snaps = [], []
+    for root, und, spot, strike in (("SPY", "SPY", SPY_SPOT, 770.0),
+                                    ("B1SPY", "SPY", SPY_SPOT, 770.0),
+                                    ("SPXW", "SPX", SPX_SPOT, 7700.0),
+                                    ("SPXO", "SPX", SPX_SPOT, 7700.0)):
+        for k in ("call", "put"):
+            contracts.append(_contract(root, und, exp, k, strike))
+            snaps.append(_snapshot(root, und, exp, k, strike, spot, volume=25, oi=900))
+    landing.write_clean("contracts", RUN_DATE, contracts,
+                        job="contracts_sync", data_root=tmp_path)
+    landing.write_clean("option_snapshots", RUN_DATE, snaps,
+                        job="snapshot_sweep", data_root=tmp_path)
+
+    tickers = [r["ticker"] for r in compute_watchlist(settings, RUN_DATE)]
+    assert tickers, "the standard roots must still be selected"
+    assert all(keep_ticker(t) for t in tickers), tickers
+    assert {ticker_root(t) for t in tickers} == {"SPY", "SPXW"}

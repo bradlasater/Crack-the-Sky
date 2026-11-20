@@ -276,3 +276,54 @@ def test_a_sweep_with_no_underlyings_does_not_ping(
     resets the grace window and masks a real outage for its duration."""
     _summary, rec = _run_with_pings(tmp_path, monkeypatch, set(), underlying=",")
     assert rec.slugs() == []
+
+
+# ---------------------------------------------------------------------------
+# Root purity
+# ---------------------------------------------------------------------------
+
+def _with_foreign_roots() -> list[dict]:
+    """The fixture chain plus the two roots the vendor began listing 2026-11-09."""
+    import copy
+
+    base = _results()
+    extra = []
+    for ticker in ("O:SPXO261216P07300000", "O:B1SPY261120C00710000"):
+        rec = copy.deepcopy(base[0])
+        rec["details"]["ticker"] = ticker
+        extra.append(rec)
+    return base + extra
+
+
+def test_foreign_roots_are_dropped_from_clean_snapshots(tmp_path: Path, monkeypatch) -> None:
+    import pyarrow.parquet as pq
+
+    class _Client:
+        def __init__(self, *a, **k) -> None:
+            pass
+
+        def get(self, path, params=None):
+            raise AssertionError("paginate is stubbed")
+
+        def paginate(self, path, params=None, limit=250):
+            return iter(_with_foreign_roots())
+
+    monkeypatch.setattr(job, "MassiveClient", _Client)
+    settings = _settings(tmp_path)
+    log_path = tmp_path / "logs" / "sweep.jsonl"
+    logger = JsonlLogger(path=log_path, echo=False)
+    try:
+        summary = job._main_fn(_args(underlying="SPY"), settings, logger, False, False)
+    finally:
+        logger.close()
+
+    part = tmp_path / "clean" / "option_snapshots" / f"dt={RUN_DATE}"
+    tickers = [t for f in part.iterdir()
+               for t in pq.read_table(f, columns=["ticker"]).column("ticker").to_pylist()]
+    assert len(tickers) == len(_results())
+    assert not any(t.startswith(("O:SPXO", "O:B1SPY")) for t in tickers)
+    assert summary["rows"] == len(_results())
+
+    events = [json.loads(line) for line in log_path.read_text().splitlines()]
+    dropped = [e for e in events if e["event"] == "foreign_roots_dropped"]
+    assert dropped and dropped[0]["rows"] == 2
